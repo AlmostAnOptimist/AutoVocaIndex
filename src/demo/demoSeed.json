@@ -1,0 +1,1474 @@
+{
+  "exportedAt": "2026-07-16T14:40:25.199Z",
+  "sourceTitle": "세종 5A",
+  "source": {
+    "id": "source_세종_5a",
+    "data": {
+      "title": "세종 5A",
+      "type": "Grammar",
+      "difficulty": "B1",
+      "comprehension": "Yes",
+      "watchStatus": "",
+      "currentlyOn": "No",
+      "tag": "Text",
+      "genre": "",
+      "seasons": null,
+      "episodes": "",
+      "done": 4,
+      "total": 10,
+      "progress": "⎯⎯⎯⎯● 40%",
+      "skip": "n/a",
+      "miningStatus": "Not Applicable",
+      "createdAt": "2026-03-30T17:43:29.236Z",
+      "levelMin": "B1",
+      "subtype": "Textbook",
+      "studyIntent": "grammar",
+      "series": "세종학당 한국어",
+      "origin": "KSI"
+    }
+  },
+  "sections": [
+    {
+      "id": "section_1224_세종_5a_1과",
+      "data": {
+        "topic": "직업 선택의 기준",
+        "status": "Done",
+        "priority": "Unset",
+        "difficulty": "B1",
+        "grammarNotes": "",
+        "grammarComparison": "",
+        "origin": "세종학당 한국어",
+        "notes": "",
+        "tags": "",
+        "date": "Aug 04",
+        "resourceId": "source_세종_5a",
+        "resourceRaw": "세종 5A",
+        "createdAt": "2026-03-30T17:43:29.381Z",
+        "linkedNoteIds": [
+          "zBy6IaRWzrbcUplQufrH"
+        ],
+        "glossaryTermIds": [
+          "grammar_336"
+        ],
+        "content": "1과"
+      }
+    },
+    {
+      "id": "section_1223_세종_5a_2과",
+      "data": {
+        "topic": "일과 삶의 균형",
+        "status": "Done",
+        "priority": "Unset",
+        "difficulty": "B1",
+        "grammarNotes": "",
+        "grammarComparison": "",
+        "origin": "세종학당 한국어",
+        "notes": "",
+        "tags": "",
+        "date": "Sep 01",
+        "resourceId": "source_세종_5a",
+        "resourceRaw": "세종 5A",
+        "createdAt": "2026-03-30T17:43:29.381Z",
+        "glossaryTermIds": [
+          "grammar_298"
+        ],
+        "content": "2과"
+      }
+    }
+  ],
+  "wordInputs": [
+    {
+      "id": "fd61d2f8-f59a-4379-923c-44e83e595200",
+      "data": {
+        "def2": "stability",
+        "uid": "fd61d2f8-f59a-4379-923c-44e83e595200",
+        "lastUncheckReason": "",
+        "uploaded": true,
+        "lastUncheckDate": "",
+        "section": "1",
+        "def1": "1. stability; equilibrium: A consistent state kept, without being changed or shaken.\n\n2. stabilization: The act of having one's body and mind comfortable and quiet.\n\n3. stabilization: The act of having one's body and mind comfortable and quiet in order to heal a disease.\n\n[안정되다 · 동사]\n\n4. be stable; be steady; be settled: For a certain state to be maintained without being changed or shaken.\n\n[안정시키다 · 동사]\n\n5. stabilize; settle; equilibrate: To make a certain state maintained without being changed or shaken.\n\n[안정시키다 · 동사]\n\n6. calm down; stabilize: To have one's body and mind comfortable and quiet.\n\n[안정하다 · 동사]\n\n7. be stable; be steady; be settled: To maintain a certain state without being changed or shaken.\n\n[안정하다 · 동사]\n\n8. calm down; stabilize: To have one's body and mind comfortable and quiet.\n\n[안정감 · 명사]\n\n9. sense of stability: One's body or mind feeling comfortable and peaceful.\n\n[안정권 · 명사]\n\n10. range of success: The state of being in the range where one can be certain of success in doing something.\n\n[안정기 · 명사]\n\n11. stable period; plateau: The period in which things remain in a certain state, not changed or shaken.",
+        "source": "세종 5A",
+        "ts": "2026-04-14T05:57:28.217Z",
+        "lemma": "안정",
+        "input": "안정적인",
+        "skipUpload": false
+      }
+    },
+    {
+      "id": "55b2beee-2a84-424d-bfd3-a4fb041c97c8",
+      "data": {
+        "uploaded": true,
+        "lastUncheckReason": "",
+        "uid": "55b2beee-2a84-424d-bfd3-a4fb041c97c8",
+        "def2": "retirement age",
+        "lastUncheckDate": "",
+        "source": "세종 5A",
+        "def1": "1. retirement age: An age at which a worker is required to retire.\n\n[정년퇴직 · 명사]\n\n2. regular retirement: An act of resigning from one's job, at one's retirement age.\n\n[정년퇴직하다 · 동사]\n\n3. retire: To resign from one's job, at one's retirement age.",
+        "section": "1",
+        "skipUpload": false,
+        "input": "정년",
+        "lemma": "정년",
+        "ts": "2026-04-14T05:59:32.686Z"
+      }
+    },
+    {
+      "id": "f34643d3-dab8-461d-9aa6-76451ad5550b",
+      "data": {
+        "source": "세종 5A",
+        "section": "1",
+        "def1": "1. guarantee: To assure someone that there will not be a problem, or protect someone so that he/she will not meet a problem.\n\n-----\n\n1. be guaranteed: To be assured that there will not be a problem, or to feel protected so that one will not meet a problem.",
+        "input": "보장되는",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:03:53.793Z",
+        "skipUpload": false,
+        "lemma": "보장하다 / 보장되다",
+        "def2": "1.[명사] guarantee(d) (of/that), [동사] to guarantee, assure; (품질 등을) vouch for; (약속하다) promise\n\n(not 장담하다)",
+        "lastUncheckDate": "",
+        "uid": "f34643d3-dab8-461d-9aa6-76451ad5550b",
+        "uploaded": true
+      }
+    },
+    {
+      "id": "cff0b1b0-5f9e-4f13-acbc-7d5010cc733d",
+      "data": {
+        "lastUncheckReason": "",
+        "uid": "cff0b1b0-5f9e-4f13-acbc-7d5010cc733d",
+        "uploaded": true,
+        "def2": "regular (worker) permanent position; (사람) permanent employee\n/\ntemporary position; (사람) temporary employee, temporary worker, non-regular worker",
+        "lastUncheckDate": "",
+        "source": "세종 5A",
+        "section": "1",
+        "def1": "1. being regular; regular worker: A position or job that guarantees employment up to a certain age and requires full-time work.\n\n[비정규직 · 명사]\n\n2. non-regular position; temporary position: A position or job that does not provide proper guarantee for the employee in terms of a work period, welfare benefit, etc.\n\n-----\n\n1. non-regular position; temporary position: A position or job that does not provide proper guarantee for the employee in terms of a work period, welfare benefit, etc.",
+        "input": "비정규직",
+        "skipUpload": false,
+        "lemma": "정규직 / 비정규직",
+        "ts": "2026-04-14T06:08:03.851Z"
+      }
+    },
+    {
+      "id": "27946826-5c13-44ac-9376-8bc5741cb906",
+      "data": {
+        "def2": "to switch (over), change [transition]",
+        "lastUncheckDate": "",
+        "uid": "27946826-5c13-44ac-9376-8bc5741cb906",
+        "skipUpload": false,
+        "lemma": "전환되다",
+        "def1": "1. be changed: To be changed into a different direction or state.",
+        "input": "전환되었다",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:11:27.284Z",
+        "source": "세종 5A",
+        "section": "1",
+        "uploaded": true
+      }
+    },
+    {
+      "id": "9fcc720e-a2dc-4444-9376-60edc760cd9b",
+      "data": {
+        "uid": "9fcc720e-a2dc-4444-9376-60edc760cd9b",
+        "lastUncheckDate": "",
+        "def2": "high (yearly) salary / high annual income",
+        "ts": "2026-04-14T06:14:10.302Z",
+        "input": "연봉이 높은",
+        "def1": "Definition not found.",
+        "lastUncheckReason": "",
+        "source": "세종 5A",
+        "section": "1",
+        "lemma": "연봉이 높다",
+        "skipUpload": false,
+        "uploaded": true
+      }
+    },
+    {
+      "id": "08630f06-5ffe-4df8-8b24-1fd1ddff0511",
+      "data": {
+        "lastUncheckDate": "",
+        "uid": "08630f06-5ffe-4df8-8b24-1fd1ddff0511",
+        "def2": "to change jobs",
+        "input": "이직하는",
+        "def1": "1. change jobs: To change job or profession.",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:15:56.073Z",
+        "section": "1",
+        "source": "세종 5A",
+        "lemma": "이직하다",
+        "skipUpload": false,
+        "uploaded": true
+      }
+    },
+    {
+      "id": "d7f3a4dd-389b-4b8e-881b-a010e0a5bc41",
+      "data": {
+        "lemma": "만족도가 높다",
+        "skipUpload": false,
+        "def1": "Definition not found.",
+        "lastUncheckReason": "",
+        "input": "높은 만족도를",
+        "ts": "2026-04-14T06:23:30.909Z",
+        "source": "세종 5A",
+        "section": "1",
+        "lastUncheckDate": "",
+        "uid": "d7f3a4dd-389b-4b8e-881b-a010e0a5bc41",
+        "def2": "high satisfaction",
+        "uploaded": true
+      }
+    },
+    {
+      "id": "84f3c02b-c96e-4bce-b8b7-413e088b838e",
+      "data": {
+        "def2": "possibility/potential for development",
+        "lastUncheckDate": "",
+        "uid": "84f3c02b-c96e-4bce-b8b7-413e088b838e",
+        "source": "세종 5A",
+        "section": "1",
+        "input": "발전 가능성이 있다고",
+        "def1": "Definition not found.",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:29:52.337Z",
+        "lemma": "발전 가능성이 있다",
+        "skipUpload": false,
+        "uploaded": true
+      }
+    },
+    {
+      "id": "db39efac-98fd-4725-9842-f57c519c276b",
+      "data": {
+        "ts": "2026-04-14T06:31:49.193Z",
+        "def1": "1. infinite; limitless; endless: Having no end or limit of number, amount, size, space or time.",
+        "input": "무한한",
+        "lastUncheckReason": "",
+        "section": "1",
+        "source": "세종 5A",
+        "skipUpload": false,
+        "lemma": "무한하다",
+        "def2": "to be infinite; limitless; endless",
+        "uid": "db39efac-98fd-4725-9842-f57c519c276b",
+        "lastUncheckDate": "",
+        "uploaded": true
+      }
+    },
+    {
+      "id": "05a32e9e-a4b1-4c6e-a5af-f91cbe41d127",
+      "data": {
+        "uid": "05a32e9e-a4b1-4c6e-a5af-f91cbe41d127",
+        "lastUncheckDate": "",
+        "def2": "to join a company",
+        "source": "세종 5A",
+        "section": "1",
+        "def1": "1. enter a company; join a company: To get a job with a company, etc., and become its employee.",
+        "input": "입사를",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:33:01.659Z",
+        "lemma": "입사(하다)",
+        "skipUpload": false,
+        "uploaded": true
+      }
+    },
+    {
+      "id": "83014554-1ea4-443a-9bad-0e7def142f63",
+      "data": {
+        "lastUncheckDate": "",
+        "uid": "83014554-1ea4-443a-9bad-0e7def142f63",
+        "def2": "to have a good work(ing) environment",
+        "source": "세종 5A",
+        "section": "1",
+        "input": "근무 환경이 좋은",
+        "lastUncheckReason": "",
+        "def1": "Definition not found.",
+        "ts": "2026-04-14T06:34:30.438Z",
+        "skipUpload": false,
+        "lemma": "근무 환경이 좋다",
+        "uploaded": true
+      }
+    }
+  ],
+  "sentenceInputs": [
+    {
+      "id": "c6f9dc95-c53c-46f2-9309-5e5706a8007b",
+      "data": {
+        "targetWord": "전환되다",
+        "skipUpload": false,
+        "section": "1",
+        "source": "세종 5A",
+        "sentence": "승규는 이 년간의 비정규직 생활을 마치고 정규직으로 전환되었다.",
+        "cardBack": "to switch (over), change [transition]",
+        "ts": "2026-04-14T06:13:37.778Z",
+        "lastUncheckReason": "",
+        "cardFront": "전환되다\n승규는 이 년간의 비정규직 생활을 마치고 정규직으로 전환되었다.",
+        "uid": "c6f9dc95-c53c-46f2-9309-5e5706a8007b",
+        "lastUncheckDate": "",
+        "uploaded": true,
+        "inputForm": "전환되었다"
+      }
+    },
+    {
+      "id": "98ca79d7-8215-40dc-87da-b9b29626f83e",
+      "data": {
+        "sentence": "이번에 연봉이 높은 회사로 이직하는 데 성공했다.",
+        "source": "세종 5A",
+        "section": "1",
+        "cardBack": "to change jobs",
+        "ts": "2026-04-14T06:20:53.511Z",
+        "lastUncheckReason": "",
+        "targetWord": "이직하다",
+        "skipUpload": false,
+        "lastUncheckDate": "",
+        "uid": "98ca79d7-8215-40dc-87da-b9b29626f83e",
+        "cardFront": "이직하다\n이번에 연봉이 높은 회사로 이직하는 데 성공했다.",
+        "uploaded": true,
+        "inputForm": "이직하는"
+      }
+    },
+    {
+      "id": "dca75266-e92b-445d-80d0-b4736d38d2c2",
+      "data": {
+        "cardBack": "high (yearly) salary / high annual income",
+        "ts": "2026-04-14T06:20:53.511Z",
+        "lastUncheckReason": "",
+        "sentence": "이번에 연봉이 높은 회사로 이직하는 데 성공했다.",
+        "source": "세종 5A",
+        "section": "1",
+        "targetWord": "연봉이 높다",
+        "skipUpload": false,
+        "lastUncheckDate": "",
+        "uid": "dca75266-e92b-445d-80d0-b4736d38d2c2",
+        "cardFront": "연봉이 높다\n이번에 연봉이 높은 회사로 이직하는 데 성공했다.",
+        "uploaded": true,
+        "inputForm": "연봉이 높은"
+      }
+    },
+    {
+      "id": "ae8bea0e-370d-4f60-9e48-6c9a5cb09e67",
+      "data": {
+        "cardFront": "만족도가 높다\n직원들은 원하는 일을 맡았을 때 회사에 대해 높은 만족도를 보였다.",
+        "uid": "ae8bea0e-370d-4f60-9e48-6c9a5cb09e67",
+        "lastUncheckDate": "",
+        "targetWord": "만족도가 높다",
+        "skipUpload": false,
+        "sentence": "직원들은 원하는 일을 맡았을 때 회사에 대해 높은 만족도를 보였다.",
+        "source": "세종 5A",
+        "section": "1",
+        "cardBack": "high satisfaction",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:26:01.966Z",
+        "uploaded": true,
+        "inputForm": "높은 만족도를"
+      }
+    },
+    {
+      "id": "0c369e92-e975-4b3a-9c0b-079f26c17339",
+      "data": {
+        "cardFront": "발전 가능성이 있다\n이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "uid": "0c369e92-e975-4b3a-9c0b-079f26c17339",
+        "lastUncheckDate": "",
+        "skipUpload": false,
+        "targetWord": "발전 가능성이 있다",
+        "section": "1",
+        "sentence": "이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "source": "세종 5A",
+        "ts": "2026-04-14T06:33:50.153Z",
+        "lastUncheckReason": "",
+        "cardBack": "possibility/potential for development",
+        "uploaded": true,
+        "inputForm": "발전 가능성이 있다고"
+      }
+    },
+    {
+      "id": "6c064fa2-5638-4a96-b04b-cc925b74d032",
+      "data": {
+        "cardBack": "to be infinite; limitless; endless",
+        "ts": "2026-04-14T06:33:50.153Z",
+        "lastUncheckReason": "",
+        "source": "세종 5A",
+        "section": "1",
+        "sentence": "이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "targetWord": "무한하다",
+        "skipUpload": false,
+        "lastUncheckDate": "",
+        "uid": "6c064fa2-5638-4a96-b04b-cc925b74d032",
+        "cardFront": "무한하다\n이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "uploaded": true,
+        "inputForm": "무한한"
+      }
+    },
+    {
+      "id": "b86984fc-b8c0-4f31-8623-7d55d945f4e4",
+      "data": {
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:33:50.153Z",
+        "cardBack": "to join a company",
+        "sentence": "이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "source": "세종 5A",
+        "section": "1",
+        "skipUpload": false,
+        "targetWord": "입사(하다)",
+        "uid": "b86984fc-b8c0-4f31-8623-7d55d945f4e4",
+        "lastUncheckDate": "",
+        "cardFront": "입사(하다)\n이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "uploaded": true,
+        "inputForm": "입사를"
+      }
+    },
+    {
+      "id": "10e18537-e669-4247-b113-f731e79e18c1",
+      "data": {
+        "cardFront": "선호하다\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "lastUncheckDate": "",
+        "uid": "10e18537-e669-4247-b113-f731e79e18c1",
+        "skipUpload": false,
+        "targetWord": "선호하다",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:37:47.124Z",
+        "cardBack": "to prefer/favor (sth)",
+        "section": "1",
+        "sentence": "최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "source": "세종 5A",
+        "uploaded": true,
+        "inputForm": "선호하는"
+      }
+    },
+    {
+      "id": "5ae95547-e2ed-44a9-9835-2b256b86645e",
+      "data": {
+        "uid": "5ae95547-e2ed-44a9-9835-2b256b86645e",
+        "lastUncheckDate": "",
+        "cardFront": "연봉이 높다\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "ts": "2026-04-14T06:37:47.124Z",
+        "lastUncheckReason": "",
+        "cardBack": "high (yearly) salary / high annual income",
+        "sentence": "최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "source": "세종 5A",
+        "section": "1",
+        "skipUpload": false,
+        "targetWord": "연봉이 높다",
+        "uploaded": true,
+        "inputForm": "연봉이 높은"
+      }
+    },
+    {
+      "id": "c077193d-e005-4af4-93e4-debbb236944a",
+      "data": {
+        "skipUpload": false,
+        "targetWord": "구직자",
+        "section": "1",
+        "sentence": "최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "source": "세종 5A",
+        "lastUncheckReason": "",
+        "ts": "2026-04-14T06:37:47.124Z",
+        "cardBack": "a job seeker",
+        "cardFront": "구직자\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "uid": "c077193d-e005-4af4-93e4-debbb236944a",
+        "lastUncheckDate": "",
+        "uploaded": true,
+        "inputForm": "구직자들은"
+      }
+    },
+    {
+      "id": "f4ffee86-1b41-4e6d-bab6-bd00d052aec3",
+      "data": {
+        "ts": "2026-04-14T06:37:47.124Z",
+        "lastUncheckReason": "",
+        "cardBack": "to have a good work(ing) environment",
+        "source": "세종 5A",
+        "sentence": "최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "section": "1",
+        "skipUpload": false,
+        "targetWord": "근무 환경이 좋다",
+        "lastUncheckDate": "",
+        "uid": "f4ffee86-1b41-4e6d-bab6-bd00d052aec3",
+        "cardFront": "근무 환경이 좋다\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "uploaded": true,
+        "inputForm": "근무 환경이 좋은"
+      }
+    },
+    {
+      "id": "3aff2d29-67be-4076-9a68-2773b84a17b2",
+      "data": {
+        "uid": "3aff2d29-67be-4076-9a68-2773b84a17b2",
+        "lastUncheckDate": "",
+        "cardFront": "향상하다\n선생님은 학생들의 실력이 향상하는 모습을 보면 보람을 느낀다.",
+        "section": "1",
+        "source": "세종 5A",
+        "sentence": "선생님은 학생들의 실력이 향상하는 모습을 보면 보람을 느낀다.",
+        "ts": "2026-04-14T06:44:22.719Z",
+        "lastUncheckReason": "",
+        "cardBack": "to improve/enhance a skill, to make progress (with an ability)",
+        "skipUpload": false,
+        "targetWord": "향상(하다/되다)",
+        "uploaded": true,
+        "inputForm": "향상하는"
+      }
+    }
+  ],
+  "lemmaMaster": [
+    {
+      "id": "157443b9-5ca6-428a-ab2d-51f2ff9af4f3",
+      "data": {
+        "originUID": "d7f3a4dd-389b-4b8e-881b-a010e0a5bc41",
+        "def1": "Definition not found.",
+        "hiddenRelated": "",
+        "lemmaID": "157443b9-5ca6-428a-ab2d-51f2ff9af4f3",
+        "autoAddedBy": "manual",
+        "relatedMeaning": "",
+        "lemma": "만족도가 높다",
+        "lastUpdated": "2026-05-05T14:43:25.474Z",
+        "def2": "high satisfaction",
+        "cleanedLemma": "만족도가 높다",
+        "relatedForm": ""
+      }
+    },
+    {
+      "id": "16373884-7b84-42aa-892b-83efd4647f97",
+      "data": {
+        "def1": "1. infinite; limitless; endless: Having no end or limit of number, amount, size, space or time.",
+        "originUID": "db39efac-98fd-4725-9842-f57c519c276b",
+        "relatedMeaning": "",
+        "lemma": "무한하다",
+        "hiddenRelated": "",
+        "lemmaID": "16373884-7b84-42aa-892b-83efd4647f97",
+        "autoAddedBy": "manual",
+        "def2": "to be infinite; limitless; endless",
+        "lastUpdated": "2026-05-05T14:43:28.861Z",
+        "relatedForm": "",
+        "cleanedLemma": "무한하다"
+      }
+    },
+    {
+      "id": "24c3f525-c118-4c46-b91b-09899229c72f",
+      "data": {
+        "lastUpdated": "2026-05-05T14:43:30.676Z",
+        "def2": "to join a company",
+        "relatedForm": "",
+        "cleanedLemma": "입사 하다",
+        "originUID": "05a32e9e-a4b1-4c6e-a5af-f91cbe41d127",
+        "def1": "1. enter a company; join a company: To get a job with a company, etc., and become its employee.",
+        "hiddenRelated": "",
+        "autoAddedBy": "manual",
+        "lemmaID": "24c3f525-c118-4c46-b91b-09899229c72f",
+        "relatedMeaning": "",
+        "lemma": "입사(하다)"
+      }
+    },
+    {
+      "id": "2794deb7-6a55-4a93-a49e-2eb55613cc96",
+      "data": {
+        "relatedForm": "",
+        "cleanedLemma": "발전 가능성이 있다",
+        "def2": "possibility/potential for development",
+        "lastUpdated": "2026-05-05T14:43:27.120Z",
+        "lemma": "발전 가능성이 있다",
+        "relatedMeaning": "",
+        "hiddenRelated": "",
+        "lemmaID": "2794deb7-6a55-4a93-a49e-2eb55613cc96",
+        "autoAddedBy": "manual",
+        "def1": "Definition not found.",
+        "originUID": "84f3c02b-c96e-4bce-b8b7-413e088b838e"
+      }
+    },
+    {
+      "id": "29a296f6-87af-48bd-8ca0-6a00211653de",
+      "data": {
+        "cleanedLemma": "정규직 / 비정규직",
+        "relatedForm": "",
+        "lastUpdated": "2026-05-05T14:43:18.944Z",
+        "def2": "regular (worker) permanent position; (사람) permanent employee\n/\ntemporary position; (사람) temporary employee, temporary worker, non-regular worker",
+        "lemmaID": "29a296f6-87af-48bd-8ca0-6a00211653de",
+        "autoAddedBy": "manual",
+        "hiddenRelated": "",
+        "lemma": "정규직 / 비정규직",
+        "relatedMeaning": "",
+        "originUID": "cff0b1b0-5f9e-4f13-acbc-7d5010cc733d",
+        "def1": "1. being regular; regular worker: A position or job that guarantees employment up to a certain age and requires full-time work.\n\n[비정규직 · 명사]\n\n2. non-regular position; temporary position: A position or job that does not provide proper guarantee for the employee in terms of a work period, welfare benefit, etc.\n\n-----\n\n1. non-regular position; temporary position: A position or job that does not provide proper guarantee for the employee in terms of a work period, welfare benefit, etc."
+      }
+    },
+    {
+      "id": "4b92d760-6bd4-48ad-bdce-ebd0a5f7a56d",
+      "data": {
+        "relatedForm": "",
+        "cleanedLemma": "보장하다 / 보장되다",
+        "lastUpdated": "2026-05-05T14:43:13.853Z",
+        "def2": "1.[명사] guarantee(d) (of/that), [동사] to guarantee, assure; (품질 등을) vouch for; (약속하다) promise\n\n(not 장담하다)",
+        "autoAddedBy": "manual",
+        "lemmaID": "4b92d760-6bd4-48ad-bdce-ebd0a5f7a56d",
+        "hiddenRelated": "",
+        "relatedMeaning": "",
+        "lemma": "보장하다 / 보장되다",
+        "originUID": "670ca8c8-63ca-424b-9423-6202ad0cfad8",
+        "def1": "1. guarantee: To assure someone that there will not be a problem, or protect someone so that he/she will not meet a problem.\n\n-----\n\n1. be guaranteed: To be assured that there will not be a problem, or to feel protected so that one will not meet a problem."
+      }
+    },
+    {
+      "id": "69202f5e-1d80-480b-9c1c-e6ddbdfdefa7",
+      "data": {
+        "relatedForm": "",
+        "cleanedLemma": "정년",
+        "def2": "retirement age",
+        "lastUpdated": "2026-05-05T14:43:11.813Z",
+        "relatedMeaning": "",
+        "lemma": "정년",
+        "hiddenRelated": "",
+        "lemmaID": "69202f5e-1d80-480b-9c1c-e6ddbdfdefa7",
+        "autoAddedBy": "manual",
+        "def1": "1. retirement age: An age at which a worker is required to retire.\n\n[정년퇴직 · 명사]\n\n2. regular retirement: An act of resigning from one's job, at one's retirement age.\n\n[정년퇴직하다 · 동사]\n\n3. retire: To resign from one's job, at one's retirement age.",
+        "originUID": "55b2beee-2a84-424d-bfd3-a4fb041c97c8"
+      }
+    },
+    {
+      "id": "7d750b8a-a73f-4709-b2d7-eeaf8ab52a19",
+      "data": {
+        "cleanedLemma": "전환되다",
+        "relatedForm": "",
+        "lastUpdated": "2026-05-05T14:43:23.710Z",
+        "def2": "to switch (over), change [transition]",
+        "hiddenRelated": "",
+        "lemmaID": "7d750b8a-a73f-4709-b2d7-eeaf8ab52a19",
+        "autoAddedBy": "manual",
+        "relatedMeaning": "",
+        "lemma": "전환되다",
+        "originUID": "27946826-5c13-44ac-9376-8bc5741cb906",
+        "def1": "1. be changed: To be changed into a different direction or state."
+      }
+    },
+    {
+      "id": "86c222ad-30c4-475e-b161-eb715de49009",
+      "data": {
+        "lemmaID": "86c222ad-30c4-475e-b161-eb715de49009",
+        "autoAddedBy": "manual",
+        "hiddenRelated": "",
+        "lemma": "근무 환경이 좋다",
+        "relatedMeaning": "",
+        "originUID": "83014554-1ea4-443a-9bad-0e7def142f63",
+        "def1": "Definition not found.",
+        "cleanedLemma": "근무 환경이 좋다",
+        "relatedForm": "",
+        "lastUpdated": "2026-05-05T14:43:35.388Z",
+        "def2": "to have a good work(ing) environment"
+      }
+    },
+    {
+      "id": "8c57b3df-b50e-4d50-9fcc-366c1b0bc23f",
+      "data": {
+        "lastUpdated": "2026-05-05T14:57:03.767Z",
+        "def2": "high (yearly) salary / high annual income",
+        "relatedForm": "",
+        "cleanedLemma": "연봉이 높다",
+        "originUID": "9fcc720e-a2dc-4444-9376-60edc760cd9b",
+        "def1": "Definition not found.",
+        "hiddenRelated": "eef03f17-fcb9-4ebf-a19d-393e51acea17",
+        "autoAddedBy": "manual",
+        "lemmaID": "8c57b3df-b50e-4d50-9fcc-366c1b0bc23f",
+        "lemma": "연봉이 높다",
+        "relatedMeaning": ""
+      }
+    },
+    {
+      "id": "b630a980-37b9-4295-abc2-c4bae5cf557e",
+      "data": {
+        "lastUpdated": "2026-05-05T14:43:21.911Z",
+        "def2": "to change jobs",
+        "relatedForm": "",
+        "cleanedLemma": "이직하다",
+        "originUID": "08630f06-5ffe-4df8-8b24-1fd1ddff0511",
+        "def1": "1. change jobs: To change job or profession.",
+        "autoAddedBy": "manual",
+        "lemmaID": "b630a980-37b9-4295-abc2-c4bae5cf557e",
+        "hiddenRelated": "",
+        "relatedMeaning": "",
+        "lemma": "이직하다"
+      }
+    },
+    {
+      "id": "c300224e-f050-4785-89f5-96de65d2d544",
+      "data": {
+        "def1": "1. stability; equilibrium: A consistent state kept, without being changed or shaken.\n\n2. stabilization: The act of having one's body and mind comfortable and quiet.\n\n3. stabilization: The act of having one's body and mind comfortable and quiet in order to heal a disease.\n\n[안정되다 · 동사]\n\n4. be stable; be steady; be settled: For a certain state to be maintained without being changed or shaken.\n\n[안정시키다 · 동사]\n\n5. stabilize; settle; equilibrate: To make a certain state maintained without being changed or shaken.\n\n[안정시키다 · 동사]\n\n6. calm down; stabilize: To have one's body and mind comfortable and quiet.\n\n[안정하다 · 동사]\n\n7. be stable; be steady; be settled: To maintain a certain state without being changed or shaken.\n\n[안정하다 · 동사]\n\n8. calm down; stabilize: To have one's body and mind comfortable and quiet.\n\n[안정감 · 명사]\n\n9. sense of stability: One's body or mind feeling comfortable and peaceful.\n\n[안정권 · 명사]\n\n10. range of success: The state of being in the range where one can be certain of success in doing something.\n\n[안정기 · 명사]\n\n11. stable period; plateau: The period in which things remain in a certain state, not changed or shaken.",
+        "relatedForm": "",
+        "lastUpdated": "2026-05-05T14:43:09.824Z",
+        "def2": "stability",
+        "lemmaID": "c300224e-f050-4785-89f5-96de65d2d544",
+        "autoAddedBy": "import",
+        "relatedMeaning": "",
+        "lemma": "안정",
+        "cleanedLemma": "안정",
+        "originUID": "d4b67cc6-b1c3-40b4-a453-e4889569984f",
+        "hiddenRelated": "385d2d49-dd0d-49c4-bbcf-dfe668b4010c,0626117e-c486-4c70-bba9-a61d6f4f5246"
+      }
+    }
+  ],
+  "decks": [
+    {
+      "id": "LHyHD8fXmii9EMZXtYna",
+      "data": {
+        "name": "세종 5A",
+        "createdAt": "2026-04-23T04:01:34.673Z",
+        "description": "",
+        "totalCards": 12,
+        "linkedSourceId": "source_세종_5a",
+        "lastStudied": "2026-05-03T06:41:22.525Z",
+        "paused": true
+      }
+    },
+    {
+      "id": "OvNHqPuGw5wQWKuGIOlm",
+      "data": {
+        "name": "세종 5A (sentence mining)",
+        "createdAt": "2026-04-26T03:13:47.468Z",
+        "description": "",
+        "totalCards": 13,
+        "linkedSourceId": "source_세종_5a",
+        "lastStudied": "2026-05-02T06:42:23.017Z"
+      }
+    },
+    {
+      "id": "deck_grammar",
+      "data": {
+        "createdAt": "2026-03-31T15:53:31.145Z",
+        "name": "Grammar",
+        "id": "deck_grammar",
+        "totalCards": 2,
+        "lastStudied": "2026-06-27T16:06:42.923Z"
+      }
+    }
+  ],
+  "flashcards": [
+    {
+      "id": "1PLwENOorpyyqV39JuKu",
+      "data": {
+        "type": "vocab",
+        "front": "정년",
+        "back": "retirement age",
+        "notes": "",
+        "lemma": "정년",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "55b2beee-2a84-424d-bfd3-a4fb041c97c8",
+        "linkedGrammarEntryId": null,
+        "interval": 1,
+        "repetitions": 0,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.006Z",
+        "easeFactor": 1.96,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": 1,
+        "lastReviewed": "2026-04-25T00:06:15.215Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-07-04"
+      }
+    },
+    {
+      "id": "7f0ArGZAfdW9pSkrqSpA",
+      "data": {
+        "type": "sentence",
+        "front": "근무 환경이 좋다\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "back": "to have a good work(ing) environment",
+        "notes": "",
+        "lemma": "근무 환경이 좋다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "f4ffee86-1b41-4e6d-bab6-bd00d052aec3",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.202Z",
+        "triageBucket": "now",
+        "inputForm": "근무 환경이 좋은",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "9JNTuqfdRqS5Fuo3gNnw",
+      "data": {
+        "type": "vocab",
+        "front": "발전 가능성이 있다",
+        "back": "possibility/potential for development",
+        "notes": "",
+        "lemma": "발전 가능성이 있다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "84f3c02b-c96e-4bce-b8b7-413e088b838e",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.007Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "CEHYxUHmFq3UeD7VBBVF",
+      "data": {
+        "type": "sentence",
+        "front": "향상하다\n선생님은 학생들의 실력이 향상하는 모습을 보면 보람을 느낀다.",
+        "back": "to improve/enhance a skill, to make progress (with an ability)",
+        "notes": "",
+        "lemma": "향상(하다/되다)",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "3aff2d29-67be-4076-9a68-2773b84a17b2",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.200Z",
+        "triageBucket": "now",
+        "inputForm": "향상하는",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "CaMSpscbPmYBU2e4qoO5",
+      "data": {
+        "type": "sentence",
+        "front": "만족도가 높다\n직원들은 원하는 일을 맡았을 때 회사에 대해 높은 만족도를 보였다.",
+        "back": "high satisfaction",
+        "notes": "",
+        "lemma": "만족도가 높다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "ae8bea0e-370d-4f60-9e48-6c9a5cb09e67",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.200Z",
+        "triageBucket": "now",
+        "inputForm": "높은 만족도를",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "Ed55S1hKCGu0QihH4CcN",
+      "data": {
+        "type": "sentence",
+        "front": "입사(하다)\n이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "back": "to join a company",
+        "notes": "",
+        "lemma": "입사(하다)",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "b86984fc-b8c0-4f31-8623-7d55d945f4e4",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.202Z",
+        "triageBucket": "now",
+        "inputForm": "입사를",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "FakRoEKlsRT3B9Wy8tnJ",
+      "data": {
+        "type": "sentence",
+        "front": "연봉이 높다\n이번에 연봉이 높은 회사로 이직하는 데 성공했다.",
+        "back": "high (yearly) salary / high annual income",
+        "notes": "",
+        "lemma": "연봉이 높다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "dca75266-e92b-445d-80d0-b4736d38d2c2",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.201Z",
+        "triageBucket": "now",
+        "inputForm": "연봉이 높은",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "JYiVcqd2sXnmVk9VsvG0",
+      "data": {
+        "type": "vocab",
+        "front": "입사(하다)",
+        "back": "to join a company",
+        "notes": "",
+        "lemma": "입사(하다)",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "05a32e9e-a4b1-4c6e-a5af-f91cbe41d127",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.006Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "NJgTHeQ2dK5GdSGuKXn2",
+      "data": {
+        "type": "sentence",
+        "front": "보람을 느끼다\n선생님은 학생들의 실력이 향상하는 모습을 보면 보람을 느낀다.",
+        "back": "to feel rewarded",
+        "notes": "",
+        "lemma": "보람을 느끼다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "737fb9d1-a532-439d-a8bd-90a357f71367",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.202Z",
+        "triageBucket": "now",
+        "inputForm": "보람을 느낀다",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "OWZKixQ7z22zGLMG5gIL",
+      "data": {
+        "id": "OWZKixQ7z22zGLMG5gIL",
+        "type": "grammar",
+        "front": "~아/어 버리다",
+        "deckIds": [
+          "deck_grammar"
+        ],
+        "linkedGrammarEntryId": "grammar_17",
+        "linkedAVILemmaId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-03-31",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-03-31T15:53:31.633Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-09",
+        "back": "보호동사",
+        "notes": null,
+        "examples": "숙제를 다 해 버렸으니까 이제 마음이 편해. \n실수로 중요한 파일을 삭제해 버렸다.\n그 사람이 혼자 다 먹어 버렸어.\n오래된 편지들을 모두 태워 버렸다.\n약속을 깜빡 잊어 버렸다.",
+        "explanation": "Function: Emphatic completion \nRegister: Neutral; skews toward spoken and informal written use\nCore meaning: Marks the total, irreversible completion of an action while conveying an emotional nuance — relief, satisfaction, regret, or frustration — determined entirely by context and speaker perspective.\n\nFormation: Attaches to action verb stems via the ~아/어 connective: ~아 버리다 after stems with ㅏ or ㅗ, ~어 버리다 elsewhere, 해 버리다 for 하다 verbs. Descriptive verbs and 이다 do not take this construction. The auxiliary 버리다 inflects normally for tense, mood, and speech level.\n\nUsage notes: The construction signals that an action is complete and its outcome fixed — the situation cannot revert. The emotional coloring is entirely context-driven: when the completed action brings closure or removes a burden, the nuance leans toward relief or liberation; when the outcome is undesired, accidental, or contrary to expectation, it shifts to regret or dismay. This dual emotional range sets ~아/어 버리다 apart from semantically neutral completion auxiliaries. The past-tense form ~아/어 버렸다 is the most frequent realization; the non-past form ~아/어 버리다 appears in present/future statements and embedded clauses. Register is broadly neutral but the construction occurs most naturally in spoken and informal writing; formal prose tends to avoid expressively marked completion.\n\nCaution: The form itself carries no inherent positive or negative charge; emotional valence is determined entirely by context. Learners sometimes misread ~아/어 버리다 as uniformly expressing regret or a negative outcome.\n\nSimilar patterns:\n~아/어 내다 — successful completion through effort; lacks the irreversibility and emotional charge of 버리다\n~아/어 치우다 — emphatic, abrupt completion; more colloquial in feel\n~고 말다 — completion with inevitability or regret; overlaps in regret nuance but implies an inescapable or unfortunate conclusion"
+      }
+    },
+    {
+      "id": "P1wSFzvCmTIWFjEY9gVK",
+      "data": {
+        "type": "vocab",
+        "front": "이직하다",
+        "back": "to change jobs",
+        "notes": "",
+        "lemma": "이직하다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "08630f06-5ffe-4df8-8b24-1fd1ddff0511",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.006Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "PN6P2dYSU936AtceraX5",
+      "data": {
+        "type": "vocab",
+        "front": "정규직 / 비정규직",
+        "back": "regular (worker) permanent position; (사람) permanent employee\n/\ntemporary position; (사람) temporary employee, temporary worker, non-regular worker",
+        "notes": "",
+        "lemma": "정규직 / 비정규직",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "cff0b1b0-5f9e-4f13-acbc-7d5010cc733d",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:07:48.937Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "T9RLEgr9PyE7z6JVXF1S",
+      "data": {
+        "type": "vocab",
+        "front": "무한하다",
+        "back": "to be infinite; limitless; endless",
+        "notes": "",
+        "lemma": "무한하다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "db39efac-98fd-4725-9842-f57c519c276b",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:07:48.936Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "UaltnTZcmKqjayeqbLo1",
+      "data": {
+        "type": "sentence",
+        "front": "무한하다\n이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "back": "to be infinite; limitless; endless",
+        "notes": "",
+        "lemma": "무한하다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "6c064fa2-5638-4a96-b04b-cc925b74d032",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.201Z",
+        "triageBucket": "now",
+        "inputForm": "무한한",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "VTcWzncxmt7FxjPlEfl3",
+      "data": {
+        "type": "sentence",
+        "front": "전환되다\n승규는 이 년간의 비정규직 생활을 마치고 정규직으로 전환되었다.",
+        "back": "to switch (over), change [transition]",
+        "notes": "",
+        "lemma": "전환되다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "c6f9dc95-c53c-46f2-9309-5e5706a8007b",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.201Z",
+        "triageBucket": "now",
+        "inputForm": "전환되었다",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "W4CchnZcDUxEJibhKlGr",
+      "data": {
+        "type": "vocab",
+        "front": "연봉이 높다",
+        "back": "high (yearly) salary / high annual income",
+        "notes": "",
+        "lemma": "연봉이 높다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "9fcc720e-a2dc-4444-9376-60edc760cd9b",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.007Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "btsJ9sUXfjKH3M1jUuYF",
+      "data": {
+        "type": "vocab",
+        "front": "보장하다 / 보장되다",
+        "back": "1.[명사] guarantee(d) (of/that), [동사] to guarantee, assure; (품질 등을) vouch for; (약속하다) promise\n\n(not 장담하다)",
+        "notes": "",
+        "lemma": "보장하다 / 보장되다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "f34643d3-dab8-461d-9aa6-76451ad5550b",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:07:48.937Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "hJQrHXSWAc9SP1bilivV",
+      "data": {
+        "type": "vocab",
+        "front": "안정",
+        "back": "stability",
+        "notes": "",
+        "lemma": "안정",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "fd61d2f8-f59a-4379-923c-44e83e595200",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:07:48.936Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "nrXkRA3fJ6gjeHaSYiKT",
+      "data": {
+        "type": "vocab",
+        "front": "만족도가 높다",
+        "back": "high satisfaction",
+        "notes": "",
+        "lemma": "만족도가 높다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "d7f3a4dd-389b-4b8e-881b-a010e0a5bc41",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:07:48.936Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "p05nArJj17V3U4by6XNh",
+      "data": {
+        "type": "sentence",
+        "front": "발전 가능성이 있다\n이 회사가 무한한 발전 가능성이 있다고 생각했기 때문에 입사를 결정했다.",
+        "back": "possibility/potential for development",
+        "notes": "",
+        "lemma": "발전 가능성이 있다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "0c369e92-e975-4b3a-9c0b-079f26c17339",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.202Z",
+        "triageBucket": "now",
+        "inputForm": "발전 가능성이 있다고",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "pKHrf8uNo6J7DFOm20Qb",
+      "data": {
+        "type": "vocab",
+        "front": "근무 환경이 좋다",
+        "back": "to have a good work(ing) environment",
+        "notes": "",
+        "lemma": "근무 환경이 좋다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "83014554-1ea4-443a-9bad-0e7def142f63",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.005Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "qt8VVqrspMH9JTey1qbV",
+      "data": {
+        "type": "sentence",
+        "front": "연봉이 높다\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "back": "high (yearly) salary / high annual income",
+        "notes": "",
+        "lemma": "연봉이 높다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "5ae95547-e2ed-44a9-9835-2b256b86645e",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.200Z",
+        "triageBucket": "now",
+        "inputForm": "연봉이 높은",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "swi0Ltz24PKB9xfHmhVv",
+      "data": {
+        "type": "sentence",
+        "front": "이직하다\n이번에 연봉이 높은 회사로 이직하는 데 성공했다.",
+        "back": "to change jobs",
+        "notes": "",
+        "lemma": "이직하다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "98ca79d7-8215-40dc-87da-b9b29626f83e",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.200Z",
+        "triageBucket": "now",
+        "inputForm": "이직하는",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "uZArdPEpHNkFNbytQ9cO",
+      "data": {
+        "type": "vocab",
+        "front": "전환되다",
+        "back": "to switch (over), change [transition]",
+        "notes": "",
+        "lemma": "전환되다",
+        "deckIds": [
+          "LHyHD8fXmii9EMZXtYna"
+        ],
+        "linkedAVILemmaId": "27946826-5c13-44ac-9376-8bc5741cb906",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-25",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-25T00:04:17.007Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "wuLo8iwU0LGONqPxAmTC",
+      "data": {
+        "type": "sentence",
+        "front": "구직자\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "back": "a job seeker",
+        "notes": "",
+        "lemma": "구직자",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "c077193d-e005-4af4-93e4-debbb236944a",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.200Z",
+        "triageBucket": "now",
+        "inputForm": "구직자들은",
+        "lastTriageDate": "2026-05-14"
+      }
+    },
+    {
+      "id": "y2UmRmpyO6fCdBsSEmuO",
+      "data": {
+        "id": "y2UmRmpyO6fCdBsSEmuO",
+        "type": "grammar",
+        "front": "~에 따르면",
+        "deckIds": [
+          "deck_grammar"
+        ],
+        "linkedGrammarEntryId": "grammar_336",
+        "linkedAVILemmaId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-03-31",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-03-31T15:53:31.639Z",
+        "triageBucket": "now",
+        "lastTriageDate": "2026-05-09",
+        "notes": null,
+        "examples": "기상청에 따르면 내일 전국적으로 비가 내릴 예정이라고 한다.\n최근 연구 결과에 따르면 수면 부족이 인지 기능에 영향을 미치는 것으로 나타났다.\n그의 말에 따르면 회의는 이미 취소됐다고 한다.",
+        "explanation": "Function: Source attribution\nRegister: Neutral; written and spoken\nCore meaning: Introduces information attributed to an external source, equivalent to \"according to.\"\nFormation: Noun + 에 따르면. The noun denotes the information source — a person, institution, document, or study. 따르면 is the conditional form of 따르다 and is invariant in this construction.\n\nUsage notes: Marks the preceding noun as the source of reported information, functioning as an evidential marker: the speaker signals that what follows is attributed externally rather than asserted as a direct claim. The main clause commonly employs reportative forms such as ~다고 하다, ~것으로 나타나다, or ~것으로 밝혀지다, which reinforce the reportedness. Widely used in news reporting, academic writing, and spoken discourse when citing sources. Register is neutral to slightly formal; the construction is comfortable in both written and spoken contexts, making it more broadly applicable than the near-synonymous ~에 의하면, which leans toward formal written use.\n\nCaution: Not to be confused with ~에 따라(서), which expresses variation or dependence (\"depending on X\") rather than source attribution.\n\nSimilar patterns:\n~에 의하면 — near-synonymous; leans slightly more formal and written\n~에 따라(서) — formally similar but functionally distinct: expresses dependence or variation, not citation\n~말에 의하면 / ~말로는 — informal alternatives for citing a person's speech",
+        "back": "~에 따라 | ~에 의하다"
+      }
+    },
+    {
+      "id": "zpLbeO0mbwDnv5ZaSZHU",
+      "data": {
+        "type": "sentence",
+        "front": "선호하다\n최근 구직자들은 연봉이 높은 기업보다 근무 환경이 좋은 기업을 선호하는 것으로 나타났다.",
+        "back": "to prefer/favor (sth)",
+        "notes": "",
+        "lemma": "선호하다",
+        "deckIds": [
+          "OvNHqPuGw5wQWKuGIOlm"
+        ],
+        "linkedAVILemmaId": "10e18537-e669-4247-b113-f731e79e18c1",
+        "linkedGrammarEntryId": null,
+        "easeFactor": 2.5,
+        "interval": 1,
+        "repetitions": 0,
+        "nextDueDate": "2026-04-26",
+        "lastGrade": null,
+        "lastReviewed": null,
+        "gapEvents": [],
+        "createdAt": "2026-04-26T03:13:49.202Z",
+        "triageBucket": "now",
+        "inputForm": "선호하는",
+        "lastTriageDate": "2026-05-14"
+      }
+    }
+  ],
+  "grammarEntries": [
+    {
+      "id": "grammar_17",
+      "data": {
+        "glossaryTerm": "~아/어 버리다",
+        "relatedLessons": "KGIU: Intermediate 22.3, Live Korean Class 📚 | The Verb Ending ~버리다",
+        "datesStudied": "",
+        "masteryLevel": "introduced",
+        "createdAt": "2026-03-30T17:43:28.602Z",
+        "entryNumber": 16,
+        "compareTo": null,
+        "explanation": "Function: Emphatic completion \nRegister: Neutral; skews toward spoken and informal written use\nCore meaning: Marks the total, irreversible completion of an action while conveying an emotional nuance — relief, satisfaction, regret, or frustration — determined entirely by context and speaker perspective.\n\nFormation: Attaches to action verb stems via the ~아/어 connective: ~아 버리다 after stems with ㅏ or ㅗ, ~어 버리다 elsewhere, 해 버리다 for 하다 verbs. Descriptive verbs and 이다 do not take this construction. The auxiliary 버리다 inflects normally for tense, mood, and speech level.\n\nUsage notes: The construction signals that an action is complete and its outcome fixed — the situation cannot revert. The emotional coloring is entirely context-driven: when the completed action brings closure or removes a burden, the nuance leans toward relief or liberation; when the outcome is undesired, accidental, or contrary to expectation, it shifts to regret or dismay. This dual emotional range sets ~아/어 버리다 apart from semantically neutral completion auxiliaries. The past-tense form ~아/어 버렸다 is the most frequent realization; the non-past form ~아/어 버리다 appears in present/future statements and embedded clauses. Register is broadly neutral but the construction occurs most naturally in spoken and informal writing; formal prose tends to avoid expressively marked completion.\n\nCaution: The form itself carries no inherent positive or negative charge; emotional valence is determined entirely by context. Learners sometimes misread ~아/어 버리다 as uniformly expressing regret or a negative outcome.\n\nSimilar patterns:\n~아/어 내다 — successful completion through effort; lacks the irreversibility and emotional charge of 버리다\n~아/어 치우다 — emphatic, abrupt completion; more colloquial in feel\n~고 말다 — completion with inevitability or regret; overlaps in regret nuance but implies an inescapable or unfortunate conclusion",
+        "examples": "숙제를 다 해 버렸으니까 이제 마음이 편해. \n실수로 중요한 파일을 삭제해 버렸다.\n그 사람이 혼자 다 먹어 버렸어.\n오래된 편지들을 모두 태워 버렸다.\n약속을 깜빡 잊어 버렸다."
+      }
+    },
+    {
+      "id": "grammar_336",
+      "data": {
+        "glossaryTerm": "~에 따르면",
+        "relatedLessons": "세종 5A 1과",
+        "datesStudied": "",
+        "masteryLevel": "introduced",
+        "createdAt": "2026-03-30T17:43:28.603Z",
+        "entryNumber": 305,
+        "examples": "기상청에 따르면 내일 전국적으로 비가 내릴 예정이라고 한다.\n최근 연구 결과에 따르면 수면 부족이 인지 기능에 영향을 미치는 것으로 나타났다.\n그의 말에 따르면 회의는 이미 취소됐다고 한다.",
+        "explanation": "Function: Source attribution\nRegister: Neutral; written and spoken\nCore meaning: Introduces information attributed to an external source, equivalent to \"according to.\"\nFormation: Noun + 에 따르면. The noun denotes the information source — a person, institution, document, or study. 따르면 is the conditional form of 따르다 and is invariant in this construction.\n\nUsage notes: Marks the preceding noun as the source of reported information, functioning as an evidential marker: the speaker signals that what follows is attributed externally rather than asserted as a direct claim. The main clause commonly employs reportative forms such as ~다고 하다, ~것으로 나타나다, or ~것으로 밝혀지다, which reinforce the reportedness. Widely used in news reporting, academic writing, and spoken discourse when citing sources. Register is neutral to slightly formal; the construction is comfortable in both written and spoken contexts, making it more broadly applicable than the near-synonymous ~에 의하면, which leans toward formal written use.\n\nCaution: Not to be confused with ~에 따라(서), which expresses variation or dependence (\"depending on X\") rather than source attribution.\n\nSimilar patterns:\n~에 의하면 — near-synonymous; leans slightly more formal and written\n~에 따라(서) — formally similar but functionally distinct: expresses dependence or variation, not citation\n~말에 의하면 / ~말로는 — informal alternatives for citing a person's speech",
+        "compareTo": null
+      }
+    }
+  ],
+  "notes": [
+    {
+      "id": "zBy6IaRWzrbcUplQufrH",
+      "data": {
+        "title": "Q: What is ~끼리 (pg 23 instructions)?",
+        "body": "Answer: gives the vibe of collocating “with” or grouping things",
+        "tags": [
+          "question"
+        ],
+        "linkedGrammarIds": [],
+        "createdAt": "2026-04-13T04:00:35.015Z",
+        "answered": true,
+        "bodyHtml": "Answer: gives the vibe of collocating “with” or grouping things",
+        "id": "zBy6IaRWzrbcUplQufrH",
+        "updatedAt": "2026-04-15T18:54:56.338Z"
+      }
+    }
+  ]
+}

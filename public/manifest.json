@@ -1,0 +1,12 @@
+{
+  "name": "AutoVocaIndex",
+  "short_name": "AVI",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1612",
+  "theme_color": "#c97d3a",
+  "icons": [
+    { "src": "icons/avi-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/avi-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
