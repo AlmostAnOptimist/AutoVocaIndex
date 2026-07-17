@@ -1,0 +1,31 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  SECRETS_SCAN_OMIT_KEYS = "VITE_FIREBASE_API_KEY,VITE_FIREBASE_APP_ID,VITE_FIREBASE_AUTH_DOMAIN,VITE_FIREBASE_MESSAGING_SENDER_ID,VITE_FIREBASE_PROJECT_ID,VITE_FIREBASE_STORAGE_BUCKET"
+
+# /api/* routes for the three v1 handler-style functions. grammar-quiz routes
+# itself via config.path (Functions 2.0); config.path is not supported on v1
+# handlers, so these get the /api form via redirects instead. Order matters:
+# these must stay above the SPA fallback.
+[[redirects]]
+  from = "/api/get-definition"
+  to = "/.netlify/functions/get-definition"
+  status = 200
+
+[[redirects]]
+  from = "/api/get-krdict-api"
+  to = "/.netlify/functions/get-krdict-api"
+  status = 200
+
+[[redirects]]
+  from = "/api/generate-tts"
+  to = "/.netlify/functions/generate-tts"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

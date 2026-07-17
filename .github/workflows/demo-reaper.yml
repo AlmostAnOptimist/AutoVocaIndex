@@ -1,0 +1,26 @@
+# .github/workflows/demo-reaper.yml
+# Nightly demo reset (D6): 18:00 UTC = 03:00 KST.
+# No-ops unless the DEMO_SERVICE_ACCOUNT repo secret is set, so the public
+# template and any forks are inert by default.
+
+name: demo-reaper
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install firebase-admin
+        run: npm install --no-save firebase-admin@^12
+      - name: Run reaper
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.DEMO_SERVICE_ACCOUNT }}
+        run: node scripts/demo-reaper.cjs
