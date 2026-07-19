@@ -8,6 +8,7 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
 import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
+import { DEMO } from '../demo/demoConfig.js';
 
 const PRESET_TAGS = ['vocabulary', 'grammar', 'reading', 'listening', 'speaking', 'writing', 'culture', 'review', 'question'];
 const TAB_KEY = 'avi_notes_tab';
@@ -387,7 +388,7 @@ function WysiwygEditor({ value, onChange, C, S }) {
       />
       <div
         ref={editorRef}
-        contentEditable
+        contentEditable={!DEMO}
         suppressContentEditableWarning
         className="avi-editor"
         style={editorStyle}
@@ -487,6 +488,7 @@ function NoteEditor({ note, initialTags, initialSourceId, initialSectionId, init
   };
 
   const handleSave = async () => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!title.trim() && !stripHtml(bodyHtml)) return;
     setSaving(true);
         await onSave({ ...(note || {}), title: title.trim(), bodyHtml, tags, answered, linkedGrammarIds: linkedGrammar, linkedSourceId: linkedSourceId || null, linkedSectionId: linkedSectionId || null, linkedApptId: linkedApptId || null });
@@ -965,6 +967,7 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
 
   // Lock toggle — writes immediately to Firestore for existing sessions
   const handleToggleLock = async () => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     const next = !locked;
     setLocked(next);
     if (!isNew && session?.id && uid) {
@@ -973,6 +976,7 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
   };
 
   const handleCorrectionsSave = async () => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!title.trim()) return;
     setSaving(true);
     const cleanRows = rows.map(({ id: _id, ...r }) => r); // strip UI-only stable IDs
@@ -990,6 +994,7 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
   };
 
   const handleLinkSelect = async (item) => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!item) {
       setSourceId(''); setSectionId(''); setLinkedApptId('');
       if (!isNew && session?.id && uid) {
@@ -1150,7 +1155,7 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
                   <span style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM }}>{label}</span>
                   <div
                     ref={el => seedField(el, row[fieldName])}
-                    contentEditable={!locked}
+                    contentEditable={!DEMO && !locked}
                     suppressContentEditableWarning
                     className="avi-editor"
                     style={{ ...fieldStyle, background: locked ? C.bg : undefined, cursor: locked ? 'default' : 'text' }}
@@ -1393,6 +1398,7 @@ useEffect(() => {
   }, [preLinkedData]);
 
   const handleSave = useCallback(async (data) => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!uid) return;
     const now = new Date().toISOString();
     if (data.id) {
@@ -1430,6 +1436,7 @@ useEffect(() => {
   }, [uid, sections, onNoteCreated, onNoteUpdated]);
 
   const handleDelete = useCallback(async (id) => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!uid) return;
     await deleteDoc(doc(db, 'users', uid, 'notes', id));
     setNotes(prev => prev.filter(n => n.id !== id));
@@ -1441,6 +1448,7 @@ useEffect(() => {
 
   // Inline rename for correction sessions
   const handleRename = useCallback(async (id, newTitle) => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!uid) return;
     setCorrections(prev => prev.map(n => n.id === id ? { ...n, title: newTitle } : n));
     if (selected?.id === id) setSelected(prev => ({ ...prev, title: newTitle }));
@@ -1455,6 +1463,7 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
 
   // Link/unlink a note to a content section bidirectionally.
   const handleLinkNoteToSection = useCallback(async (sectionId, noteId, add) => {
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!uid) return;
     const sec = sections.find(s => s.id === sectionId);
     if (!sec) return;
@@ -1548,8 +1557,14 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
                 <h1 style={{ fontFamily: SH.fd, fontSize: '24px', color: C.text }}>Notes</h1>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button style={S.btnPrimary} onClick={() => { switchTab('notes'); setSelected(null); setShowNew(true); }}>+ Note</button>
-                  <button style={S.btnPrimary} onClick={() => { switchTab('corrections'); setSelected(null); setShowNew(true); }}>+ Corrections</button>
+                  {DEMO ? (
+                    <span style={{ fontSize: '12px', color: C.textM, alignSelf: 'center' }}>Read-only in demo</span>
+                  ) : (
+                    <>
+                      <button style={S.btnPrimary} onClick={() => { switchTab('notes'); setSelected(null); setShowNew(true); }}>+ Note</button>
+                      <button style={S.btnPrimary} onClick={() => { switchTab('corrections'); setSelected(null); setShowNew(true); }}>+ Corrections</button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -1664,7 +1679,7 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
                 {corrections.length === 0 && (
                   <div style={{ ...S.emptyState, marginTop: '40px' }}>
                     <div style={{ marginBottom: '8px' }}>No corrections yet.</div>
-                    <button style={S.btnPrimary} onClick={() => setShowNew(true)}>New corrections session</button>
+                    {!DEMO && <button style={S.btnPrimary} onClick={() => setShowNew(true)}>New corrections session</button>}
                   </div>
                 )}
               </div>

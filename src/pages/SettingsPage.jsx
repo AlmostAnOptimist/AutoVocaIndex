@@ -6,6 +6,7 @@ import { SH } from '../theme/buildStyles.js';
 import { APPOINTMENT_TYPES } from '../constants.js';
 import { useRef } from 'react';
 import { backfillCardAudio } from '../utils/ttsUtils.js';
+import { DEMO } from '../demo/demoConfig.js';
 
 // ── Built-in stopwords (always active in AVI Search) ─────────
 const BUILT_IN_STOPWORDS = [
@@ -94,7 +95,7 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
     onUpdate({ ...settings, aviStopwordProfile: updated });
   };
 
-  const dictMode = settings.aviDictMode || 'krdict';
+  const dictMode = DEMO ? 'krdict' : (settings.aviDictMode || 'krdict');
   const apiRateLimit = settings.aviApiRateLimit ?? 5;
   const lemmaSortOrder = settings.aviLemmaSortOrder || 'recent';
   const overviewStatVis = settings.aviOverviewStatVis || { words: true, sentences: true };
@@ -588,13 +589,19 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
           Used when fetching Definition 1 for new word and lemma entries.
           API keys are configured as Netlify environment variables and are not user-editable.
         </p>
+        {DEMO && (
+          <p style={{ fontSize: '12px', color: C.textM, marginBottom: '14px', lineHeight: 1.6 }}>
+            Dictionary mode is locked to KRDict (En) in the demo.
+          </p>
+        )}
         {DICT_MODES.map(opt => (
           <div
             key={opt.id}
-            onClick={() => onUpdate({ ...settings, aviDictMode: opt.id })}
+            onClick={DEMO ? undefined : () => onUpdate({ ...settings, aviDictMode: opt.id })}
             style={{
               display: 'flex', alignItems: 'center', gap: '12px',
-              padding: '10px 12px', borderRadius: '8px', cursor: 'pointer', marginBottom: '6px',
+              padding: '10px 12px', borderRadius: '8px', cursor: DEMO ? 'default' : 'pointer', marginBottom: '6px',
+              opacity: DEMO && opt.id !== 'krdict' ? 0.45 : 1,
               border: `1.5px solid ${dictMode === opt.id ? C.accent : C.border}`,
               background: dictMode === opt.id ? C.accentSoft : 'transparent',
               transition: 'all 0.15s',

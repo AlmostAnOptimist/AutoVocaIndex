@@ -15,6 +15,7 @@ import {
 } from '../../utils/aviUtils.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { autoCreateWordCard } from '../../utils/cardFactory.js';
+import { DEMO } from '../../demo/demoConfig.js';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
 import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
 import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
@@ -214,6 +215,7 @@ export function AVIWordInputPage({
 
   // ── Stage a new word ────────────────────────────────────────
   const handleStageWord = async () => {
+    if (DEMO) return; // demo: intake flows through the Sentence Input picker (D5)
     const raw = stagingText.trim();
     if (!raw) return;
     if (!currentSource || needsSection) return; // blocked by UI
@@ -442,6 +444,11 @@ export function AVIWordInputPage({
         <div style={{ fontSize: '12px', color: C.textM, lineHeight: 1.5 }}>
           Paste a word or phrase. It will be cleaned, lemmatized, and have a dictionary definition fetched automatically.
         </div>
+        {DEMO && (
+          <div style={{ fontSize: '12px', color: C.warning, fontWeight: 500, lineHeight: 1.5 }}>
+            Word adding is disabled in the demo. Add a sentence in Sentence Input and choose target words there — new words arrive through the picker.
+          </div>
+        )}
         <textarea
           style={{
             width: '100%', padding: '10px 12px', borderRadius: '8px', fontSize: '13px',
@@ -456,6 +463,7 @@ export function AVIWordInputPage({
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleStageWord();
           }}
           rows={4}
+          disabled={DEMO}
         />
         {!currentSource && (
           <div style={{ fontSize: '11px', color: C.warning, fontWeight: 500 }}>
@@ -471,11 +479,11 @@ export function AVIWordInputPage({
           style={{
             ...S.btnPrimary,
             padding: '9px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 600,
-            opacity: (processing || !stagingText.trim() || !currentSource || needsSection) ? 0.5 : 1,
+            opacity: (DEMO || processing || !stagingText.trim() || !currentSource || needsSection) ? 0.5 : 1,
             transition: 'opacity 0.15s',
           }}
           onClick={handleStageWord}
-          disabled={processing || !stagingText.trim() || !currentSource || needsSection}
+          disabled={DEMO || processing || !stagingText.trim() || !currentSource || needsSection}
         >
           {processing
             ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}><span className="icon-spin" style={{ display: 'inline-flex' }}>{Icons.refresh}</span> Processing…</span>

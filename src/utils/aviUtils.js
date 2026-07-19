@@ -12,6 +12,7 @@
 import { doc, getDoc, setDoc, writeBatch } from 'firebase/firestore';
 import { toDateStr, computeStreak } from './dateUtils.js';
 import { db } from '../firebase.js';
+import { DEMO } from '../demo/demoConfig.js';
 
 // ── UUID ─────────────────────────────────────────────────────
 export function uuid() {
@@ -527,6 +528,7 @@ const variants = [raw, normalizeLemma(raw) || raw];
 }
 
 export async function writeGlobalLemma(surface, cleanedLemma) {
+  if (DEMO) return; // demo: rules deny GLM writes server-side; skip the attempt entirely
   if (!surface || !cleanedLemma) return;
   try {
     const key = globalLemmaKey(surface);

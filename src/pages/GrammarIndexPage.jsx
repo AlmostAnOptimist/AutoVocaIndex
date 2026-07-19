@@ -10,6 +10,7 @@ import { generateGrammarCardAudio, playAudioUrl } from '../utils/ttsUtils.js';
 import { GrammarCardPicker } from '../components/GrammarCardPicker.jsx';
 import { PaginationFooter } from '../components/PaginationFooter.jsx';
 import { GRAMMAR_MASTERY as MASTERY } from '../constants.js';
+import { DEMO } from '../demo/demoConfig.js';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
 import { usePaginationKeys } from '../hooks/usePaginationKeys.js';
 const GRAMMAR_CACHE_KEY = 'avi_grammar_entries';
@@ -280,6 +281,7 @@ function EntryDetail({
   entry, allEntries, linkedCardId, linkedCard, linkedNotes, linkedSections,
   onClose, onSave, onDelete, onRename, onNavigateToCard, onNavigateToNote, onNavigateToEntry,
   onAddQuestion, onLinkSection, onNavigateToContent, allSections, C, S,
+  readOnly = false,
 }) {
   const [editing,       setEditing]       = useState(false);
   const [saving,        setSaving]        = useState(false);
@@ -408,9 +410,9 @@ function EntryDetail({
               />
             ) : (
               <div
-                onClick={() => { setTitleDraft(entry.glossaryTerm); setEditingTitle(true); }}
-                title="Click to rename"
-                style={{ fontFamily: SH.fk, fontSize: '22px', fontWeight: 600, color: C.text, lineHeight: 1.2, cursor: 'text' }}
+                onClick={readOnly ? undefined : () => { setTitleDraft(entry.glossaryTerm); setEditingTitle(true); }}
+                title={readOnly ? undefined : 'Click to rename'}
+                style={{ fontFamily: SH.fk, fontSize: '22px', fontWeight: 600, color: C.text, lineHeight: 1.2, cursor: readOnly ? 'default' : 'text' }}
               >
                 {entry.glossaryTerm}
               </div>
@@ -423,7 +425,7 @@ function EntryDetail({
                 View Card
               </button>
             )}
-            {!editing && (
+            {!readOnly && !editing && (
               <button onClick={() => setEditing(true)}
                 style={{ ...S.btnGhost, fontSize: '12px', padding: '5px 12px' }}>
                 Edit
@@ -463,13 +465,13 @@ function EntryDetail({
             {Object.entries(MASTERY).map(([key, val]) => {
               const active = masteryLevel === key;
               return (
-                <button key={key} onClick={() => { setMasteryLevel(key); onSave(entry.id, { masteryLevel: key }); }}
+                <button key={key} onClick={readOnly ? undefined : () => { setMasteryLevel(key); onSave(entry.id, { masteryLevel: key }); }}
                   style={{
                     padding: '4px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: 500,
                     border: `1px solid ${active ? val.color : C.border}`,
                     background: active ? `${val.color}22` : 'transparent',
                     color: active ? val.color : C.textS,
-                    cursor: 'pointer', transition: 'all 0.15s',
+                    cursor: readOnly ? 'default' : 'pointer', transition: 'all 0.15s',
                   }}>
                   {val.label}
                 </button>
@@ -486,8 +488,9 @@ function EntryDetail({
             <textarea
               style={{ ...S.formInput, minHeight: '120px', resize: 'vertical', lineHeight: 1.6 }}
               value={explanation}
-              onChange={e => setExplanation(e.target.value)}
-              onBlur={e => { if (e.target.value !== (entry.explanation || '')) onSave(entry.id, { explanation: e.target.value }); }}
+              readOnly={readOnly}
+              onChange={e => { if (!readOnly) setExplanation(e.target.value); }}
+              onBlur={e => { if (!readOnly && e.target.value !== (entry.explanation || '')) onSave(entry.id, { explanation: e.target.value }); }}
               placeholder="Usage rules, notes, conjugation patterns…"
             />
           </CollapsibleSection>
@@ -517,8 +520,9 @@ function EntryDetail({
               <textarea
                 style={{ ...S.formInput, minHeight: '100px', resize: 'vertical', lineHeight: 1.6, fontFamily: SH.fk }}
                 value={examples}
-                onChange={e => setExamples(e.target.value)}
-                onBlur={e => { if (e.target.value !== (entry.examples || '')) onSave(entry.id, { examples: e.target.value }); }}
+                readOnly={readOnly}
+                onChange={e => { if (!readOnly) setExamples(e.target.value); }}
+                onBlur={e => { if (!readOnly && e.target.value !== (entry.examples || '')) onSave(entry.id, { examples: e.target.value }); }}
                 placeholder="Example sentences…"
               />
             )}
@@ -557,7 +561,7 @@ function EntryDetail({
             C={C}
             defaultOpen={questionNotes.length > 0}
             action={
-              <button
+              !readOnly && <button
                 onClick={() => onAddQuestion(entry)}
                 style={{
                   fontSize: '10px', padding: '2px 8px', borderRadius: '6px',
@@ -643,7 +647,7 @@ function EntryDetail({
             C={C}
             defaultOpen={linkedSections.length > 0}
             action={
-              <button
+              !readOnly && <button
                 onClick={() => setSecPickerOpen(o => !o)}
                 style={{
                   fontSize: '10px', padding: '2px 8px', borderRadius: '6px',
@@ -667,10 +671,12 @@ function EntryDetail({
                       <div style={{ fontSize: '13px', color: sec.resourceId ? C.accent : C.text, marginBottom: '2px' }}>{sec.content}</div>
                       {sec.resourceRaw && <div style={{ fontSize: '10px', color: C.textM }}>{sec.resourceRaw}</div>}
                     </div>
-                    <button
-                      onClick={() => onLinkSection && onLinkSection(sec, entry.id, false)}
-                      style={{ color: C.textM, fontSize: '13px', lineHeight: 1, padding: 0, background: 'none', border: 'none', cursor: 'pointer', flexShrink: 0, marginTop: '2px' }}
-                    >×</button>
+                    {!readOnly && (
+                      <button
+                        onClick={() => onLinkSection && onLinkSection(sec, entry.id, false)}
+                        style={{ color: C.textM, fontSize: '13px', lineHeight: 1, padding: 0, background: 'none', border: 'none', cursor: 'pointer', flexShrink: 0, marginTop: '2px' }}
+                      >×</button>
+                    )}
                   </div>
                 ))}
                 {secPickerOpen && (
@@ -716,7 +722,7 @@ function EntryDetail({
             C={C}
             defaultOpen={compareChips.length > 0}
             action={
-              !editing && (
+              !editing && !readOnly && (
                 <button
                   onClick={() => setShowComparePicker(true)}
                   style={{
@@ -759,14 +765,16 @@ function EntryDetail({
                       >
                         {chip}
                       </span>
-                      <button
-                        onClick={() => {
-                          const next = compareChips.filter((_, idx) => idx !== i).join(' | ');
-                          handleCompareToSave(next);
-                        }}
-                        title="Remove"
-                        style={{ color: target ? C.accent : C.textM, fontSize: '12px', lineHeight: 1, padding: 0, background: 'none', border: 'none', cursor: 'pointer', opacity: 0.7 }}
-                      >×</button>
+                      {!readOnly && (
+                        <button
+                          onClick={() => {
+                            const next = compareChips.filter((_, idx) => idx !== i).join(' | ');
+                            handleCompareToSave(next);
+                          }}
+                          title="Remove"
+                          style={{ color: target ? C.accent : C.textM, fontSize: '12px', lineHeight: 1, padding: 0, background: 'none', border: 'none', cursor: 'pointer', opacity: 0.7 }}
+                        >×</button>
+                      )}
                     </span>
                   );
                 }) : <span style={{ fontSize: '13px', color: C.textM }}>—</span>}
@@ -775,6 +783,7 @@ function EntryDetail({
           </CollapsibleSection>
 
           {/* Delete — bottom of panel, separated to reduce accidental clicks */}
+          {!readOnly && (
           <div style={{ marginTop: '32px', paddingTop: '16px', borderTop: `1px solid ${C.border}` }}>
             <button
               onClick={() => setShowDelete(true)}
@@ -786,6 +795,7 @@ function EntryDetail({
               Delete entry
             </button>
           </div>
+          )}
 
         </div>
 
@@ -1050,6 +1060,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const handleSave = useCallback(async (id, updates) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     // Stamp a change timestamp whenever masteryLevel actually changes, so a future
     // "just reached Mastered" headline can tell a fresh promotion apart from a
     // level that's been sitting unchanged for months.
@@ -1152,6 +1163,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const handleLinkSection = useCallback(async (section, entryId, add) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     const current = section.glossaryTermIds || [];
     const next = add
       ? (current.includes(entryId) ? current : [...current, entryId])
@@ -1167,6 +1179,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const handleDelete = useCallback(async (entryId, cardId) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
 
     // Find the entry being deleted so we know its term and number
     const deleted = entries.find(e => e.id === entryId);
@@ -1231,6 +1244,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const handleRename = useCallback(async (entryId, newTerm) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     const oldTerm = entries.find(e => e.id === entryId)?.glossaryTerm || '';
     await updateDoc(doc(db, 'users', uid, 'grammar_entries', entryId), { glossaryTerm: newTerm });
     setEntries(prev => {
@@ -1267,6 +1281,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const handleCreate = useCallback(async (fields) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     const maxNum      = entries.reduce((m, e) => Math.max(m, e.entryNumber || 0), 0);
     const entryNumber = maxNum + 1;
     const entryId     = `grammar_${entryNumber}`;
@@ -1302,6 +1317,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const handleAddQuestion = useCallback(async (entry) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     const now     = new Date().toISOString();
     const payload = {
       title:            `Q: ${entry.glossaryTerm}`,
@@ -1523,9 +1539,15 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
             <button style={{ ...S.btnGhost, flexShrink: 0 }} onClick={() => { setSelected(null); setPanelOpen(false); setShowNewForm(false); setSelectMode(true); }}>
               Select to study
             </button>
-            <button style={{ ...S.btnPrimary, ...S.btnMetallic, flexShrink: 0 }} onClick={() => { setSelected(null); setPanelOpen(false); setShowNewForm(true); }}>
-              + New entry
-            </button>
+            {DEMO ? (
+              <span style={{ fontSize: '12px', color: C.textM, flexShrink: 0, alignSelf: 'center' }}>
+                Read-only in demo
+              </span>
+            ) : (
+              <button style={{ ...S.btnPrimary, ...S.btnMetallic, flexShrink: 0 }} onClick={() => { setSelected(null); setPanelOpen(false); setShowNewForm(true); }}>
+                + New entry
+              </button>
+            )}
           </div>
 
           <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '16px', paddingBottom: '16px', borderBottom: `1px solid ${C.border}` }}>
@@ -1644,6 +1666,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
             onDelete={handleDelete}
             onRename={handleRename}
             onLinkSection={handleLinkSection}
+            readOnly={DEMO}
             onNavigateToCard={onNavigateToFlashcard}
             onNavigateToNote={onNavigateToNote}
             onNavigateToContent={onNavigateToContent}

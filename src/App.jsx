@@ -42,8 +42,9 @@ import { runRecurrenceEngine, getNextOccurrence } from './utils/recurrenceEngine
 import { getOrderedSectionsForSource } from './utils/contentUtils.js';
 import { loadState, saveState, createInitialTasks } from './utils/storage.js';
 import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow } from './hooks/useFirestore.js';
-import { DEMO } from './demo/demoConfig.js';
+import { DEMO, DEMO_LIMIT_NOTE, demoCapReached } from './demo/demoConfig.js';
 import { ensureDemoSeed } from './demo/seedCopy.js';
+import { DemoBanner } from './demo/DemoBanner.jsx';
 import {
   THEME_KEY, SOUND_KEY, QUIZ_SOUND_KEY, CATEGORIES,
   NAV_SECTIONS, PAGE_TITLES,
@@ -476,6 +477,10 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                   onUpdate={onAVISourceUpdate}
                   C={C} S={S}
                 />
+              : DEMO
+              ? <div className="topbar-desktop" style={{ display: 'flex', alignItems: 'center' }}>
+                  <DemoBanner variant="chip" />
+                </div>
               : page === 'content'
               ? <div style={S.topbarDate} className="topbar-desktop">
                   {upcomingLangAppt
@@ -502,6 +507,7 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
               }
             </div>
           </div>
+          {DEMO && (isMobile || page === 'avi') && <DemoBanner variant="strip" />}
           <div style={S.contentArea} className="content-pad">
             {page === 'today' && (
               <TodayPage
@@ -860,7 +866,7 @@ export default function App() {
     pipelineRanForUid.current = pipelineKey;
     (async () => {
       try {
-        const result = await runDailyPipeline(uid, cards, dsh, addTask, data.tasks ?? [], pausedDeckIds);
+        const result = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds);
         if (result) setSrsSnapshot(result);
         // If triage moved overdue cards, refresh card state from Firestore.
         if (result?.triaged > 0) {
@@ -1351,11 +1357,15 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
   }, [updateData]);
 
   const addTask = useCallback((task) => {
+    if (DEMO && demoCapReached(data.tasks || [], 'tasks')) {
+      showToast(DEMO_LIMIT_NOTE);
+      return null;
+    }
     const id = uid();
     updateData(prev => ({ ...prev, tasks: [...prev.tasks, { id, ...task }] }));
     showToast('Task added.');
     return id;
-  }, [updateData, showToast]);
+  }, [updateData, showToast, data.tasks]);
 
   const patchTask = useCallback((taskId, updates) => {
     updateData(prev => ({
@@ -1595,6 +1605,11 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
   const saveAppointment = useCallback(async (appt) => {
     const uid = user?.uid;
     if (!uid) return;
+    if (DEMO && !appointments.some(a => a.id === appt.id) &&
+        demoCapReached(appointments, 'appointments')) {
+      showToast(DEMO_LIMIT_NOTE);
+      return;
+    }
     try {
       await setDoc(doc(db, 'users', uid, 'appointments', appt.id), {
         ...appt, lastUpdated: new Date().toISOString(),
@@ -1602,7 +1617,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
     } catch (e) {
       console.error('App: saveAppointment failed', e);
     }
-  }, [user?.uid]);
+  }, [user?.uid, appointments, showToast]);
 
   const handleSectionComplete = useCallback(async (sectionId, sourceId, currentApptId) => {
     const uid = user?.uid;
