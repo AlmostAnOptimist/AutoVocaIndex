@@ -14,6 +14,7 @@ import { ContentLibraryGazette } from '../components/ContentLibraryGazette.jsx';
 import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
 import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded } from '../utils/contentUtils.js';
+import { DEMO } from '../demo/demoConfig.js';
 
 // ── Family grouping (D1) ──────────────────────────────────────
 const FAMILY_ORDER    = ['grammar', 'reading', 'listening', 'reference'];
@@ -853,6 +854,7 @@ function SourceDetailPanel({
   const removeCost = costId => onSourceFieldSave(source, { costs: (source.costs || []).filter(c => c.id !== costId) });
 
   const handleAddSecs = async () => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const n = parseInt(addSecCount);
     if (!n || n < 1) return;
     setAddSecSaving(true);
@@ -1434,6 +1436,7 @@ function AddSourceModal({ onSave, onClose, C, S }) {
   const handleTypeChange = (newType) => { setType(newType); setSubtype(''); };
 
   const handleSave = async (mode = 'library') => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     if (!title.trim()) return;
     setSaving(true);
     await onSave({ title: title.trim(), type, url: url.trim(), origin: origin.trim(),
@@ -1564,6 +1567,7 @@ function QuickQuestionModal({ onSave, onClose, C, S }) {
   const canSave = title.replace(/^Q:\s*/, '').trim().length > 0 && !saving;
 
   const handleSave = async (mode = 'close') => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     if (!canSave) return;
     setSaving(true);
     await onSave({ title: title.trim(), tags: ['question'] }, mode);
@@ -2207,7 +2211,7 @@ export function ContentLibraryPage({
   const lastTriggerAddCorrection = useRef(triggerAddCorrection);
 
   useEffect(() => {
-    if (triggerAddSource > lastTriggerAddSource.current) setShowAddSource(true);
+    if (!DEMO && triggerAddSource > lastTriggerAddSource.current) setShowAddSource(true);
     lastTriggerAddSource.current = triggerAddSource;
   }, [triggerAddSource]);
   useEffect(() => {
@@ -2241,18 +2245,22 @@ export function ContentLibraryPage({
 
   // Pre-link handlers — switch to Notes tab with source/section context
   const handleAddNoteFromSource = useCallback((sourceId) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     setPreLinkedData({ key: crypto.randomUUID(), sourceId, sectionId: null, mode: 'note' });
     setTab('notes');
   }, []);
   const handleAddNoteFromSection = useCallback((sourceId, sectionId) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     setPreLinkedData({ key: crypto.randomUUID(), sourceId, sectionId, mode: 'note' });
     setTab('notes');
   }, []);
   const handleAddCorrectionFromSource = useCallback((sourceId) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     setPreLinkedData({ key: crypto.randomUUID(), sourceId, sectionId: null, mode: 'correction' });
     setTab('notes');
   }, []);
   const handleAddCorrectionFromSection = useCallback((sourceId, sectionId) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     setPreLinkedData({ key: crypto.randomUUID(), sourceId, sectionId, mode: 'correction' });
     setTab('notes');
   }, []);
@@ -2272,6 +2280,7 @@ export function ContentLibraryPage({
   }, []);
 
   const handleQuickQuestion = useCallback(async ({ title, tags }, mode = 'close') => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     const now = new Date().toISOString();
@@ -2401,6 +2410,7 @@ export function ContentLibraryPage({
 
   // ── Section handlers ──────────────────────────────────────
   const handleSectionToggle = useCallback(async (section) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     const isDone   = section.status === 'Done';
@@ -2444,6 +2454,7 @@ export function ContentLibraryPage({
   }, [tasks, onCompleteLinkedTask, sections, sources, triggerAutoArchive]);
 
   const handleCycleStatus = useCallback((sectionId, direction) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     const sec = sections.find(s => s.id === sectionId);
     if (!sec) return;
@@ -2477,6 +2488,7 @@ export function ContentLibraryPage({
   }, [sections, sources, triggerAutoArchive]);
 
   const handleSectionTitleSave = useCallback(async (section, newTitle, newUrl) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     setSections(prev => prev.map(s => s.id === section.id ? { ...s, content: newTitle, url: newUrl } : s));
@@ -2486,6 +2498,7 @@ export function ContentLibraryPage({
 
   // ── Source handlers ───────────────────────────────────────
   const handleSourceTitleSave = useCallback(async (source, newTitle, newUrl, newType) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     const updates = { title: newTitle, url: newUrl };
@@ -2497,6 +2510,7 @@ export function ContentLibraryPage({
   }, [onSourceRename]);
 
   const handleSourceFieldSave = useCallback(async (source, updates) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     setSources(prev => prev.map(s => s.id === source.id ? { ...s, ...updates } : s));
@@ -2505,6 +2519,7 @@ export function ContentLibraryPage({
   }, []);
 
   const handleSectionFieldSave = useCallback(async (section, updates) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     setSections(prev => prev.map(s => s.id === section.id ? { ...s, ...updates } : s));
@@ -2513,6 +2528,7 @@ export function ContentLibraryPage({
   }, []);
 
   const handleDeleteSection = useCallback(async (sectionId) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     setSections(prev => prev.filter(s => s.id !== sectionId));
@@ -2523,6 +2539,7 @@ export function ContentLibraryPage({
   // Phase D3: routes the delete affordance through the cascade confirmation
   // modal.
   const handleDeleteSource = useCallback((sourceId) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const src = sources.find(s => s.id === sourceId);
     if (src) setDeleteSourceTarget(src);
   }, [sources]);
@@ -2530,6 +2547,7 @@ export function ContentLibraryPage({
   // Phase D3 Stage 2: the ordered, batched, idempotent delete cascade.
   // Operates on the Firestore-resolved plan, not in-memory arrays.
   const handleConfirmDeleteCascade = useCallback(async (source, plan, onProgress) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid || !source || source.isSourceless || !plan) return;
     const title      = source.title || '';
@@ -2641,6 +2659,7 @@ export function ContentLibraryPage({
   }, [selectedSourceId, updateCards, updateDecks, onSourceCascadeComplete]);
 
   const handleSectionOrderSave = useCallback(async (sourceId, orderedIds) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     setSources(prev => prev.map(s => s.id === sourceId ? { ...s, sectionOrder: orderedIds } : s));
@@ -2650,6 +2669,7 @@ export function ContentLibraryPage({
 
   // Source-level status cycle (section-less sources); writes sourceStatus field
   const handleCycleSourceStatus = useCallback((sourceId, direction) => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const src = sources.find(s => s.id === sourceId);
     if (!src) return;
     const cycle   = ['Not started', 'In Progress', 'Skip'];
@@ -2732,6 +2752,7 @@ export function ContentLibraryPage({
   }, [addTask, patchTask, sources, tasks]);
 
   const handleAddSource = useCallback(async ({ title, type, url, origin, sectionCount, subtype, levelMin, levelMax, studyIntent }, mode = 'library') => {
+    if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     const srcPayload = {

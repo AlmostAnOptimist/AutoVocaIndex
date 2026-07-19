@@ -18,6 +18,7 @@ import {
 } from '../../utils/aviUtils.js';
 import { SentenceEditModal } from '../../components/avi/SentenceEditModal.jsx';
 import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
+import { DEMO, DEMO_CAPS, DEMO_LIMIT_NOTE, demoCapReached } from '../../demo/demoConfig.js';
 import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { Icons } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
@@ -357,6 +358,10 @@ export function AVISentenceInputPage({
 
   // ── Tokenize and auto-select ─────────────────────────────────
   const handlePickInput = useCallback((text, existingUid = null) => {
+    if (DEMO && existingUid === null && demoCapReached(data.sentenceInputs, 'sentences')) {
+      showAVIToast(DEMO_LIMIT_NOTE);
+      return;
+    }
     setPickSentence(text);
     setPickPhrase(null);
     setReopenFor(existingUid);
@@ -373,9 +378,13 @@ export function AVISentenceInputPage({
       );
       if (matches) autoSet.add(idx);
     });
-    setAutoSelected(autoSet);
+    let finalAuto = autoSet;
+    if (DEMO && autoSet.size > DEMO_CAPS.wordsPerSentence) {
+      finalAuto = new Set([...autoSet].slice(0, DEMO_CAPS.wordsPerSentence));
+    }
+    setAutoSelected(finalAuto);
     setPickSelected(new Set()); // clear manual selections
-  }, [data.wordInputs]);
+  }, [data.wordInputs, data.sentenceInputs, showAVIToast]);
 
   // ── Token selection (manual toggle) ─────────────────────────
   const toggleToken = (idx) => {
@@ -383,6 +392,11 @@ export function AVISentenceInputPage({
       // Deselecting an auto-selected token removes it from auto set
       setAutoSelected(prev => { const next = new Set(prev); next.delete(idx); return next; });
     } else {
+      if (DEMO && !pickSelected.has(idx) &&
+          autoSelected.size + pickSelected.size + (pickPhrase ? 1 : 0) >= DEMO_CAPS.wordsPerSentence) {
+        showAVIToast(`Demo: up to ${DEMO_CAPS.wordsPerSentence} target words per sentence.`);
+        return;
+      }
       setPickSelected(prev => {
         const next = new Set(prev);
         if (next.has(idx)) next.delete(idx); else next.add(idx);
@@ -405,6 +419,9 @@ export function AVISentenceInputPage({
     if (start === null) return;
     if (!didDrag.current) {
       toggleToken(idx);
+    } else if (DEMO && !pickPhrase &&
+               autoSelected.size + pickSelected.size >= DEMO_CAPS.wordsPerSentence) {
+      showAVIToast(`Demo: up to ${DEMO_CAPS.wordsPerSentence} target words per sentence.`);
     } else {
       const lo = Math.min(start, idx);
       const hi = Math.max(start, idx);
@@ -569,7 +586,7 @@ export function AVISentenceInputPage({
       if (newWI.def2) {
         autoCreateWordCard({
           entry: newWI, lemmaMaster: data.lemmaMaster,
-          decks, uid, updateCards, updateDecks, aviSources, dsh,
+          cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
         }).then(() => {
           updateData(prev => ({
             ...prev,
@@ -614,11 +631,14 @@ export function AVISentenceInputPage({
     if (existingInputs.length > 0) {
       const rows = createSentenceRows(existingInputs, pickSentence);
       // Auto-create cards for rows with cardBack
+      if (DEMO && demoCapReached(cards, 'cards') && rows.some(r => r.cardBack && !r.skipUpload)) {
+        showAVIToast(DEMO_LIMIT_NOTE);
+      }
       for (const row of rows) {
         if (row.cardBack && !row.skipUpload) {
           autoCreateSentenceCard({
             entry: row, lemmaMaster: data.lemmaMaster,
-            decks, uid, updateCards, updateDecks, aviSources, dsh,
+            cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
           }).then(() => {
             updateData(prev => ({
               ...prev,
@@ -717,11 +737,14 @@ export function AVISentenceInputPage({
     const rows = createSentenceRowsWithLemma(terms, sentence);
 
     // Auto-create cards for rows with cardBack
+    if (DEMO && demoCapReached(cards, 'cards') && rows.some(r => r.cardBack && !r.skipUpload)) {
+      showAVIToast(DEMO_LIMIT_NOTE);
+    }
     for (const row of rows) {
       if (row.cardBack && !row.skipUpload) {
         autoCreateSentenceCard({
         entry: row, lemmaMaster: [...data.lemmaMaster, ...newLemmas],
-        decks, uid, updateCards, updateDecks, aviSources, dsh,
+        cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
         }).then(() => {
           updateData(prev => ({
             ...prev,
@@ -737,7 +760,7 @@ export function AVISentenceInputPage({
       if (wi.def2) {
         autoCreateWordCard({
                   entry: wi, lemmaMaster: [...data.lemmaMaster, ...newLemmas],
-                  decks, uid, updateCards, updateDecks, aviSources, dsh,
+                  cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
                 }).then(() => {
           updateData(prev => ({
             ...prev,

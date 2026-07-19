@@ -19,3 +19,17 @@ export const DEMO_CAPS = DEMO_TIER === 'beta'
 
 export const DEMO_LIMIT_NOTE =
   'Demo limit reached — deploy your own AutoVocaIndex to go further.';
+
+// ── Cap helpers (7C) ─────────────────────────────────────────
+// Caps count docs LACKING seeded: true. Pass any doc array plus the
+// DEMO_CAPS key; outside demo these always report "not reached".
+export function nonSeededCount(arr) {
+  return (arr || []).filter(d => d && !d.seeded).length;
+}
+
+export function demoCapReached(arr, capKey) {
+  if (!DEMO) return false;
+  const cap = DEMO_CAPS[capKey];
+  if (typeof cap !== 'number') return false;
+  return nonSeededCount(arr) >= cap;
+}

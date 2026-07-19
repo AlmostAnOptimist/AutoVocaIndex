@@ -15,6 +15,7 @@ import {
 } from '../../utils/aviUtils.js';
 import { prewarmTtsAudio } from '../../utils/ttsUtils.js';
 import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
+import { DEMO } from '../../demo/demoConfig.js';
 import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
 import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
@@ -357,6 +358,7 @@ export function AVIImportPage({
 
   // ── Step 2 -> 3: commit ──────────────────────────────────────
   const handleCommit = () => {
+    if (DEMO) { showAVIToast('Import commits are disabled in the demo — parsing and preview only.'); return; }
     if (busyRef.current || !review || includedTerms.length === 0) return;
     busyRef.current = true; setBusy(true);
     try {
@@ -397,7 +399,7 @@ export function AVIImportPage({
         if (wi.def2) {
           autoCreateWordCard({
             entry: wi, lemmaMaster: mergedLM,
-            decks, uid, updateCards, updateDecks, aviSources, dsh,
+            cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
           }).then(() => {
             updateData(prev => ({
               ...prev,
@@ -412,7 +414,7 @@ export function AVIImportPage({
         if (row.cardBack && !row.skipUpload) {
           autoCreateSentenceCard({
             entry: row, lemmaMaster: mergedLM,
-            decks, uid, updateCards, updateDecks, aviSources, dsh,
+            cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
           }).then(() => {
             updateData(prev => ({
               ...prev,
@@ -665,11 +667,11 @@ export function AVIImportPage({
 
         <div style={{ display: 'flex', gap: '8px', paddingTop: '4px', paddingBottom: '18px' }}>
           <button
-            style={primaryBtn(busy || includedTerms.length === 0)}
-            disabled={busy || includedTerms.length === 0}
+            style={primaryBtn(DEMO || busy || includedTerms.length === 0)}
+            disabled={DEMO || busy || includedTerms.length === 0}
             onClick={handleCommit}
           >
-            Commit {includedTerms.length} term{includedTerms.length === 1 ? '' : 's'}
+            {DEMO ? 'Commit disabled in demo' : <>Commit {includedTerms.length} term{includedTerms.length === 1 ? '' : 's'}</>}
           </button>
           <button style={ghostBtn} onClick={() => setStep('input')}>Back</button>
         </div>
@@ -688,6 +690,12 @@ export function AVIImportPage({
         overflowY: 'auto',
       }}>
         {sectionLabel('Import')}
+
+        {DEMO && (
+          <div style={{ fontSize: '12px', color: C.warning, fontWeight: 500, lineHeight: 1.5 }}>
+            In the demo you can parse and preview an import, but the final commit is disabled. Try a paste to see the cascade at work.
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: '6px' }}>
           {MODES.map(m => (

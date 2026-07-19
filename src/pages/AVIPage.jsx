@@ -227,7 +227,7 @@ export function AVIPage({
       autoCreateSentenceCard({
         entry: { ...row, cardBack },
         lemmaMaster: data.lemmaMaster,
-        decks, uid, updateCards, updateDecks, aviSources,
+        cards, decks, uid, updateCards, updateDecks, aviSources,
         dsh: settings?.dayStartHour ?? 3,
       }).then(() => {
         updateData(prev => ({

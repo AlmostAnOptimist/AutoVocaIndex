@@ -26,6 +26,7 @@ import { getQuizLeadStory } from '../utils/headlineEngine.js';
 import { crowSrc as CrowImg, decoBlockStyle } from '../utils/decoAssets.js';
 import { PaginationFooter } from '../components/PaginationFooter.jsx';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
+import { DEMO, DEMO_LIMIT_NOTE, demoCapReached } from '../demo/demoConfig.js';
 import { usePaginationKeys } from '../hooks/usePaginationKeys.js';
 import {
   GazetteMasthead, GoldRule, BylineRule, GazetteKicker, GazetteHeadline,
@@ -394,7 +395,7 @@ function VocaQuizConfig({ open, decks, onStart, onBack, apiKey, C, S }) {
             </ConfigRow>
           )}
 
-          {vocaDecks.length > 0 && (
+          {!DEMO && vocaDecks.length > 0 && (
             <ConfigRow label="Card pools" C={C}>
               <ToggleChip label="All decks" active={config.deckIds.length === 0} onClick={() => set('deckIds', [])} C={C} />
               {vocaDecks.map(d => (
@@ -460,8 +461,21 @@ function cardWeight(card) {
   return grade < 3 ? base * 2 : base;
 }
 
-// Weighted random sample of `n` cards without replacement
+// Weighted random sample of `n` cards without replacement.
+// Demo (7D): user-created cards are guaranteed into the sample first;
+// seeded cards fill the remainder through the weighted draw.
 function weightedSample(cards, n) {
+  if (DEMO) {
+    const user = cards.filter(c => c && !c.seeded);
+    if (user.length > 0 && user.length < cards.length) {
+      if (user.length >= n) return weightedDraw(user, n);
+      return shuffleArray([...user, ...weightedDraw(cards.filter(c => c && c.seeded), n - user.length)]);
+    }
+  }
+  return weightedDraw(cards, n);
+}
+
+function weightedDraw(cards, n) {
   if (cards.length <= n) return shuffleArray(cards);
   const pool    = [...cards];
   const result  = [];
@@ -3439,7 +3453,7 @@ function ClozeQuizConfig({ open, sentenceDecks, allSentenceDecks, onStart, onBac
           </ConfigRow>
 
           {/* Deck filter */}
-          {sentenceDecks.length > 0 && (
+            {!DEMO && sentenceDecks.length > 0 && (
             <ConfigRow label="Card pools" C={C} noBorder>
               <ToggleChip label="All decks" active={config.deckIds.length === 0} onClick={() => set('deckIds', [])} C={C} />
               {sentenceDecks.map(d => (
@@ -4234,6 +4248,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
 
   // ── handleVocaStart ────────────────────────────────────────
   const handleVocaStart = useCallback((config, vocaDecks) => {
+    if (DEMO) config = { ...config, deckIds: [] }; // demo: all decks (7D)
     const pool = enrichedCards.filter(c => {
       if (c.type === 'grammar') return false;
       if ((c.deckIds || []).includes(GRAMMAR_DECK_ID)) return false;
@@ -4321,6 +4336,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   }, [saveResult, quizConfig, deckNameMap]);
 
    const handleClozeStart = useCallback(async (config) => {
+  if (DEMO) config = { ...config, deckIds: [] }; // demo: all decks (7D)
   const sentenceDecks = decks.filter(d => d.name?.endsWith('(sentence mining)'));
   const activeDeckIds = config.deckIds.length > 0
     ? config.deckIds
@@ -4578,27 +4594,39 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         )}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {DEMO && demoCapReached(results, 'quizSessions') && (
+            <div style={{ fontSize: '12px', color: C.warning, fontWeight: 500, lineHeight: 1.5 }}>
+              {DEMO_LIMIT_NOTE}
+            </div>
+          )}
           <GazetteSplitFig
             label="Vocabulary Quiz"
             description="Multiple choice, true/false, typed answers, and matching — choose your formats, decks, and question counts."
             bestFor="Best for quick sessions."
             flip={false}
-            onClick={() => { quizSound('mouse_click'); setConfigModal('voca'); }}
+            onClick={() => { if (DEMO && demoCapReached(results, 'quizSessions')) return; quizSound('mouse_click'); setConfigModal('voca'); }}
           />
           <GazetteSplitFig
             label="Cloze Quiz"
             description="Fill-in-the-blank questions built from your sentence-mining decks, answered by typing or selecting from choices."
             bestFor="Best for in-context vocabulary recall."
             flip={true}
-            onClick={() => { quizSound('mouse_click'); setConfigModal('cloze'); }}
+            onClick={() => { if (DEMO && demoCapReached(results, 'quizSessions')) return; quizSound('mouse_click'); setConfigModal('cloze'); }}
           />
-          <GazetteSplitFig
-            label="Grammar Quiz"
-            description="Translation drills, broader practice, or side-by-side concept comparisons, assessed by AI with correction notes."
-            bestFor="Best for direct comparison and explanation."
-            flip={false}
-            onClick={() => { quizSound('mouse_click'); setConfigModal('grammar'); }}
-          />
+          <div style={DEMO ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
+            <GazetteSplitFig
+              label="Grammar Quiz"
+              description="Translation drills, broader practice, or side-by-side concept comparisons, assessed by AI with correction notes."
+              bestFor="Best for direct comparison and explanation."
+              flip={false}
+              onClick={() => { quizSound('mouse_click'); setConfigModal('grammar'); }}
+            />
+          </div>
+          {DEMO && (
+            <div style={{ fontSize: '11px', color: C.textM, marginTop: '-4px' }}>
+              Grammar quizzes are not available in the demo.
+            </div>
+          )}
 
           {results.length > 0 && (
             <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>

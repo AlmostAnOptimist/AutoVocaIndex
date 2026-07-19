@@ -11,6 +11,21 @@ import { db } from '../firebase.js';
 import { normalizeLemma } from './aviUtils.js';
 import { generateVocabCardAudio, generateSentenceCardAudio } from './ttsUtils.js';
 import { toDateStr, getLogicalToday } from './dateUtils.js';
+import { DEMO, DEMO_CAPS, nonSeededCount } from '../demo/demoConfig.js';
+
+// ── Demo card budget (7C) ─────────────────────────────────────
+// React state lags behind a burst of creations (callers fire factories from
+// one closure-captured cards array), so the cap is enforced against a
+// baseline fixed at the first factory call of this page load plus a
+// monotonic session counter — conservative: never overshoots, resets on
+// reload, and the reload recount is exact.
+let demoCardBaseline = null;
+let demoCardsCreated = 0;
+function demoCardBudgetExhausted(cards) {
+  if (!DEMO) return false;
+  if (demoCardBaseline === null) demoCardBaseline = nonSeededCount(cards || []);
+  return demoCardBaseline + demoCardsCreated >= DEMO_CAPS.cards;
+}
 
 // ── Race-safe deck resolution ─────────────────────────────────
 // Multiple card creations can run concurrently against the same stale
@@ -59,10 +74,12 @@ async function resolveDeckId({ uid, deckName, sourceTitle, decks, aviSources, up
 // Creates a vocab flashcard for a word entry.
 // Returns the new card's Firestore ID, or null on failure.
 export async function autoCreateWordCard({
-  entry, lemmaMaster, decks, uid,
+  entry, lemmaMaster, cards, decks, uid,
   updateCards, updateDecks, aviSources, dsh = 3,
 }) {
   if (!entry.def2 || entry.skipUpload || !uid) return null;
+  if (demoCardBudgetExhausted(cards)) return null;
+  if (DEMO) demoCardsCreated++;
 
   const lemmaEntry = lemmaMaster.find(l =>
     normalizeLemma(l.lemma) === normalizeLemma(entry.lemma)
@@ -131,15 +148,17 @@ export async function ensureNuanceFlashcard({
   await autoCreateWordCard({
     entry: { ...row, def2: lemmaEntry.def2 },
     lemmaMaster: [lemmaEntry],
-    decks, uid, updateCards, updateDecks, aviSources, dsh,
+    cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
   });
 }
 
 // ── Auto-card creation for sentence entries ───────────────────
 export async function autoCreateSentenceCard({
-  entry, lemmaMaster, decks, uid, updateCards, updateDecks, aviSources, dsh = 3,
+  entry, lemmaMaster, cards, decks, uid, updateCards, updateDecks, aviSources, dsh = 3,
 }) {
   if (!entry.cardBack || entry.skipUpload || !uid) return null;
+  if (demoCardBudgetExhausted(cards)) return null;
+  if (DEMO) demoCardsCreated++;
 
   const lemmaEntry = lemmaMaster.find(l =>
     normalizeLemma(l.lemma) === normalizeLemma(entry.targetWord)

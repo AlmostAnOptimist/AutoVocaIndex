@@ -23,6 +23,7 @@ import { Icons } from '../components/Icons.jsx';
 import { playCardAudio, playAudioUrl, generateGrammarCardAudio } from '../utils/ttsUtils.js';
 import { GrammarCardPicker } from '../components/GrammarCardPicker.jsx';
 import { GRAMMAR_MASTERY } from '../constants.js';
+import { DEMO } from '../demo/demoConfig.js';
 
 // Adjust in Settings once that field is wired up.
 const NEW_CARDS_PER_SESSION = 10;
@@ -114,7 +115,7 @@ function deckAccent(type, C) {
 function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextDueDate,
   onGrade, onEnd, soundProfile, onNavigateToGrammar, fsrsSettings, settings, reversed = false, C, S }) {
 
-  const AGAIN_CAP = fsrsSettings?.againCap ?? FSRS_DEFAULTS.againCap;
+  const AGAIN_CAP = DEMO ? 1 : (fsrsSettings?.againCap ?? FSRS_DEFAULTS.againCap);
 
   const initialPhase = manualCards.length > 0 ? 'manual' : dueCards.length > 0 ? 'due' : 'opening_boundary';
   const [phase,            setPhase]            = useState(initialPhase);
@@ -1230,12 +1231,14 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       const now     = new Date().toISOString();
       const history = [...(card.gapEvents || []), { date: now, grade: rating }].slice(-100);
       const updates = { due: null, lastReview: now, lastGrade: rating, reps: (card.reps || 0) + 1, gapEvents: history };
+      if (DEMO) return { ...card, ...updates }; // demo: inert grading — nothing persists (D5)
       await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates);
       updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, ...updates } : c) : prev);
       return { ...card, ...updates };
     }
 
     const updates = fsrsGrade(card, rating, fsrsSettings);
+    if (DEMO) return { ...card, ...updates }; // demo: inert grading — no card write, no reviewLog, no reviewStats (D5)
     await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates);
     updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, ...updates } : c) : prev);
 
@@ -1260,7 +1263,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   // Firestore with due=past (from when Again was pressed), so they surface first
   // at the next session start with no additional writes needed.
   const handleEndSession = useCallback(async () => {
-    if (uid && session?.deckId && !['all', 'all_words', 'all_sentences'].includes(session.deckId)) {
+    if (!DEMO && uid && session?.deckId && !['all', 'all_words', 'all_sentences'].includes(session.deckId)) {
       const now = new Date().toISOString();
       await updateDoc(doc(db, 'users', uid, 'decks', session.deckId), { lastStudied: now });
       updateDecks(prev => prev.map(d => d.id === session.deckId ? { ...d, lastStudied: now } : d));
@@ -1278,7 +1281,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       });
     }    // Re-run spike forecast with the post-session card state so that any large
     // batch of new cards reviewed today is immediately factored into the 7-day forecast.
-    if (uid && cards && session?.deckId !== 'deck_grammar') {
+    if (!DEMO && uid && cards && session?.deckId !== 'deck_grammar') {
       try {
         const result = await runSpikeForecast(uid, cards, dsh || 3, addTask, tasks || [], [...pausedDeckIds]);
         if (onPipelineResult) onPipelineResult(result);
