@@ -1,16 +1,37 @@
-# React + Vite
+# AutoVocaIndex
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A self-hosted Korean study environment: sentence mining and vocabulary intake with automatic lemma resolution, FSRS-scheduled flashcards, cloze and vocabulary quizzes, a grammar index, a content library, and language-study task and appointment planning — all wrapped in a newsprint Gazette interface.
 
-Currently, two official plugins are available:
+*Version 1.0 — published July 2026.*
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Maintenance posture
 
-## React Compiler
+AutoVocaIndex is published as a frozen snapshot. It is complete and working as shipped, but it is not an actively maintained project: there is no feature roadmap, and issues and pull requests may not receive responses. It is offered as-is for self-hosting, study, and adaptation — fork freely under the MIT license.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Demo
 
-## Expanding the ESLint configuration
+A hosted demo is available at DEMO\_URL\_PLACEHOLDER. The demo runs on shared infrastructure, so it caps most write actions and resets nightly at 03:00 KST. For real use, self-host against your own Firebase project — setup takes a few minutes and then everything runs on free tiers.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Setup at a glance
+
+Create a Firebase project, copy `.env.example` to `.env` and fill in the six `VITE\_FIREBASE\_\*` values, run `npm install`, then develop under `netlify dev`. Optional integrations (KRDict dictionary lookups, AI definitions and grammar quizzes, Google Cloud text-to-speech) each need one additional key, documented in `.env.example`. A seed for the global lemma map ships in `seed/` with an import script — note the `updatedAt` preservation warning in the script header before running it.
+
+## Documentation
+
+The full documentation set lands in `docs/` with the v1.0 documentation pass: overview, architecture, data model, setup, deployment, decisions and gotchas, building with AI, converting to another language, and customizing themes. Links will be added here as each document ships.
+
+## Support
+
+If AutoVocaIndex is useful to you, you can support it on Ko-fi:
+
+<a href="https://ko-fi.com/autovocaindex">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="public/kofi-dark.png">
+    <img alt="Support AutoVocaIndex on Ko-fi" src="public/kofi-beige.png" width="220">
+  </picture>
+</a>
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
