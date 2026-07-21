@@ -38,3 +38,5 @@ serviceAccount*.json
 
 
 deno.lock
+
+seed/globalLemmaMap.json
