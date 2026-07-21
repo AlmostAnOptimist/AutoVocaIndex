@@ -19,6 +19,7 @@
 // pattern, so saving it inside the working directory risks a commit.
 
 import { readFileSync, writeFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import admin from 'firebase-admin';
@@ -66,8 +67,8 @@ if (badUpdatedAt.length) {
 }
 
 const total = snap.size;
-const outPath = join(dirname(fileURLToPath(import.meta.url)), 'globalLemmaMap.json');
-writeFileSync(outPath, JSON.stringify(out, null, 2) + '\n', 'utf8');
+const outPath = join(dirname(fileURLToPath(import.meta.url)), 'globalLemmaMap.json.gz');
+writeFileSync(outPath, gzipSync(JSON.stringify(out)));
 
 console.log(`Wrote ${total} rows to ${outPath}`);
 console.log(`  pre-${CUTOFF} (seed-era): ${preCutoff}`);

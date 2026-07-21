@@ -22,7 +22,8 @@
 // downloaded filename does not match the serviceAccount*.json ignore
 // pattern, so saving it inside the working directory risks a commit.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import admin from 'firebase-admin';
@@ -40,8 +41,12 @@ const sa = JSON.parse(readFileSync(keyPath, 'utf8'));
 admin.initializeApp({ credential: admin.credential.cert(sa) });
 const db = admin.firestore();
 
-const seedPath = join(dirname(fileURLToPath(import.meta.url)), 'globalLemmaMap.json');
-const rows = JSON.parse(readFileSync(seedPath, 'utf8'));
+const seedDir = dirname(fileURLToPath(import.meta.url));
+const gzPath = join(seedDir, 'globalLemmaMap.json.gz');
+const rawPath = join(seedDir, 'globalLemmaMap.json');
+const rows = existsSync(gzPath)
+  ? JSON.parse(gunzipSync(readFileSync(gzPath)).toString('utf8'))
+  : JSON.parse(readFileSync(rawPath, 'utf8'));
 const entries = Object.entries(rows);
 
 if (!entries.length) {
