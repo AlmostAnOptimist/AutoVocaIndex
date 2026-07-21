@@ -1,0 +1,68 @@
+<svg viewBox="0 0 920 470" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, 'Times New Roman', serif" role="img" aria-label="The AVI word process: words are gathered, resolved to a lemma, and studied; the map loop fixes the future, the master loop fixes the past; an optional habit layer keeps it on schedule.">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#A8502A"/>
+    </marker>
+    <marker id="arrInk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#2B241D"/>
+    </marker>
+  </defs>
+
+  <!-- parchment ground and double deco frame -->
+  <rect x="0" y="0" width="920" height="470" fill="#F5EEDF"/>
+  <path d="M 26 8 H 894 L 912 26 V 444 L 894 462 H 26 L 8 444 V 26 Z" fill="none" stroke="#8D7B5F" stroke-width="1.5"/>
+  <path d="M 30 13 H 892 L 907 28 V 442 L 892 457 H 28 L 13 442 V 28 Z" fill="none" stroke="#8D7B5F" stroke-width="0.75"/>
+
+  <!-- masthead -->
+  <text x="460" y="45" text-anchor="middle" font-size="17" letter-spacing="6" fill="#2B241D">&#183; THE WORD PROCESS &#183;</text>
+  <line x1="330" y1="56" x2="590" y2="56" stroke="#B98A2F" stroke-width="1"/>
+
+  <!-- GATHER -->
+  <path d="M 64 84 H 286 L 298 96 V 204 L 286 216 H 64 L 52 204 V 96 Z" fill="#FBF6EA" stroke="#2B241D" stroke-width="1.5"/>
+  <path d="M 66.5 88 H 284 L 294 98 V 202 L 284 212 H 66.5 L 56 202 V 98 Z" fill="none" stroke="#2B241D" stroke-width="0.6"/>
+  <text x="175" y="114" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="3" fill="#2B241D">GATHER</text>
+  <line x1="141" y1="123" x2="209" y2="123" stroke="#B98A2F" stroke-width="1"/>
+  <text x="175" y="146" text-anchor="middle" font-size="12.5" fill="#2B241D">Content Library</text>
+  <text x="175" y="166" text-anchor="middle" font-size="12.5" fill="#2B241D">Word &#38; Sentence Input &#183; Import</text>
+  <text x="175" y="190" text-anchor="middle" font-size="11.5" font-style="italic" fill="#6E5F4B">every entry keeps its source</text>
+
+  <!-- RESOLVE -->
+  <path d="M 349 84 H 571 L 583 96 V 204 L 571 216 H 349 L 337 204 V 96 Z" fill="#FBF6EA" stroke="#2B241D" stroke-width="1.5"/>
+  <path d="M 351.5 88 H 569 L 579 98 V 202 L 569 212 H 351.5 L 341 202 V 98 Z" fill="none" stroke="#2B241D" stroke-width="0.6"/>
+  <text x="460" y="114" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="3" fill="#2B241D">RESOLVE</text>
+  <line x1="422" y1="123" x2="498" y2="123" stroke="#B98A2F" stroke-width="1"/>
+  <text x="460" y="146" text-anchor="middle" font-size="12.5" fill="#2B241D">surface form &#8594; lemma</text>
+  <text x="460" y="166" text-anchor="middle" font-size="12.5" fill="#2B241D">1&#183; look it up&#160;&#160;&#160;2&#183; work it out</text>
+  <text x="460" y="190" text-anchor="middle" font-size="11.5" font-style="italic" fill="#6E5F4B">Lemma Master records every one</text>
+
+  <!-- STUDY -->
+  <path d="M 634 84 H 856 L 868 96 V 204 L 856 216 H 634 L 622 204 V 96 Z" fill="#FBF6EA" stroke="#2B241D" stroke-width="1.5"/>
+  <path d="M 636.5 88 H 854 L 864 98 V 202 L 854 212 H 636.5 L 626 202 V 98 Z" fill="none" stroke="#2B241D" stroke-width="0.6"/>
+  <text x="745" y="114" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="3" fill="#2B241D">STUDY</text>
+  <line x1="717" y1="123" x2="773" y2="123" stroke="#B98A2F" stroke-width="1"/>
+  <text x="745" y="146" text-anchor="middle" font-size="12.5" fill="#2B241D">Flashcards &#183; FSRS scheduling</text>
+  <text x="745" y="166" text-anchor="middle" font-size="12.5" fill="#2B241D">Quizzes &#183; Grammar Index</text>
+  <text x="745" y="190" text-anchor="middle" font-size="11.5" font-style="italic" fill="#6E5F4B">everything keyed to the lemma</text>
+
+  <!-- forward arrows -->
+  <line x1="300" y1="150" x2="332" y2="150" stroke="#2B241D" stroke-width="1.5" marker-end="url(#arrInk)"/>
+  <line x1="585" y1="150" x2="617" y2="150" stroke="#2B241D" stroke-width="1.5" marker-end="url(#arrInk)"/>
+
+  <!-- lemma map pill and map loop -->
+  <path d="M 401 268 H 519 L 527 276 V 294 L 519 302 H 401 L 393 294 V 276 Z" fill="#FBF6EA" stroke="#A8502A" stroke-width="1.25"/>
+  <text x="460" y="290" text-anchor="middle" font-size="12.5" font-weight="bold" letter-spacing="2.5" fill="#2B241D">LEMMA MAP</text>
+  <path d="M 428 219 C 417 236 417 248 428 264" fill="none" stroke="#A8502A" stroke-width="1.25" marker-end="url(#arr)"/>
+  <path d="M 492 265 C 503 248 503 236 492 220" fill="none" stroke="#A8502A" stroke-width="1.25" marker-end="url(#arr)"/>
+  <text x="383" y="289" text-anchor="end" font-size="11" font-style="italic" fill="#6E5F4B">corrections teach it</text>
+  <text x="537" y="289" text-anchor="start" font-size="11" font-style="italic" fill="#6E5F4B">look-ups use it</text>
+  <text x="460" y="325" text-anchor="middle" font-size="12" letter-spacing="1.5" fill="#A8502A">map loop &#183; fixes the future</text>
+
+  <!-- master loop arcs to both neighbors -->
+  <path d="M 388 222 C 348 256 258 256 202 226" fill="none" stroke="#A8502A" stroke-width="1.25" stroke-dasharray="5 3" marker-end="url(#arr)"/>
+  <path d="M 532 222 C 572 256 662 256 718 226" fill="none" stroke="#A8502A" stroke-width="1.25" stroke-dasharray="5 3" marker-end="url(#arr)"/>
+  <text x="460" y="352" text-anchor="middle" font-size="12" letter-spacing="1" fill="#A8502A">master loop &#183; fixes the past &#8212; an edit in Lemma Master cascades to every linked entry and card</text>
+
+  <!-- habit layer -->
+  <path d="M 62 380 H 858 L 868 390 V 422 L 858 432 H 62 L 52 422 V 390 Z" fill="#F9F2E2" stroke="#8D7B5F" stroke-width="1" stroke-dasharray="6 4"/>
+  <text x="460" y="411" text-anchor="middle" font-size="12" letter-spacing="1.5" fill="#6E5F4B">THE HABIT LAYER (OPTIONAL) &#8212; TASKS &#38; APPOINTMENTS KEEP THE WHOLE PROCESS ON SCHEDULE</text>
+</svg>
