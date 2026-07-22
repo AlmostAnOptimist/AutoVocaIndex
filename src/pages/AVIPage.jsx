@@ -59,16 +59,18 @@ function AVIToast({ message, actionLabel, onAction, onDismiss, C }) {
       fontSize: '13px', color: C.text,
     }}>
       <span style={{ flex: 1, fontFamily: SH.fk }}>{message}</span>
-      <button
-        onClick={onAction}
-        style={{
-          fontSize: '12px', padding: '3px 10px', borderRadius: '6px',
-          border: `1px solid ${C.accent}`, background: C.accentSoft,
-          color: C.accent, cursor: 'pointer', flexShrink: 0, fontWeight: 600,
-        }}
-      >
-        {actionLabel}
-      </button>
+      {actionLabel && (
+        <button
+          onClick={onAction}
+          style={{
+            fontSize: '12px', padding: '3px 10px', borderRadius: '6px',
+            border: `1px solid ${C.accent}`, background: C.accentSoft,
+            color: C.accent, cursor: 'pointer', flexShrink: 0, fontWeight: 600,
+          }}
+        >
+          {actionLabel}
+        </button>
+      )}
       <button
         onClick={onDismiss}
         style={{
@@ -390,7 +392,7 @@ export function AVIPage({
       {toast && (
         <AVIToast
           message={toast.message}
-          actionLabel={toast.action === 'goToNuanceSource' ? 'View →' : toast.action === 'goToFlashcards' ? 'Study →' : 'Review →'}
+          actionLabel={toast.action === 'goToNuanceSource' ? 'View →' : toast.action === 'goToFlashcards' ? 'Study →' : toast.action === 'goToRecent' ? 'Review →' : null}
           onAction={() => {
             if (toast.action === 'goToNuanceSource') {
               setSrcFilter(NUANCE_SOURCE_TITLE);
