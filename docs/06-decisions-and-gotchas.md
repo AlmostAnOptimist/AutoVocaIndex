@@ -54,7 +54,7 @@ Where: `aviUtils.fetchGlmEntry` and every caller.
 **The GLM trust gate — and why seed `updatedAt` values are sacred.**
 Symptom (prevented): machine-generated seed errors (e.g. a junk surface→lemma rewrite) resolving words wrongly forever.
 Cause: the bulk seed was generated with the same naive suffix assumptions as the heuristic, and some rows are wrong.
-Rule: an entry is fully trusted only if *organic* — `updatedAt >= '2026-03-24'` (a **string** comparison; all timestamps in this model are ISO strings) or `contributorCount >= 2`. Untrusted seed rows still count as headword evidence when the mapping restates its own key, and their rewrites are followed only when independently corroborated by a jamo-derived candidate. Dictionary/headword validation outranks seed corroboration.
+Rule: an entry is fully trusted only if *organic* — `updatedAt >= '2026-03-24'` (a **string** comparison; all timestamps in this model are ISO strings) or `contributorCount >= 2`. Untrusted seed rows still count as headword evidence when the mapping restates its own key, and their rewrites are followed only when independently corroborated by a jamo-derived candidate or, failing that, when structurally consistent with the surface (`seedMappingPlausible` — shared leading jamo or strip shape; hallucinated rows share nothing and stay dormant). Dictionary/headword validation outranks both, and an organic user correction outranks everything.
 Consequence: the seed import **must preserve `updatedAt` values verbatim**. An import that stamps "now" promotes every junk row past the gate in one stroke — this is the single most damaging mistake available in setup.
 Where: `aviUtils.glmEntryTrust` / `resolveLemmaWithDictionary`; the import warning in the setup guide.
 

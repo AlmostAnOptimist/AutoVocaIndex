@@ -13,7 +13,8 @@ import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
   uuid, normalizeLemma, cleanStagingText, extractLemmaFromText,
-  fetchDefinition, getSourceSections, resolveLemmaWithDictionary,
+  fetchDefinition, fetchDefinitionWithFallback, extractLemmaCandidates,
+  getSourceSections, resolveLemmaWithDictionary,
   writeGlobalLemma, updateLinkedCards,
 } from '../../utils/aviUtils.js';
 import { SentenceEditModal } from '../../components/avi/SentenceEditModal.jsx';
@@ -105,6 +106,23 @@ function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose,
                       />
                     : <span style={{ fontFamily: SH.fk, fontSize: '14px', color: C.accent }}>{t.lemma}</span>
                   }
+                  {step === 1 && !t.skipped && !t.isPhrase && (() => {
+                    const alts = extractLemmaCandidates(t.input).filter(c => c && c !== t.lemma).slice(0, 3);
+                    if (!alts.length) return null;
+                    return (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px' }}>
+                        {alts.map(c => (
+                          <button key={c} onClick={() => updateTerm(i, 'lemma', c)} style={{
+                            background: C.accentSoft, border: `1px solid ${C.accent}`,
+                            borderRadius: '999px', color: C.accent, cursor: 'pointer',
+                            fontSize: '11px', fontFamily: SH.fk, padding: '2px 9px',
+                          }}>
+                            {c}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
                 {!t.isPhrase && (
                   <button onClick={() => toggleSkip(i)} style={{
@@ -676,8 +694,17 @@ export function AVISentenceInputPage({
       );
       if (existing) return { ...t, def1: existing.def1 || '', def2: existing.def2 || '' };
       try {
-        const def1 = await fetchDefinition(t.lemma, data.aviSettings);
-        return { ...t, def1: def1 === '__RATE_LIMITED__' ? '' : (def1 || '') };
+        // Tier 2: retry a dictionary miss with the surface's next candidates —
+        // only when the lemma is still the machine's own untouched guess.
+        const fb = await fetchDefinitionWithFallback(
+          (!t.isPhrase && t.lemma === t.resolvedLemma) ? t.input : '', t.lemma, data.aviSettings);
+        if (fb.lemma !== t.lemma) {
+          const adopted = data.lemmaMaster.find(
+            l => l.lemma === fb.lemma || normalizeLemma(l.lemma) === normalizeLemma(fb.lemma)
+          );
+          if (adopted) return { ...t, lemma: fb.lemma, def1: adopted.def1 || '', def2: adopted.def2 || '' };
+        }
+        return { ...t, lemma: fb.lemma, def1: fb.def1 === '__RATE_LIMITED__' ? '' : (fb.def1 || '') };
       } catch { return t; }
     }));
     setPickPopup(prev => ({ ...prev, newTerms: updated }));

@@ -163,6 +163,9 @@ function decomposeSyllable(ch) {
 function decontractPastSyllable(ch) {
   const d = decomposeSyllable(ch);
   if (!d || d[2] !== 20) return null; // needs ㅆ batchim
+  // Only contraction-capable vowels de-contract; lexical ㅆ stems (있다,
+  // 재미있다, 맛있다) must never lose their batchim.
+  if (![0, 1, 4, 6, 9, 14].includes(d[1])) return null;
   const map = { 1: 0, 9: 8, 14: 13, 6: 20 }; // ㅐ→ㅏ, ㅘ→ㅗ, ㅝ→ㅜ, ㅕ→ㅣ
   const v = map[d[1]] !== undefined ? map[d[1]] : d[1];
   return composeSyllable(d[0], v, 0);
@@ -326,6 +329,72 @@ export function extractLemmaCandidates(surface) {
     const dPrev2 = decomposeSyllable(t2[t2.length - 2]);
     if (dLast && dLast[0] === 11 && dLast[1] === 13 && dLast[2] === 4 && dPrev2 && dPrev2[2] === 0) {
       push(t2.slice(0, -2) + composeSyllable(dPrev2[0], dPrev2[1], 17) + '다');
+    }
+  }
+  // Stage 4 — beginner-coverage candidates (all validated, never blind):
+  // (d) Fused attributive/prospective batchim on a vowel stem: strip a bare
+  //     ㄴ/ㄹ final and offer stem+다 (예쁜→예쁘다, 큰→크다, 갈→가다); for
+  //     ㄴ also the ㄹ-restored stem (산→살다). Nouns ending in ㄴ/ㄹ
+  //     (시간, 물) produce junk candidates that fail validation harmlessly.
+  if (t2.length >= 1) {
+    const dF = decomposeSyllable(t2[t2.length - 1]);
+    if (dF && (dF[2] === 4 || dF[2] === 8)) {
+      push(t2.slice(0, -1) + composeSyllable(dF[0], dF[1], 0) + '다');
+      if (dF[2] === 4) push(t2.slice(0, -1) + composeSyllable(dF[0], dF[1], 8) + '다');
+    }
+  }
+  // (e) Syllabic 은/을 attributives on consonant stems (the particle strip
+  //     already offers 작은→작; add the adjective/verb reading 작다) and
+  //     는 on a vowel stem (하는→하다, 만나는→만나다).
+  if ((t2.endsWith('은') || t2.endsWith('을')) && hangulCount(t2) >= 2) {
+    push(t2.slice(0, -1) + '다');
+  }
+  if (t2.endsWith('는') && t2.length >= 2) {
+    const st = t2.slice(0, -1);
+    const dSt = decomposeSyllable(st[st.length - 1]);
+    if (dSt && dSt[2] === 0) push(st + '다');
+  }
+  // (f) Copula peeling for nouns: 황새예요→황새, 학생입니다→학생,
+  //     고양이야→고양이. All matches push (no break) — the shorter strips
+  //     are junk that fails validation harmlessly.
+  for (const cop of ['입니다', '이에요', '이었다', '예요', '였다', '이야', '야']) {
+    if (t2.endsWith(cop) && hangulCount(t2.slice(0, -cop.length)) >= 1) {
+      push(t2.slice(0, -cop.length));
+    }
+  }
+  // (g) Fused-ㅆ past recovery, with an optional trailing 어/아 peeled first:
+  //     갔다→가다, 봤어→보다, 됐다→되다, 먹었어→먹다. ㅐ is ambiguous
+  //     (했→하다, 냈→내다) — offer both.
+  {
+    let base = t2.endsWith('다') ? t2.slice(0, -1) : t2;
+    const dEnd = base.length >= 2 ? decomposeSyllable(base[base.length - 1]) : null;
+    if (dEnd && dEnd[0] === 11 && (dEnd[1] === 0 || dEnd[1] === 4) && dEnd[2] === 0) {
+      base = base.slice(0, -1);
+    }
+    const dS = base ? decomposeSyllable(base[base.length - 1]) : null;
+    if (dS && dS[2] === 20) {
+      const restored = { 9: 8, 14: 13, 10: 11 }[dS[1]];
+      const vowels = [...new Set([restored ?? dS[1], dS[1], ...(dS[1] === 1 ? [0] : [])])];
+      for (const v of vowels) {
+        push(base.slice(0, -1) + composeSyllable(dS[0], v, 0) + '다');
+      }
+      // Bare 었/았: the ㅆ-stripped syllable is only the tense vowel — also
+      // offer the stem without it (먹었어→먹다).
+      if (dS[0] === 11 && (dS[1] === 0 || dS[1] === 4) && base.length >= 2) {
+        push(base.slice(0, -1) + '다');
+      }
+    }
+  }
+  // (h) Fused-vowel connectives: an ㅏ/ㅓ/ㅐ/ㅘ/ㅝ-final open syllable is
+  //     usually stem+아/어 fusion — offer stem+다 and the contraction-
+  //     restored stem (만나서→만나다, 가요→가다, 봐요→보다, 해요→하다).
+  {
+    const u = t.endsWith('서') ? t.slice(0, -1) : t;
+    const dU = u ? decomposeSyllable(u[u.length - 1]) : null;
+    if (dU && dU[2] === 0 && [0, 1, 4, 9, 14].includes(dU[1]) && hangulCount(u) >= 1) {
+      push(u + '다');
+      const rest = { 9: 8, 14: 13, 1: 0 }[dU[1]];
+      if (rest !== undefined) push(u.slice(0, -1) + composeSyllable(dU[0], rest, 0) + '다');
     }
   }
   return out;
@@ -524,7 +593,66 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // generated. Reached only when nothing validated as a headword.
   if (seedMapping && seedMapping !== raw && candidates.includes(seedMapping)) return seedMapping;
 
+  // Option B structural gate: allow an uncorroborated seed rewrite through
+  // when it is structurally consistent with the surface. Ranked below both
+  // headword validation and candidate corroboration; a user correction
+  // (organic, trusted, checked first) permanently outranks it.
+  if (seedMapping && seedMappingPlausible(raw, seedMapping)) return seedMapping;
+
   return primary || raw;
+}
+
+// ── seedMappingPlausible ──────────────────────────────────────
+// Structural sanity for an uncorroborated seed rewrite: accept only a
+// mapping that is the surface minus trailing material (particle/copula
+// strip shape) or a 다-final headword sharing the surface's leading jamo
+// without ballooning in length. Hallucinated rows (까닥여→퇴창) share no
+// prefix and are rejected; the residual risk is a naive-suffix mangle
+// that happens to share a prefix, which validation above never reaches
+// and a single user correction permanently overrides.
+function jamoPrefixShare(a, b) {
+  const J = (s) => {
+    const o = [];
+    for (const ch of s) {
+      const d = decomposeSyllable(ch);
+      if (d) { o.push('c' + d[0], 'v' + d[1]); if (d[2]) o.push('f' + d[2]); }
+      else o.push(ch);
+    }
+    return o;
+  };
+  const ja = J(a), jb = J(b);
+  let n = 0;
+  while (n < ja.length && n < jb.length && ja[n] === jb[n]) n++;
+  return n;
+}
+
+export function seedMappingPlausible(raw, mapping) {
+  if (!raw || !mapping || mapping === raw) return false;
+  if (!/[가-힣]/.test(mapping)) return false;
+  if (raw.startsWith(mapping)) return true;
+  if (!mapping.endsWith('다')) return false;
+  if (hangulCount(mapping) > hangulCount(raw) + 1) return false;
+  return jamoPrefixShare(raw, mapping) >= 2;
+}
+
+// ── fetchDefinitionWithFallback ───────────────────────────────
+// Tier 2: a KRDict miss on a machine-resolved lemma is strong evidence the
+// resolution was wrong — dictionary reality outranks the heuristic. Retry
+// the fetch with the next distinct candidates for the original surface;
+// the first candidate with a real entry wins and is adopted as the lemma.
+// Pass an empty surface to disable the retry (user-supplied or locally
+// mapped lemmas are respected as-is).
+export async function fetchDefinitionWithFallback(surface, lemma, aviSettings) {
+  const first = await fetchDefinition(lemma, aviSettings);
+  if (first === 'Definition not found.' && surface) {
+    const alts = extractLemmaCandidates(surface).filter(c => c && c !== lemma).slice(0, 2);
+    for (const c of alts) {
+      const d = await fetchDefinition(c, aviSettings);
+      if (d === '__RATE_LIMITED__') break;
+      if (d && d !== 'Definition not found.') return { lemma: c, def1: d };
+    }
+  }
+  return { lemma, def1: first === '__RATE_LIMITED__' ? first : (first || '') };
 }
 
 export async function writeGlobalLemma(surface, cleanedLemma) {
