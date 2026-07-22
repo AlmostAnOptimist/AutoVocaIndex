@@ -10,7 +10,8 @@ import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
   uuid, normalizeLemma, cleanStagingText, extractLemmaFromText,
-  resolveLemmaWithDictionary, writeGlobalLemma, fetchDefinition, getSourceSections,
+  resolveLemmaWithDictionary, writeGlobalLemma, fetchDefinition,
+  fetchDefinitionWithFallback, getSourceSections,
   updateLinkedCards,
 } from '../../utils/aviUtils.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
@@ -263,8 +264,8 @@ export function AVIWordInputPage({
         lemmaText = await resolveLemmaWithDictionary(cleaned, { localHeadwords }) || cleaned;
       }
 
-      const normLemma = normalizeLemma(lemmaText);
-      const existingLemmaEntry = data.lemmaMaster.find(
+      let normLemma = normalizeLemma(lemmaText);
+      let existingLemmaEntry = data.lemmaMaster.find(
         l => l.cleanedLemma === normLemma || l.lemma === lemmaText
       );
 
@@ -273,12 +274,28 @@ export function AVIWordInputPage({
         def1 = existingLemmaEntry.def1 || '';
         def2 = existingLemmaEntry.def2 || '';
       } else if (lemmaText && lemmaText.length <= 120) {
-        const result = await fetchDefinition(lemmaText, data.aviSettings);
-        if (result === '__RATE_LIMITED__') {
+        // Tier 2: a dictionary miss on a machine-resolved lemma retries the
+        // surface's next candidates; a hit adopts that lemma. Skipped when a
+        // prior local mapping supplied the lemma. Adoption recomputes the
+        // lemmaMaster link so an already-studied lemma is linked, not duplicated.
+        const fb = await fetchDefinitionWithFallback(localMatch ? '' : cleaned, lemmaText, data.aviSettings);
+        if (fb.def1 === '__RATE_LIMITED__') {
           showAVIToast('API rate limit reached — switch to KRDict mode in Settings.');
           def1 = '';
         } else {
-          def1 = result || '';
+          if (fb.lemma !== lemmaText) {
+            lemmaText = fb.lemma;
+            normLemma = normalizeLemma(lemmaText);
+            existingLemmaEntry = data.lemmaMaster.find(
+              l => l.cleanedLemma === normLemma || l.lemma === lemmaText
+            );
+          }
+          if (existingLemmaEntry) {
+            def1 = existingLemmaEntry.def1 || fb.def1;
+            def2 = existingLemmaEntry.def2 || '';
+          } else {
+            def1 = fb.def1;
+          }
         }
       }
 
