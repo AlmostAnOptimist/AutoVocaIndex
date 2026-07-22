@@ -261,7 +261,7 @@ function VocaQuizConfig({ open, decks, onStart, onBack, apiKey, C, S }) {
     // "My answer is" only applies when MC or TF is active (Type always asks for Korean)
   const showAnswerFormat = hasMCOrTF;
 
-  const vocaDecks = decks.filter(d => !isGrammarDeck(d));
+  const vocaDecks = decks.filter(d => !isGrammarDeck(d) && !d.name?.endsWith('(sentence mining)'));
   const canStart  = vocaDecks.length > 0;
 
   if (!open) return null;
@@ -4251,6 +4251,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     if (DEMO) config = { ...config, deckIds: [] }; // demo: all decks (7D)
     const pool = enrichedCards.filter(c => {
       if (c.type === 'grammar') return false;
+      if (c.type === 'sentence') return false; // voca formats are word-card only; sentence recall lives in cloze
       if ((c.deckIds || []).includes(GRAMMAR_DECK_ID)) return false;
       if (config.deckIds.length === 0) {
         return vocaDecks.some(d => (c.deckIds || []).includes(d.id));
