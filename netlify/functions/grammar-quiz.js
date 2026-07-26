@@ -3,9 +3,9 @@
 // (mode + fields below); this function owns the prompt templates and builds
 // the Anthropic API call itself with a pinned model, token cap, and system
 // prompt — so the endpoint cannot be used as a general passthrough proxy.
-// Modes: 'selection' | 'drill' | 'broad' | 'assess'.
+// Modes: 'selection' | 'drill' | 'broad' | 'assess' | 'explain'.
 
-const MODEL      = 'claude-sonnet-4-20250514';
+const MODEL      = 'claude-sonnet-4-6';
 const MAX_TOKENS = 4000;
 const SYSTEM     = 'You output only valid JSON. No prose, no markdown fences.';
 
@@ -149,6 +149,32 @@ Respond with ONLY a JSON object:
       "corrected": "corrected Korean sentence or null"
     }
   ]
+}`;
+  }
+
+  if (mode === 'explain') {
+    const rawItems = Array.isArray(body?.items) ? body.items.slice(0, 30) : [];
+    const items = rawItems.map(it => ({
+      text:      str(it?.text, 500),
+      concept:   str(it?.concept, 200),
+      errorType: it?.errorType === 'missed_correct' ? 'missed_correct' : 'selected_wrong',
+    })).filter(it => it.text && it.concept);
+    if (!items.length) return null;
+    return `You are explaining Korean grammar mistakes to a language learner.
+
+For each item, explain briefly why the sentence is correct or incorrect for the given grammar concept, and what the learner should understand.
+
+Items:
+${items.map((m, i) => `${i + 1}. Sentence: "${m.text}"
+   Grammar concept: ${m.concept}
+   Error type: ${m.errorType === 'missed_correct'
+     ? 'The learner did NOT select this sentence, but it is grammatically correct and appropriate. Explain why it is valid.'
+     : 'The learner SELECTED this sentence, but it contains a grammar error. Explain what is wrong with it.'
+   }`).join('\n\n')}
+
+Respond with ONLY a JSON object:
+{
+  "explanations": ["explanation for item 1", "explanation for item 2"]
 }`;
   }
 

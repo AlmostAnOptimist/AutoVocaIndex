@@ -2454,44 +2454,16 @@ function GrammarSelectionResults({ questions, userSelections, onDone, C, S }) {
     setExplaining(true);
     setExplainError(false);
 
-    const prompt = `You are explaining Korean grammar mistakes to a language learner.
-
-    For each item, explain briefly why the sentence is correct or incorrect for the given grammar concept, and what the learner should understand.
-
-    Items:
-    ${items.map((m, i) => `${i + 1}. Sentence: "${m.text}"
-       Grammar concept: ${m.concept}
-       Error type: ${m.errorType === 'missed_correct'
-         ? 'The learner did NOT select this sentence, but it is grammatically correct and appropriate. Explain why it is valid.'
-         : 'The learner SELECTED this sentence, but it contains a grammar error. Explain what is wrong with it.'
-       }`).join('\n\n')}
-
-Respond with ONLY a JSON object:
-{
-  "explanations": ["explanation for item 1", "explanation for item 2"]
-}`;
-
     try {
-      const res = await fetch('/api/grammar-quiz', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model:      'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          system:     'You output only valid JSON. No prose, no markdown fences.',
-          messages:   [{ role: 'user', content: prompt }],
-        }),
+      // Structured request — the server owns the explanation prompt template
+      // (mode 'explain'), same tier-1 pattern as the four quiz modes.
+      const parsed = await callGrammarQuizAPI({
+        mode:  'explain',
+        items: items.map(({ text, concept, errorType }) => ({ text, concept, errorType })),
       });
-      if (res.ok) {
-        const data   = await res.json();
-        const raw    = data.content?.find(b => b.type === 'text')?.text || '';
-        const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
-        const expMap = {};
-        items.forEach((m, i) => { expMap[m.key] = parsed.explanations?.[i] || ''; });
-        setExplanations(expMap);
-      } else {
-        setExplainError(true);
-      }
+      const expMap = {};
+      items.forEach((m, i) => { expMap[m.key] = parsed.explanations?.[i] || ''; });
+      setExplanations(expMap);
     } catch (e) {
       console.error('Selection explanation failed:', e);
       setExplainError(true);
