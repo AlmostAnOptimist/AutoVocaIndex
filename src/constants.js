@@ -42,17 +42,17 @@ export const THEME_DEFS = [
 
 export const NAV_SECTIONS = [
   { label: 'Agenda', items: [
-    { id: 'today',       label: 'Today'           },
-    { id: 'upcoming',    label: 'Upcoming'        },
-    { id: 'overdue',     label: 'Overdue',  badgeDanger: true },
-    { id: 'appointments', label: 'Appointments' },
+    { id: 'today',       label: 'Today', desc: "Daily dashboard. Lists tasks due today with one-tap complete and drag-to-order, plus progress bars for today's tasks and flashcard reviews." },
+    { id: 'upcoming',    label: 'Upcoming', desc: "Plan ahead across three views: a day-by-day list for this week, a full month calendar, and a Planner for scheduling study sessions against your Content Library sources." },
+    { id: 'overdue',     label: 'Overdue',  badgeDanger: true, desc: "Task backlog. Shows everything past its due date, plus tasks with no date set (Unscheduled). A heat-mapped mini calendar of this month's task load sits alongside for quick reference." },
+    { id: 'appointments', label: 'Appointments', desc: "Tracks tutoring sessions, classes, and language exchanges, and their related details. Can link sessions to Content Library sources, and spin off follow-up reminder tasks." },
   ]},
   { label: 'Language', items: [
-    { id: 'grammar',    label: 'Grammar Index' },
-    { id: 'content',    label: 'Content Library' },
-    { id: 'flashcards', label: 'Flashcards' },
-    { id: 'quizzes',    label: 'Quizzes' },
-    { id: 'avi',        label: 'AutoVocaIndex' },
+    { id: 'grammar',    label: 'Grammar Index', desc: "Reference of grammar patterns you encounter. Each entry includes a mastery level (Introduced through Mastered), explanation of the concept, TTS audio for example sentences, and links to Content Library sources/sections where the concept was seen. Entries have a designated flashcard deck." },
+    { id: 'content',    label: 'Content Library', desc: "Catalog of anything and everything you study from — books, shows, podcasts — grouped into Grammar, Reading, Listening, and Reference. Track status per source, schedule a section as a task, attach notes and corrections. The Notes section includes a designated Questions log and Quiz explanations can show up here for review." },
+    { id: 'flashcards', label: 'Flashcards', desc: "Spaced-repetition review powered by the FSRS-5 algorithm. Grade each card Again, Hard, Good, or Easy (swipe left for Again or right for Easy on mobile). Sets can be paused (due cards don't count towards the day's reviews) and reviews can trigger a spike flag (to warn you if an upcoming day will have more than a certain number of due cards). Includes an activity heatmap and streak tracking." },
+    { id: 'quizzes',    label: 'Quizzes', desc: "Vocabulary, Cloze, and Grammar quizzes. Each type has adjustable settings for number and type of questions, and which sets to use. Grammar quizzes use AI-generated drills and assessments that score your answers and can auto-create correction notes." },
+    { id: 'avi',        label: 'AutoVocaIndex', desc: "Vocabulary Engine at the core of the app. Input new words and sentences to be auto-resolved to dictionary lemmas, enter your own definition for flashcards to use, track which words were encountered in different Content Library sources. AVI categorizes words according to the Content Library sources and funnels them into corresponding Flashcard decks. Search your lexicon and create connections between similar words." },
   ]},
 ];
 

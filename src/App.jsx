@@ -420,6 +420,7 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                     key={item.id}
                     icon={NAV_ICONS[item.id]}
                     label={item.label}
+                    desc={item.desc}
                     active={page === item.id}
                     badge={item.id === 'today' ? todayCount : item.id === 'overdue' ? overdueCount : item.id === 'flashcards' ? flashcardDue : undefined}
                     badgeDanger={item.badgeDanger}
