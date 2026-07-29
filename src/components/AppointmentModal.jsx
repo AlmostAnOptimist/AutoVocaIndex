@@ -271,7 +271,7 @@ export function AppointmentModal({
           : [];
       setCosts(existingCosts);
       setCostsSectionOpen(existingCosts.length > 0);
-      setListSectionOpen(linked.length > 0);
+      setNotesOpen((linkedNotes || []).length > 0);
       setTaskId(existing.taskId || null);
       const hasSource = !!(existing.mainSourceId || (existing.additionalSources || []).length);
       setMainSourceId(existing.mainSourceId || null);

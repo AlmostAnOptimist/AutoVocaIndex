@@ -33,7 +33,7 @@ export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointme
   useEffect(() => {
     if (open) {
       setTitle(''); setNotes(''); setRecur({ type: 'none' }); setKeepRecord(false);
-      setPersistent(false); setPush(false); setLinkedListIds([]); setListSectionOpen(false);
+      setPersistent(false); setPush(false);
       setDate(toDateStr(getLogicalToday(dsh))); setTime(''); setMultiDates([]);
       setIsApptTask(false); setApptMode('new'); setSelectedApptId(''); setApptType(''); setApptProvider('');
       setTimeout(() => titleRef.current?.focus(), 80);
