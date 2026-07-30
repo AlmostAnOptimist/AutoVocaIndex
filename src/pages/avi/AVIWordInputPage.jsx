@@ -3,7 +3,7 @@
 // Handles word staging, inline editing, lemma cascade (with bug fixes),
 // and automatic flashcard creation when def2 is present.
 
-import { useState, useCallback, useMemo, useRef, memo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from 'react';
 import { auth } from '../../firebase.js';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
@@ -198,6 +198,7 @@ export function AVIWordInputPage({
   aviSources, aviSections,
   cards, decks, updateCards, updateDecks,
   goToSource, goToSearch, dsh,
+  inputSearch, setInputSearch,
 }) {
   const { C, S } = useAppTheme();
   const uid = auth.currentUser?.uid;
@@ -419,8 +420,18 @@ export function AVIWordInputPage({
     autoCreateWordCard, dsh,
   }), [data, updateData, cards, updateCards, decks, updateDecks, aviSources, dsh]);
 
-  // ── Pagination ──────────────────────────────────────────────
-  const allWords     = [...data.wordInputs].sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  // ── Search + pagination ─────────────────────────────────────
+  // The query lives in AVIPage (rendered in the sticky tab strip on
+  // desktop; the mobile input below binds to the same state). NFC on both
+  // sides so pre-repair decomposed rows still match a composed query.
+  const q = (inputSearch || '').normalize('NFC').trim().toLowerCase();
+  const matchesSearch = (w) => !q ||
+    [w.input, w.lemma, w.def1, w.def2]
+      .some(f => (f || '').normalize('NFC').toLowerCase().includes(q));
+  const allWords     = [...data.wordInputs].filter(matchesSearch).sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+
+  // Back to page 0 whenever the query changes so results are visible.
+  useEffect(() => { setWordPage(0); }, [inputSearch]);
   const totalPages   = Math.ceil(allWords.length / WI_PAGE_SIZE);
   const page         = Math.min(wordPage, Math.max(0, totalPages - 1));
   const pagedWords   = allWords.slice(page * WI_PAGE_SIZE, (page + 1) * WI_PAGE_SIZE);
@@ -508,12 +519,29 @@ export function AVIWordInputPage({
           }
         </button>
         <div style={{ fontSize: '11px', color: C.textM, fontFamily: SH.fm }}>
-          {allWords.length} {allWords.length === 1 ? 'entry' : 'entries'}
+          {q
+            ? `${allWords.length} of ${data.wordInputs.length} match`
+            : `${allWords.length} ${allWords.length === 1 ? 'entry' : 'entries'}`}
         </div>
       </div>
 
       {/* ── Word table ─────────────────────────────────────── */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+
+        {/* Mobile search — the desktop input lives in AVIPage's tab strip */}
+        {isMobile && (
+          <input
+            type="text"
+            value={inputSearch || ''}
+            onChange={e => setInputSearch(e.target.value)}
+            placeholder="Search words…"
+            style={{
+              fontSize: '16px', padding: '8px 12px', borderRadius: '8px',
+              border: `1px solid ${C.border}`, background: C.surface, color: C.text,
+              outline: 'none', marginBottom: '10px', width: '100%', boxSizing: 'border-box',
+            }}
+          />
+        )}
 
         {/* Scrollable table area (mobile: card list instead of a table) */}
         <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: isMobile ? 'hidden' : 'auto' }}>
@@ -521,7 +549,7 @@ export function AVIWordInputPage({
             <>
               {pagedWords.length === 0 && (
                 <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
-                  No entries yet. Paste a word above.
+                  {q ? 'No entries match your search.' : 'No entries yet. Paste a word above.'}
                 </div>
               )}
               {pagedWords.map(w => (
@@ -552,7 +580,7 @@ export function AVIWordInputPage({
                 {pagedWords.length === 0 && (
                   <tr>
                     <td colSpan={7} style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
-                      No entries yet. Paste a word above.
+                      {q ? 'No entries match your search.' : 'No entries yet. Paste a word above.'}
                     </td>
                   </tr>
                 )}

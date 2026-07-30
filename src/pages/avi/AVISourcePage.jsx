@@ -38,12 +38,22 @@ export function AVISourcePage({
   // Sections for this source, naturally sorted
   const srcSections = useMemo(() => getSourceSections(aviSources, aviSections, srcFilter), [aviSources, aviSections, srcFilter]);
 
-  // Section number options for the filter dropdown
-  // AVI stores section as number string ("1", "2"…), matching the trailing digit
-  const secNumbers = srcSections.map(s => {
-    const m = (s.content || '').match(/(\d+)$/);
-    return m ? String(parseInt(m[1])) : s.content;
-  });
+  // Section options for the filter dropdown — the full section content
+  // string, in Content Library order. Rows store the full content too
+  // (the section model moved off trailing-digit parsing, which collided
+  // on decimal and suffixed names like 문법 1.1 / 대화 1).
+  const secOptions = srcSections.map(s => s.content || '');
+
+  // A persisted section filter can go stale (localStorage survives section
+  // renames and source switches from other tabs). If it no longer matches
+  // any of this source's sections, reset to (All) instead of silently
+  // filtering every row out while the chart still shows them.
+  useEffect(() => {
+    if (!secFilter || secFilter === '(All)') return;
+    if (!activeSrc || secOptions.length === 0) return;
+    if (!secOptions.some(c => String(c) === String(secFilter))) setSecFilter('(All)');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secFilter, activeSrc, srcSections, setSecFilter]);
 
   const matchFilter = (row) => {
     if (srcFilter && row.source !== srcFilter) return false;
@@ -142,6 +152,11 @@ export function AVISourcePage({
     });
   const uniqueLemmas      = [...new Set(uploadedWords.map(w => normalizeLemma(w.lemma)).filter(Boolean))];
 
+  // Rows the filters match but the uploaded-only lists hide — surfaced so
+  // "the chart shows entries but the tables are empty" is never a mystery.
+  const pendingWordCount = wordInputs.filter(w => !w.uploaded && !w.skipUpload && matchFilter(w)).length;
+  const pendingSentCount = sentenceInputs.filter(s => !s.uploaded && !s.skipUpload && matchFilter(s)).length;
+
   // Column visibility
   const showSource  = !srcFilter;
   const showSection = !secFilter || secFilter === '(All)';
@@ -149,7 +164,7 @@ export function AVISourcePage({
   // ── Section chart data ──────────────────────────────────────
   const secStats = useMemo(() => {
     if (!activeSrc) return [];
-    return secNumbers.map(sec => {
+    return secOptions.map(sec => {
       const secWords = wordInputs.filter(w => w.source === srcFilter && String(w.section) === String(sec));
       const secSents = sentenceInputs.filter(s => s.source === srcFilter && String(s.section) === String(sec));
       return {
@@ -162,7 +177,7 @@ export function AVISourcePage({
         totalS:    secSents.length,
       };
     });
-  }, [activeSrc, srcFilter, secNumbers, wordInputs, sentenceInputs]);
+  }, [activeSrc, srcFilter, secOptions, wordInputs, sentenceInputs]);
 
   const maxVal = Math.max(...secStats.map(s => s.totalW + s.totalS), 1);
   const BAR_H  = 80; // px
@@ -196,11 +211,11 @@ export function AVISourcePage({
         <select
           value={secFilter}
           onChange={e => setSecFilter(e.target.value)}
-          disabled={!activeSrc || secNumbers.length === 0}
-          style={{ ...selectStyle(C), opacity: (!activeSrc || secNumbers.length === 0) ? 0.4 : 1 }}
+          disabled={!activeSrc || secOptions.length === 0}
+          style={{ ...selectStyle(C), opacity: (!activeSrc || secOptions.length === 0) ? 0.4 : 1 }}
         >
           <option value="(All)">(All)</option>
-          {secNumbers.map(n => <option key={n} value={String(n)}>§{n}</option>)}
+          {secOptions.map(n => <option key={n} value={String(n)}>§{n}</option>)}
         </select>
         <div style={{ marginLeft: '8px', display: 'flex', gap: '10px' }}>
           <StatBadge value={uniqueLemmas.length} label="unique lemmas" C={C} />
@@ -289,6 +304,12 @@ export function AVISourcePage({
             </div>
           </div>
 
+          {(pendingWordCount > 0 || pendingSentCount > 0) && (
+            <div style={{ fontSize: '11px', color: C.textM, marginBottom: '8px', flexShrink: 0 }}>
+              Hidden (pending upload): {pendingWordCount} word{pendingWordCount === 1 ? '' : 's'}, {pendingSentCount} sentence{pendingSentCount === 1 ? '' : 's'}
+            </div>
+          )}
+
           {mobileSeg === 'words' ? (
             <>
               {orderedWords.length === 0 && (
@@ -350,6 +371,11 @@ export function AVISourcePage({
               textTransform: 'uppercase', color: C.textM, marginBottom: '8px',
             }}>
               Word Inputs (Uploaded) — {uploadedWords.length}
+              {pendingWordCount > 0 && (
+                <span style={{ fontWeight: 500, textTransform: 'none', letterSpacing: 0 }}>
+                  {' '}· {pendingWordCount} pending hidden
+                </span>
+              )}
             </div>
             <div style={{ overflowX: 'auto', border: `1px solid ${C.border}`, borderRadius: '8px', overflow: 'hidden' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
@@ -403,6 +429,11 @@ export function AVISourcePage({
               textTransform: 'uppercase', color: C.textM, marginBottom: '8px',
             }}>
               Sentence Inputs (Uploaded) — {uploadedSentences.length}
+              {pendingSentCount > 0 && (
+                <span style={{ fontWeight: 500, textTransform: 'none', letterSpacing: 0 }}>
+                  {' '}· {pendingSentCount} pending hidden
+                </span>
+              )}
             </div>
             <div style={{ overflowX: 'auto', border: `1px solid ${C.border}`, borderRadius: '8px', overflow: 'hidden' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>

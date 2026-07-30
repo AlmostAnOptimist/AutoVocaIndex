@@ -828,12 +828,32 @@ export function AVILemmaMasterPage({
         };
       });
 
+      // The chosen def2 must also reach the survivor's own pre-existing rows.
+      // Without this, a def2 picked in the merge lands on the Lemma Master
+      // entry and the reassigned rows but silently skips rows already on the
+      // surviving lemma, leaving them permanently desynced with no Recent
+      // entry. Rows the block above already set to survivingDef2 are skipped
+      // by the equality guard, so nothing is double-unchecked.
+      const survivorNorm        = normalizeLemma(survivor.lemma);
+      const survivorDef2Changed = (survivingDef2 || '') !== (survivor.def2 || '');
+      const cascadedWordInputs  = !survivorDef2Changed ? mergedWordInputs : mergedWordInputs.map(w => {
+        if (normalizeLemma(w.lemma) !== survivorNorm) return w;
+        if ((w.def2 || '') === (survivingDef2 || '')) return w;
+        return {
+          ...w,
+          def2: survivingDef2 || '',
+          ...(w.uploaded ? {
+            uploaded: false, lastUncheckReason: 'Definition 2 chosen in merge', lastUncheckDate: now,
+          } : {}),
+        };
+      });
+
       // The edited lemma's wordInputs row (if it had its own 동의어/유의어 capture)
       // just got relabeled to the survivor's lemma above — if the survivor already
       // had its own capture too, this collapses the resulting duplicate down to
       // one, and otherwise adds/removes based on the merged relatedMeaning.
       const { wordInputs: finalWordInputs, added, removed } = syncNuanceSource(
-        mergedWordInputs, mergedLemmaMaster, [survivingLemmaID]
+        cascadedWordInputs, mergedLemmaMaster, [survivingLemmaID]
       );
       if (added.length)   showAVIToast(`Added to 동의어/유의어: ${added.join(', ')}`, 'goToNuanceSource');
       if (removed.length) showAVIToast(`Removed from 동의어/유의어: ${removed.join(', ')}`, 'goToNuanceSource');
@@ -843,18 +863,34 @@ export function AVILemmaMasterPage({
         lemmaMaster: mergedLemmaMaster,
         wordInputs: finalWordInputs,
         sentenceInputs: prev.sentenceInputs.map(s => {
-          if (normalizeLemma(s.targetWord) !== editedNorm) return s;
-          const cardBack = survivingDef2 || survivor.def1 || edited.def1 || s.cardBack;
-          const changed  = cardBack !== s.cardBack;
-          return {
-            ...s,
-            targetWord: survivorLemma,
-            cardFront:  survivorLemma + '\n' + (s.sentence || ''),
-            cardBack,
-            ...(changed && s.uploaded ? {
-              uploaded: false, lastUncheckReason: 'lemma merged', lastUncheckDate: now,
-            } : {}),
-          };
+          const norm = normalizeLemma(s.targetWord);
+          if (norm === editedNorm) {
+            const cardBack = survivingDef2 || survivor.def1 || edited.def1 || s.cardBack;
+            const changed  = cardBack !== s.cardBack;
+            return {
+              ...s,
+              targetWord: survivorLemma,
+              cardFront:  survivorLemma + '\n' + (s.sentence || ''),
+              cardBack,
+              ...(changed && s.uploaded ? {
+                uploaded: false, lastUncheckReason: 'lemma merged', lastUncheckDate: now,
+              } : {}),
+            };
+          }
+          // Survivor's own sentence rows follow the chosen def2 too (mirror
+          // of the word-row cascade above).
+          if (survivorDef2Changed && norm === survivorNorm) {
+            const cardBack = survivingDef2 || survivor.def1 || s.cardBack;
+            const changed  = cardBack !== s.cardBack;
+            if (!changed) return s;
+            return {
+              ...s, cardBack,
+              ...(s.uploaded ? {
+                uploaded: false, lastUncheckReason: 'Definition 2 chosen in merge', lastUncheckDate: now,
+              } : {}),
+            };
+          }
+          return s;
         }),
       };
     });
@@ -877,6 +913,16 @@ export function AVILemmaMasterPage({
         }),
         cards, uid, updateCards,
       }).catch(e => console.error('LM merge: card update failed', e));
+
+      // Survivor's own linked cards adopt the chosen def2 as back too —
+      // the block above only reaches cards linked to the deleted entry.
+      if (survivingDef2 && survivingDef2 !== (survivorPre.def2 || '')) {
+        updateLinkedCards({
+          lemmaID: survivingLemmaID, lemmaText: survivorPre.lemma,
+          updates: { back: survivingDef2 },
+          cards, uid, updateCards,
+        }).catch(e => console.error('LM merge: survivor card update failed', e));
+      }
     }
   }, [updateData, showAVIToast, data, cards, uid, updateCards]);
 

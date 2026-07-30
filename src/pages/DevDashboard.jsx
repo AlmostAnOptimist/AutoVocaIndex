@@ -11,6 +11,7 @@ import { db } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { recomputeReviewStats } from '../utils/reviewStatsEngine.js';
+import { normalizeLemma } from '../utils/aviUtils.js';
 
 // ── Constants ─────────────────────────────────────────────────
 const DEV_CATS    = ['calendar', 'language', 'life'];
@@ -647,6 +648,365 @@ function GazetteAdsPanel({ adAliases, onSaveAlias, savedFlash, C }) {
   );
 }
 
+// ── AVI Maintenance ───────────────────────────────────────────
+// Standing repair tools for the AVI collections, run directly against
+// Firestore (same standalone pattern as Recompute Review Stats):
+//   1. NFC repair — re-normalizes identity/text fields on lemmaMaster,
+//      wordInputs, sentenceInputs, and flashcards; recomputes cleanedLemma
+//      with the current normalizeLemma. Duplicate Lemma Master entries that
+//      normalization reveals are listed for manual merge, never auto-merged.
+//   2. Def2 resync — word rows and non-grammar card backs adopt their
+//      Lemma Master entry's def2 where they differ.
+//   3. Section / source audit — informational: rows whose stored source or
+//      section no longer exists in Content Library, and sentence rows whose
+//      cardBack matches neither def2 nor def1 (possibly hand-edited).
+// Run with no AVI edits in flight elsewhere, and reload the main app after
+// applying — AVIPage keeps an in-memory copy, and its whole-doc diff sync
+// could otherwise write stale rows back over a repair.
+function AVIMaintenancePanel({ uid, C }) {
+  const [status,   setStatus]   = useState('idle'); // idle | scanning | ready | applying
+  const [report,   setReport]   = useState(null);
+  const [applyMsg, setApplyMsg] = useState('');
+
+  const btnSt = (disabled) => ({
+    padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
+    border: `1px solid ${C.border}`, background: 'transparent',
+    color: C.textS, cursor: disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  const scan = async () => {
+    if (status === 'scanning' || status === 'applying') return;
+    setStatus('scanning'); setApplyMsg('');
+    try {
+      const [lmSnap, wSnap, sSnap, cardSnap, srcSnap, secSnap] = await Promise.all([
+        getDocs(collection(db, 'users', uid, 'lemmaMaster')),
+        getDocs(collection(db, 'users', uid, 'wordInputs')),
+        getDocs(collection(db, 'users', uid, 'sentenceInputs')),
+        getDocs(collection(db, 'users', uid, 'flashcards')),
+        getDocs(collection(db, 'users', uid, 'content_sources')),
+        getDocs(collection(db, 'users', uid, 'content_sections')),
+      ]);
+      const load  = (snap) => snap.docs.map(d => ({ ref: d.ref, data: d.data() }));
+      const lm    = load(lmSnap), words = load(wSnap), sents = load(sSnap), cards = load(cardSnap);
+      const sources  = srcSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const sections = secSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const nfc = (v) => (typeof v === 'string' ? v.normalize('NFC') : v);
+
+      // 1. NFC repair plan — field-level updates only where bytes change
+      const nfcUpdates = [];
+      const planFields = (ref, data, fieldNames) => {
+        const fields = {};
+        for (const f of fieldNames) {
+          if (data[f] && nfc(data[f]) !== data[f]) fields[f] = nfc(data[f]);
+        }
+        return { ref, data, fields };
+      };
+      for (const { ref, data } of lm) {
+        const plan  = planFields(ref, data, ['lemma']);
+        const clean = normalizeLemma(plan.fields.lemma || data.lemma || '');
+        if ((data.cleanedLemma || '') !== clean) plan.fields.cleanedLemma = clean;
+        if (Object.keys(plan.fields).length) nfcUpdates.push(plan);
+      }
+      for (const { ref, data } of words) {
+        const plan = planFields(ref, data, ['lemma', 'input']);
+        if (Object.keys(plan.fields).length) nfcUpdates.push(plan);
+      }
+      for (const { ref, data } of sents) {
+        const plan = planFields(ref, data, ['targetWord', 'sentence', 'cardFront']);
+        if (Object.keys(plan.fields).length) nfcUpdates.push(plan);
+      }
+      for (const { ref, data } of cards) {
+        const plan = planFields(ref, data, ['lemma', 'front']);
+        if (Object.keys(plan.fields).length) nfcUpdates.push(plan);
+      }
+
+      // Duplicate Lemma Master entries once normalization is applied
+      const byNorm = {};
+      for (const { data } of lm) {
+        const k = normalizeLemma(data.lemma || '');
+        if (!k) continue;
+        (byNorm[k] = byNorm[k] || []).push(data.lemma || '');
+      }
+      const lmDuplicates = Object.entries(byNorm)
+        .filter(([, arr]) => arr.length > 1)
+        .map(([norm, arr]) => `${norm} (${arr.length} entries)`);
+
+      // 2. Def2 resync plan — Lemma Master is canonical
+      const lmEntryByNorm = {};
+      for (const { data } of lm) {
+        const k = normalizeLemma(data.lemma || '');
+        if (k && !lmEntryByNorm[k]) lmEntryByNorm[k] = data;
+      }
+      const def2Updates = [];
+      const def2NoCanon = []; // row has a def2 but its LM entry has none — never auto-erased
+      for (const { ref, data } of words) {
+        const entry = lmEntryByNorm[normalizeLemma(data.lemma || '')];
+        if (!entry) continue;
+        if ((data.def2 || '') !== (entry.def2 || '')) {
+          const label = `${data.lemma}${data.source ? ` (${data.source}${data.section ? ' §' + data.section : ''})` : ''}`;
+          if (entry.def2) def2Updates.push({ ref, fields: { def2: entry.def2 }, label });
+          else def2NoCanon.push(label);
+        }
+      }
+      const cardBackUpdates = [];
+      for (const { ref, data } of cards) {
+        if (data.type === 'grammar') continue;
+        const entry = data.linkedAVILemmaId
+          ? lm.find(x => x.data.lemmaID === data.linkedAVILemmaId)?.data
+          : lmEntryByNorm[normalizeLemma(data.lemma || '')];
+        if (!entry || !entry.def2) continue;
+        if ((data.back || '') !== entry.def2) {
+          cardBackUpdates.push({ ref, fields: { back: entry.def2 }, label: data.lemma || '(no lemma)' });
+        }
+      }
+
+      // 3. Informational: sentence cardBacks matching neither def2 nor def1
+      const sentBackReview = [];
+      for (const { data } of sents) {
+        const entry = lmEntryByNorm[normalizeLemma(data.targetWord || '')];
+        if (!entry) continue;
+        const cb = data.cardBack || '';
+        if (cb && cb !== (entry.def2 || '') && cb !== (entry.def1 || '')) {
+          sentBackReview.push(data.targetWord || '');
+        }
+      }
+
+      // 3b. Orphaned source / section values on rows — grouped with doc refs
+      // so the re-tag controls in the report can batch-fix each group.
+      const srcByTitle = Object.fromEntries(sources.map(x => [x.title, x]));
+      const secsBySrcId = {};
+      const sectionsBySrc = {};
+      for (const sec of sections) {
+        (secsBySrcId[sec.resourceId] = secsBySrcId[sec.resourceId] || new Set()).add(String(sec.content));
+        (sectionsBySrc[sec.resourceId] = sectionsBySrc[sec.resourceId] || []).push(String(sec.content));
+      }
+      const sectionGroups = {};
+      const noteRow = (ref, r) => {
+        if (!r.source) return;
+        const src = srcByTitle[r.source];
+        if (!src) {
+          const k = `missing|${r.source}`;
+          (sectionGroups[k] = sectionGroups[k] || {
+            source: r.source, storedSection: null, missingSource: true, srcId: null, refs: [],
+          }).refs.push(ref);
+          return;
+        }
+        if (r.section == null || r.section === '') return;
+        const set = secsBySrcId[src.id];
+        if (!set || !set.has(String(r.section))) {
+          const k = `sec|${r.source}|${r.section}`;
+          (sectionGroups[k] = sectionGroups[k] || {
+            source: r.source, storedSection: String(r.section), missingSource: false, srcId: src.id, refs: [],
+          }).refs.push(ref);
+        }
+      };
+      words.forEach(({ ref, data }) => noteRow(ref, data));
+      sents.forEach(({ ref, data }) => noteRow(ref, data));
+
+      setReport({
+        counts: { lm: lm.length, words: words.length, sents: sents.length, cards: cards.length },
+        nfcUpdates, lmDuplicates, def2Updates, def2NoCanon, cardBackUpdates, sentBackReview,
+        sectionGroups: Object.values(sectionGroups),
+        sectionsBySrc,
+      });
+      setStatus('ready');
+    } catch (e) {
+      console.error('AVI maintenance scan failed', e);
+      setApplyMsg('Scan failed — check console.');
+      setStatus('idle');
+    }
+  };
+
+  const applyBatch = async (updates) => {
+    let batch = writeBatch(db);
+    let ops = 0;
+    for (const u of updates) {
+      batch.update(u.ref, u.fields);
+      ops++;
+      if (ops >= 450) { await batch.commit(); batch = writeBatch(db); ops = 0; }
+    }
+    if (ops > 0) await batch.commit();
+  };
+
+  const applyNfc = async () => {
+    if (!report || status === 'applying' || report.nfcUpdates.length === 0) return;
+    setStatus('applying');
+    try {
+      await applyBatch(report.nfcUpdates);
+      setApplyMsg(`NFC repair: ${report.nfcUpdates.length} doc${report.nfcUpdates.length === 1 ? '' : 's'} updated. Reload the main app before further AVI edits.`);
+      setReport(r => ({ ...r, nfcUpdates: [] }));
+    } catch (e) {
+      console.error('NFC repair failed', e);
+      setApplyMsg('NFC repair failed — check console.');
+    }
+    setStatus('ready');
+  };
+
+  const applyDef2 = async () => {
+    if (!report || status === 'applying') return;
+    const updates = [...report.def2Updates, ...report.cardBackUpdates];
+    if (updates.length === 0) return;
+    setStatus('applying');
+    try {
+      await applyBatch(updates);
+      setApplyMsg(`Def2 resync: ${report.def2Updates.length} row${report.def2Updates.length === 1 ? '' : 's'}, ${report.cardBackUpdates.length} card back${report.cardBackUpdates.length === 1 ? '' : 's'} updated. Reload the main app before further AVI edits.`);
+      setReport(r => ({ ...r, def2Updates: [], cardBackUpdates: [] }));
+    } catch (e) {
+      console.error('Def2 resync failed', e);
+      setApplyMsg('Def2 resync failed — check console.');
+    }
+    setStatus('ready');
+  };
+
+const applyRetag = async (group, choice) => {
+    if (!report || status === 'applying') return;
+    setStatus('applying');
+    try {
+      const fields = group.missingSource
+        ? { source: 'Sourceless', section: null }
+        : { section: choice === '__CLEAR__' ? null : choice };
+      await applyBatch(group.refs.map(ref => ({ ref, fields })));
+      setApplyMsg(`Re-tagged ${group.refs.length} row${group.refs.length === 1 ? '' : 's'}. Reload the main app before further AVI edits.`);
+      setReport(r => ({ ...r, sectionGroups: r.sectionGroups.filter(x => x !== group) }));
+    } catch (e) {
+      console.error('Section re-tag failed', e);
+      setApplyMsg('Re-tag failed — check console.');
+    }
+    setStatus('ready');
+  };
+
+  const listPreview = (arr, max = 12) => {
+    if (!arr.length) return null;
+    const shown = arr.slice(0, max);
+    return shown.join(', ') + (arr.length > max ? ` … +${arr.length - max} more` : '');
+  };
+
+  const lineSt = { fontSize: '12px', color: C.textS, lineHeight: 1.6 };
+  const numSt  = { color: C.text, fontWeight: 600 };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '760px' }}>
+      <div style={{ fontSize: '11.5px', color: C.textM, lineHeight: 1.6 }}>
+        Scan is read-only. Apply buttons write field-level repairs to Firestore.
+        Run with no AVI edits open in another tab, and reload the main app after applying.
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <button onClick={scan} disabled={status === 'scanning' || status === 'applying'} style={btnSt(status === 'scanning' || status === 'applying')}>
+          {status === 'scanning' ? 'Scanning…' : 'Scan AVI Data'}
+        </button>
+        {report && (
+          <>
+            <button onClick={applyNfc} disabled={status === 'applying' || report.nfcUpdates.length === 0} style={btnSt(status === 'applying' || report.nfcUpdates.length === 0)}>
+              Apply NFC Repair ({report.nfcUpdates.length})
+            </button>
+            <button onClick={applyDef2} disabled={status === 'applying' || (report.def2Updates.length + report.cardBackUpdates.length === 0)} style={btnSt(status === 'applying' || (report.def2Updates.length + report.cardBackUpdates.length === 0))}>
+              Apply Def2 Resync ({report.def2Updates.length + report.cardBackUpdates.length})
+            </button>
+          </>
+        )}
+        {applyMsg && <span style={{ fontSize: '11px', color: C.textM }}>{applyMsg}</span>}
+      </div>
+      {report && (
+        <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '8px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={lineSt}>
+            Scanned <span style={numSt}>{report.counts.lm}</span> lemmas, <span style={numSt}>{report.counts.words}</span> word rows, <span style={numSt}>{report.counts.sents}</span> sentence rows, <span style={numSt}>{report.counts.cards}</span> cards.
+          </div>
+          <div style={lineSt}>
+            NFC repair needed: <span style={numSt}>{report.nfcUpdates.length}</span> doc{report.nfcUpdates.length === 1 ? '' : 's'}.
+          </div>
+          {report.lmDuplicates.length > 0 && (
+            <div style={{ ...lineSt, color: C.warning || C.textS }}>
+              Duplicate Lemma Master entries (merge manually in Lemma Master): {listPreview(report.lmDuplicates)}
+            </div>
+          )}
+          <div style={lineSt}>
+            Def2 out of sync: <span style={numSt}>{report.def2Updates.length}</span> word row{report.def2Updates.length === 1 ? '' : 's'}
+            {report.def2Updates.length > 0 && <> — {listPreview(report.def2Updates.map(u => u.label))}</>}
+            ; <span style={numSt}>{report.cardBackUpdates.length}</span> card back{report.cardBackUpdates.length === 1 ? '' : 's'}
+            {report.cardBackUpdates.length > 0 && <> — {listPreview(report.cardBackUpdates.map(u => u.label))}</>}.
+          </div>
+          {report.def2NoCanon.length > 0 && (
+            <div style={lineSt}>
+              Rows with a def2 whose Lemma Master entry has none (not auto-erased — re-enter the def2 on the row to restore the cascade): {listPreview(report.def2NoCanon)}
+            </div>
+          )}
+          {report.sentBackReview.length > 0 && (
+            <div style={lineSt}>
+              Sentence card backs matching neither def2 nor def1 (possibly hand-edited, not auto-fixed): {listPreview(report.sentBackReview)}
+            </div>
+          )}
+          {report.sectionGroups.length > 0 && (
+            <div style={lineSt}>
+              Source / section issues:
+              {report.sectionGroups.map(g => (
+                <SectionRetagRow
+                  key={`${g.missingSource ? 'missing' : 'sec'}|${g.source}|${g.storedSection || ''}`}
+                  group={g}
+                  sectionsBySrc={report.sectionsBySrc}
+                  onApply={applyRetag}
+                  busy={status === 'applying'}
+                  C={C}
+                />
+              ))}
+            </div>
+          )}
+          {report.nfcUpdates.length === 0 && report.lmDuplicates.length === 0 &&
+           report.def2Updates.length === 0 && report.def2NoCanon.length === 0 &&
+           report.cardBackUpdates.length === 0 &&
+           report.sentBackReview.length === 0 && report.sectionGroups.length === 0 && (
+            <div style={{ ...lineSt, color: C.success || C.textS }}>All clean — nothing to repair.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One orphaned source/section group with its fix control: missing sources
+// get a "move to Sourceless" action; stale section values get a dropdown of
+// the source's current sections (or clear). Field-level batch updates only.
+function SectionRetagRow({ group, sectionsBySrc, onApply, busy, C }) {
+  const [choice, setChoice] = useState('');
+  const options = group.srcId ? (sectionsBySrc[group.srcId] || []) : [];
+  const n = group.refs.length;
+
+  const selSt = {
+    fontSize: '11px', padding: '3px 8px', borderRadius: '5px',
+    border: `1px solid ${C.border}`, background: C.bg, color: C.text, outline: 'none',
+  };
+  const applySt = (disabled) => ({
+    fontSize: '11px', padding: '3px 10px', borderRadius: '5px',
+    border: `1px solid ${C.border}`, background: 'transparent',
+    color: C.textS, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+  });
+
+  if (group.missingSource) {
+    return (
+      <div style={{ paddingLeft: '12px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+        <span>— source "{group.source}" no longer exists: <span style={{ color: C.text, fontWeight: 600 }}>{n}</span> row{n === 1 ? '' : 's'}</span>
+        <button style={applySt(busy)} disabled={busy} onClick={() => onApply(group, null)}>
+          Move to Sourceless
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ paddingLeft: '12px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+      <span>— {group.source} — stored §{group.storedSection} not among current sections: <span style={{ color: C.text, fontWeight: 600 }}>{n}</span> row{n === 1 ? '' : 's'}</span>
+      <select value={choice} onChange={e => setChoice(e.target.value)} style={selSt} disabled={busy}>
+        <option value="">Re-tag as…</option>
+        {options.map(c => <option key={c} value={c}>§{c}</option>)}
+        <option value="__CLEAR__">(clear section)</option>
+      </select>
+      <button style={applySt(busy || !choice)} disabled={busy || !choice} onClick={() => onApply(group, choice)}>
+        Apply
+      </button>
+    </div>
+  );
+}
+
 export function DevDashboard({ user }) {
   const { C, G } = useAppTheme();
 
@@ -956,6 +1316,10 @@ export function DevDashboard({ user }) {
                     <span style={{ fontSize: '11px', color: C.textM }}>{reviewStatsResult}</span>
                   )}
                 </div>
+              </div>
+              <div>
+                <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>AVI Maintenance</div>
+                <AVIMaintenancePanel uid={user.uid} C={C} />
               </div>
             </div>
           ) : view === 'list' ? (

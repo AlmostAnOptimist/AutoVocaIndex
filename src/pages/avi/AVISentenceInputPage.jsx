@@ -327,6 +327,7 @@ export function AVISentenceInputPage({
   cards, decks, updateCards, updateDecks,
   goToSource, dsh,
   siPage, setSiPage,
+  inputSearch, setInputSearch,
 }) {
   const { C, S } = useAppTheme();
   const needsSection = getSourceSections(aviSources, aviSections, currentSource).length > 0 && !currentSection;
@@ -892,11 +893,26 @@ export function AVISentenceInputPage({
     handlePickInput(s.sentence, s.uid);
   }, [handlePickInput]);
 
-  // ── Pagination ───────────────────────────────────────────────
-  const sortedSentences = useMemo(() =>
-    [...data.sentenceInputs].sort((a, b) => (b.ts || '').localeCompare(a.ts || '')),
-    [data.sentenceInputs]
-  );
+  // ── Search + pagination ──────────────────────────────────────
+  // The query lives in AVIPage (rendered in the sticky tab strip on
+  // desktop; the mobile input below binds to the same state). NFC on both
+  // sides so pre-repair decomposed rows still match a composed query.
+  const q = (inputSearch || '').normalize('NFC').trim().toLowerCase();
+  const sortedSentences = useMemo(() => {
+    const match = (s) => !q ||
+      [s.sentence, s.targetWord, s.cardBack]
+        .some(f => (f || '').normalize('NFC').toLowerCase().includes(q));
+    return [...data.sentenceInputs].filter(match).sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  }, [data.sentenceInputs, q]);
+
+  // Back to page 0 when the query changes so results are visible. The ref
+  // guard skips the mount run — siPage is lifted state that deliberately
+  // persists across tab switches, and must not be reset by remounting.
+  const searchInitRef = useRef(false);
+  useEffect(() => {
+    if (!searchInitRef.current) { searchInitRef.current = true; return; }
+    setSiPage(0);
+  }, [inputSearch, setSiPage]);
   const totalPages = Math.ceil(sortedSentences.length / SI_PAGE_SIZE);
   const page       = Math.min(siPage, Math.max(0, totalPages - 1));
   const pagedRows  = sortedSentences.slice(page * SI_PAGE_SIZE, (page + 1) * SI_PAGE_SIZE);
@@ -1013,18 +1029,36 @@ export function AVISentenceInputPage({
         </button>
 
         <div style={{ fontSize: '11px', color: C.textM, fontFamily: SH.fm }}>
-          {sortedSentences.length} {sortedSentences.length === 1 ? 'entry' : 'entries'}
+          {q
+            ? `${sortedSentences.length} of ${data.sentenceInputs.length} match`
+            : `${sortedSentences.length} ${sortedSentences.length === 1 ? 'entry' : 'entries'}`}
         </div>
       </div>
 
       {/* ── Sentence table (mobile: card list instead) ────────── */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+
+        {/* Mobile search — the desktop input lives in AVIPage's tab strip */}
+        {isMobile && (
+          <input
+            type="text"
+            value={inputSearch || ''}
+            onChange={e => setInputSearch(e.target.value)}
+            placeholder="Search sentences…"
+            style={{
+              fontSize: '16px', padding: '8px 12px', borderRadius: '8px',
+              border: `1px solid ${C.border}`, background: C.surface, color: C.text,
+              outline: 'none', marginBottom: '10px', width: '100%', boxSizing: 'border-box',
+            }}
+          />
+        )}
+
         <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: isMobile ? 'hidden' : 'auto' }}>
           {isMobile ? (
             <>
               {pagedRows.length === 0 && (
                 <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
-                  No entries yet. Paste a sentence above.
+                  {q ? 'No entries match your search.' : 'No entries yet. Paste a sentence above.'}
                 </div>
               )}
               {pagedRows.map(s => (
@@ -1053,7 +1087,7 @@ export function AVISentenceInputPage({
                 {pagedRows.length === 0 && (
                   <tr>
                     <td colSpan={6} style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
-                      No entries yet. Paste a sentence above.
+                      {q ? 'No entries match your search.' : 'No entries yet. Paste a sentence above.'}
                     </td>
                   </tr>
                 )}

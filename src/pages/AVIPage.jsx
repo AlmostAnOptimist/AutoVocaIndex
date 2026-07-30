@@ -109,12 +109,17 @@ export function AVIPage({
 
   const handleSetTab = useCallback((tab) => {
     setActiveTab(tab);
+    setInputSearch('');
     try { localStorage.setItem(AVI_TAB_KEY, tab); } catch {}
   }, []);
 
   // ── Lifted pagination state (persists across tab switches) ────
   const [siPage,    setSiPage]    = useState(0);
   const [lmPage,    setLmPage]    = useState(0);
+
+  // Word/Sentence Input search query — lives here so the input can render
+  // in the sticky tab strip on desktop; cleared on every tab switch.
+  const [inputSearch, setInputSearch] = useState('');
   const [srcFilter, setSrcFilterRaw] = useState(() => {
     try { return localStorage.getItem(AVI_SRC_KEY) || ''; } catch { return ''; }
   });
@@ -264,6 +269,8 @@ export function AVIPage({
     // Lifted pagination
     siPage, setSiPage,
     lmPage, setLmPage,
+    // Word/Sentence Input search (rendered in the tab strip)
+    inputSearch, setInputSearch,
     // Source tab filter
     srcFilter, setSrcFilter,
     secFilter, setSecFilter,
@@ -311,7 +318,7 @@ export function AVIPage({
           App.jsx's header (see AVIMobileNav render below) — this whole
           row is desktop-only. */}
       {!isMobile && (
-      <div style={{ flexShrink: 0, position: 'sticky', top: 0, zIndex: 1, background: C.bg, marginBottom: '16px' }}>
+      <div style={{ flexShrink: 0, position: 'sticky', top: 0, zIndex: 1, background: C.bg, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '10px' }}>
         <div style={{
           display: 'flex', gap: '4px',
           background: C.cardBg || C.surface,
@@ -364,6 +371,21 @@ export function AVIPage({
             }} />
           </div>
         </div>
+
+        {/* Search — Word/Sentence Input tabs only, right of the tab strip */}
+        {(activeTab === 'word' || activeTab === 'sentence') && (
+          <input
+            type="text"
+            value={inputSearch}
+            onChange={e => setInputSearch(e.target.value)}
+            placeholder={activeTab === 'word' ? 'Search words…' : 'Search sentences…'}
+            style={{
+              fontSize: '12.5px', padding: '6px 12px', borderRadius: '8px',
+              border: `1px solid ${C.border}`, background: C.cardBg || C.surface,
+              color: C.text, outline: 'none', width: '220px', flexShrink: 0,
+            }}
+          />
+        )}
       </div>
       )}
 

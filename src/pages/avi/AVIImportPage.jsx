@@ -20,7 +20,7 @@ import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteIn
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
 import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
 import {
-  segmentSentences, segmentWords, chunkItems, IMPORT_LIMITS,
+  segmentSentences, segmentWords, segmentWordsDetailed, chunkItems, IMPORT_LIMITS,
   buildImportPlan, buildCommitRows,
   stripSubtitleMarkup, detectUploadKind,
 } from '../../utils/importEngine.js';
@@ -35,6 +35,158 @@ const MODES = [
 ];
 
 const RESOLVE_BATCH = 20;
+
+// Multi-word inputs (set phrases in word lists, phrases picked in review)
+// lemmatize the Sentence Input way — non-final tokens verbatim, last token
+// through the full dictionary cascade (an upgrade over Sentence Input's
+// sync heuristic; the plain-join lemma normalizes identically to the
+// "(object) verb" annotation convention, so either spelling is the same
+// lemma and the review field can be edited to taste).
+const isPhraseInput = (str) => /[가-힣]/.test(String(str || '')) && /\s/.test(String(str || '').trim());
+
+async function lemmatizePhraseAsync(phrase, localHeadwords) {
+  const toks = String(phrase || '').trim().split(/\s+/).filter(Boolean);
+  if (!toks.length) return String(phrase || '');
+  const last = toks[toks.length - 1];
+  const lastLemma = await resolveLemmaWithDictionary(last, { localHeadwords }) || last;
+  return toks.length === 1 ? lastLemma : [...toks.slice(0, -1), lastLemma].join(' ');
+}
+
+// Context line under a review term: sentence mode shows the containing
+// sentence with the surface highlighted (click to cycle when the term
+// appears in several); word mode shows the raw pasted line whenever it
+// differs from the cleaned surface (glosses survive there).
+function TermContext({ term, sentences, rawByInput, mode, pos = 0, onCycle, C }) {
+  if (mode === 'word') {
+    const raw = rawByInput ? rawByInput[term.input] : null;
+    if (!raw || raw === term.input) return null;
+    return (
+      <div style={{ fontSize: '11.5px', color: C.textM, fontFamily: SH.fk, lineHeight: 1.5 }}>
+        {raw}
+      </div>
+    );
+  }
+  const idxs = [...new Set(term.sentenceIdxs || [])];
+  if (!idxs.length) return null;
+  const sent  = sentences[idxs[pos % idxs.length]] || '';
+  const parts = term.input ? String(sent).split(term.input) : [sent];
+  return (
+    <div
+      onClick={idxs.length > 1 ? onCycle : undefined}
+      title={idxs.length > 1 ? 'Click to cycle sentences' : undefined}
+      style={{ fontSize: '11.5px', color: C.textM, fontFamily: SH.fk, lineHeight: 1.5, cursor: idxs.length > 1 ? 'pointer' : 'default' }}
+    >
+      {parts.map((p, i) => (
+        <React.Fragment key={i}>
+          {p}
+          {i < parts.length - 1 && <span style={{ color: C.accent, fontWeight: 600 }}>{term.input}</span>}
+        </React.Fragment>
+      ))}
+      {idxs.length > 1 && (
+        <span style={{ fontFamily: SH.fm, fontSize: '10px', marginLeft: '6px' }}>
+          ({(pos % idxs.length) + 1}/{idxs.length})
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Drag across contiguous token pills (or tap the start, then tap the end)
+// to pick a phrase from the sentence — the same interaction as Sentence
+// Input's phrase drag. Confirm inserts the phrase as its own term row.
+function ImportPhrasePicker({ sentence, cleanFn, onConfirm, onCancel, C }) {
+  const tokens = useMemo(() => String(sentence || '').split(/\s+/).filter(Boolean), [sentence]);
+  const [range, setRange]     = useState(null); // [start, end]
+  const [pending, setPending] = useState(false);
+  const anchorRef = useRef(null);
+  const dragRef   = useRef(false);
+
+  React.useEffect(() => {
+    const up = () => { dragRef.current = false; };
+    window.addEventListener('mouseup', up);
+    return () => window.removeEventListener('mouseup', up);
+  }, []);
+
+  const down = (i) => {
+    // Tap flow: a second tap on a different pill extends a single-pill
+    // selection into a span; anything else re-anchors (drag flow).
+    if (range && range[0] === range[1] && i !== range[0]) {
+      setRange([Math.min(range[0], i), Math.max(range[0], i)]);
+      anchorRef.current = null;
+      dragRef.current = false;
+      return;
+    }
+    dragRef.current = true;
+    anchorRef.current = i;
+    setRange([i, i]);
+  };
+  const enter = (i) => {
+    if (!dragRef.current || anchorRef.current == null) return;
+    setRange([Math.min(anchorRef.current, i), Math.max(anchorRef.current, i)]);
+  };
+
+  const clean = typeof cleanFn === 'function' ? cleanFn : (str) => String(str || '').trim();
+  const phraseTokens = range
+    ? tokens.slice(range[0], range[1] + 1).map(t => String(clean(t) || '').trim()).filter(Boolean)
+    : [];
+  const phraseText = phraseTokens.join(' ');
+  const valid = phraseTokens.length >= 2;
+
+  const confirm = async () => {
+    if (!valid || pending) return;
+    setPending(true);
+    try { await onConfirm(phraseText); } finally { setPending(false); }
+  };
+
+  return (
+    <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '6px', padding: '8px', display: 'flex', flexDirection: 'column', gap: '8px', userSelect: 'none' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+        {tokens.map((t, i) => {
+          const inSel = range && i >= range[0] && i <= range[1];
+          return (
+            <span
+              key={i}
+              onMouseDown={() => down(i)}
+              onMouseEnter={() => enter(i)}
+              style={{
+                padding: '3px 9px', borderRadius: '14px', fontSize: '13px',
+                cursor: 'pointer', fontFamily: SH.fk,
+                background: inSel ? C.accent : C.surface,
+                color: inSel ? '#fff' : C.text,
+                border: `1px solid ${inSel ? C.accent : C.border}`,
+                transition: 'all 0.1s',
+              }}
+            >
+              {t}
+            </span>
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '11.5px', color: C.textM }}>
+          {valid
+            ? <>Phrase: <span style={{ color: C.accent, fontFamily: SH.fk }}>{phraseText}</span></>
+            : 'Drag across tokens (or tap the start, then the end) to select a phrase of 2+ words.'}
+        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px' }}>
+          <button
+            onClick={confirm}
+            disabled={!valid || pending}
+            style={{ fontSize: '11px', padding: '4px 10px', borderRadius: '5px', border: `1px solid ${valid ? C.accent : C.border}`, background: valid ? C.accent : 'transparent', color: valid ? '#fff' : C.textM, cursor: valid && !pending ? 'pointer' : 'default', opacity: pending ? 0.6 : 1 }}
+          >
+            {pending ? 'Adding…' : 'Add phrase'}
+          </button>
+          <button
+            onClick={onCancel}
+            style={{ fontSize: '11px', padding: '4px 10px', borderRadius: '5px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, cursor: 'pointer' }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function AVIImportPage({
   data, updateData, showAVIToast,
@@ -52,7 +204,10 @@ export function AVIImportPage({
   const [rawText,   setRawText]   = useState('');
   const [parsed,    setParsed]    = useState(null);       // { chunk, remainder }
   const [excluded,  setExcluded]  = useState(new Set());  // sentence/word indices excluded in step 1
-  const [review,    setReview]    = useState(null);       // { sentences, newTerms, knownTerms }
+  const [review,    setReview]    = useState(null);       // { sentences, newTerms, knownTerms, rawByInput }
+  const [wordRawMap,    setWordRawMap]    = useState(null); // word mode: cleaned surface -> raw pasted line
+  const [phraseOpenIdx, setPhraseOpenIdx] = useState(null); // review row with the phrase picker open
+  const [ctxPos,        setCtxPos]        = useState({});   // review row idx -> context sentence cycle position
   const [knownOpen, setKnownOpen] = useState(false);
   const [resolving, setResolving] = useState(null);       // { done, total } | null
   const [summary,   setSummary]   = useState(null);       // commit result for 'done' step
@@ -101,8 +256,16 @@ export function AVIImportPage({
 
   // ── Step 1: parse ────────────────────────────────────────────
   const handleParse = () => {
-    const items = mode === 'sentence' ? segmentSentences(rawText) : segmentWords(rawText, cleanFn);
-    setParsed(chunkItems(items, limit));
+    if (mode === 'sentence') {
+      setParsed(chunkItems(segmentSentences(rawText), limit));
+      setWordRawMap(null);
+    } else {
+      const detailed = segmentWordsDetailed(rawText, cleanFn);
+      const map = {};
+      for (const d of detailed) if (!(d.surface in map)) map[d.surface] = d.raw;
+      setWordRawMap(map);
+      setParsed(chunkItems(detailed.map(d => d.surface), limit));
+    }
     setExcluded(new Set());
   };
 
@@ -111,6 +274,7 @@ export function AVIImportPage({
     ttsCancelRef.current = true;
     setStep('input'); setParsed(null); setRawText(''); setExcluded(new Set());
     setReview(null); setSummary(null); setResolving(null); setKnownOpen(false);
+    setWordRawMap(null); setPhraseOpenIdx(null); setCtxPos({});
     setDefProgress(null); setTtsProgress(null);
     epubRef.current = null;
     setEpubChapters(null); setEpubSelected(new Set());
@@ -210,7 +374,9 @@ export function AVIImportPage({
       for (let i = 0; i < plan.newTerms.length; i += RESOLVE_BATCH) {
         const batch = plan.newTerms.slice(i, i + RESOLVE_BATCH);
         await Promise.all(batch.map(async (t) => {
-          const lemma = await resolveLemmaWithDictionary(t.input, { localHeadwords }) || t.input;
+          const lemma = isPhraseInput(t.input)
+            ? await lemmatizePhraseAsync(t.input, localHeadwords)
+            : (await resolveLemmaWithDictionary(t.input, { localHeadwords }) || t.input);
           t.lemma = lemma;
           t.resolvedLemma = lemma;
         }));
@@ -236,7 +402,12 @@ export function AVIImportPage({
         dedupedNew.push(t);
       }
       plan.newTerms = dedupedNew;
-      setReview({ sentences: includedItems, newTerms: plan.newTerms, knownTerms: plan.knownTerms });
+      setReview({
+        sentences: includedItems, newTerms: plan.newTerms, knownTerms: plan.knownTerms,
+        rawByInput: mode === 'word' ? (wordRawMap || {}) : null,
+      });
+      setPhraseOpenIdx(null);
+      setCtxPos({});
       setResolving(null);
       setKnownOpen(false);
       setStep('review');
@@ -257,6 +428,41 @@ export function AVIImportPage({
       const newTerms = prev.newTerms.map((t, i) => i === idx ? { ...t, included: !t.included } : t);
       return { ...prev, newTerms };
     });
+  };
+
+  // Insert a phrase picked from a term's context sentence as its own term
+  // row (Sentence Input parity: the phrase joins its constituent words, it
+  // does not replace them). It inherits the source term's sentenceIdxs so
+  // commit creates both the word row and the sentence row, and it respects
+  // the same dedupe predicate as post-resolution classification.
+  const addPhraseTerm = async (srcIdx, phraseText) => {
+    if (!review) return;
+    const localHeadwords = new Set();
+    for (const l of (data.lemmaMaster || [])) {
+      if (l.lemma) localHeadwords.add(l.lemma);
+      if (l.cleanedLemma) localHeadwords.add(l.cleanedLemma);
+    }
+    const lemma = await lemmatizePhraseAsync(phraseText, localHeadwords);
+    const norm  = normalizeLemma(lemma) || lemma;
+    const inWordInputs = (data.wordInputs || []).some(w => w.lemma && normalizeLemma(w.lemma) === norm);
+    const inReview     = review.newTerms.some(t => (normalizeLemma(t.lemma || t.input) || (t.lemma || t.input)) === norm);
+    if (inWordInputs || inReview) {
+      showAVIToast?.(`"${phraseText}" is already present as a term.`);
+      setPhraseOpenIdx(null);
+      return;
+    }
+    const base = review.newTerms[srcIdx];
+    const newTerm = {
+      input: phraseText, lemma, resolvedLemma: lemma,
+      included: true, sentenceIdxs: [...new Set(base?.sentenceIdxs || [])],
+    };
+    setReview(prev => {
+      if (!prev) return prev;
+      const arr = [...prev.newTerms];
+      arr.splice(srcIdx + 1, 0, newTerm);
+      return { ...prev, newTerms: arr };
+    });
+    setPhraseOpenIdx(null);
   };
 
   const includedTerms = useMemo(
@@ -600,44 +806,83 @@ export function AVIImportPage({
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          {review.newTerms.map((t, idx) => (
+          {review.newTerms.map((t, idx) => {
+            const ctxIdxs = mode === 'sentence' ? [...new Set(t.sentenceIdxs || [])] : [];
+            const ctxSent = ctxIdxs.length > 0
+              ? (review.sentences[ctxIdxs[(ctxPos[idx] || 0) % ctxIdxs.length]] || '')
+              : '';
+            return (
             <div key={idx} style={{
-              display: 'flex', alignItems: 'center', gap: '10px',
+              display: 'flex', flexDirection: 'column', gap: '5px',
               padding: '7px 10px', borderRadius: '6px',
               border: `1px solid ${t.included ? C.accent : C.border}`,
               opacity: t.included ? 1 : 0.45, transition: 'all 0.15s', background: C.bg,
             }}>
-              <button
-                onClick={() => toggleTermIncluded(idx)}
-                style={{
-                  flexShrink: 0, width: '18px', height: '18px', borderRadius: '4px',
-                  border: `1px solid ${t.included ? C.accent : C.border}`,
-                  background: t.included ? C.accent : 'transparent',
-                  cursor: 'pointer', padding: 0,
-                }}
-                aria-label={t.included ? 'Exclude term' : 'Include term'}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <button
+                  onClick={() => toggleTermIncluded(idx)}
+                  style={{
+                    flexShrink: 0, width: '18px', height: '18px', borderRadius: '4px',
+                    border: `1px solid ${t.included ? C.accent : C.border}`,
+                    background: t.included ? C.accent : 'transparent',
+                    cursor: 'pointer', padding: 0,
+                  }}
+                  aria-label={t.included ? 'Exclude term' : 'Include term'}
+                />
+                <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.textM, minWidth: isMobile ? '80px' : '130px', wordBreak: 'break-word' }}>
+                  {t.input}
+                </span>
+                <div style={{ flex: 1 }}>
+                  <LemmaAutocompleteInput
+                    value={t.lemma}
+                    onChange={val => updateTermLemma(idx, val)}
+                    lemmaMaster={data.lemmaMaster || []}
+                    inputStyle={lemmaInputStyle}
+                    lang="ko"
+                    disabled={!t.included}
+                    C={C}
+                  />
+                </div>
+                {mode === 'sentence' && (
+                  <span style={{ fontSize: '11px', color: C.textM, fontFamily: SH.fm, flexShrink: 0 }}>
+                    {new Set(t.sentenceIdxs || []).size}s
+                  </span>
+                )}
+                {mode === 'sentence' && ctxIdxs.length > 0 && (
+                  <button
+                    onClick={() => setPhraseOpenIdx(p => p === idx ? null : idx)}
+                    style={{
+                      flexShrink: 0, fontSize: '11px', padding: '3px 9px', borderRadius: '5px',
+                      border: `1px solid ${phraseOpenIdx === idx ? C.accent : C.border}`,
+                      background: phraseOpenIdx === idx ? C.accentSoft : 'transparent',
+                      color: phraseOpenIdx === idx ? C.accent : C.textS, cursor: 'pointer',
+                    }}
+                  >
+                    Phrase
+                  </button>
+                )}
+              </div>
+              <TermContext
+                term={t}
+                sentences={review.sentences}
+                rawByInput={review.rawByInput}
+                mode={mode}
+                pos={ctxPos[idx] || 0}
+                onCycle={() => setCtxPos(p => ({ ...p, [idx]: (p[idx] || 0) + 1 }))}
+                C={C}
               />
-              <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.textM, minWidth: isMobile ? '80px' : '130px', wordBreak: 'break-word' }}>
-                {t.input}
-              </span>
-              <div style={{ flex: 1 }}>
-                <LemmaAutocompleteInput
-                  value={t.lemma}
-                  onChange={val => updateTermLemma(idx, val)}
-                  lemmaMaster={data.lemmaMaster || []}
-                  inputStyle={lemmaInputStyle}
-                  lang="ko"
-                  disabled={!t.included}
+              {phraseOpenIdx === idx && ctxIdxs.length > 0 && (
+                <ImportPhrasePicker
+                  sentence={ctxSent}
+                  cleanFn={cleanFn}
+                  onConfirm={(text) => addPhraseTerm(idx, text)}
+                  onCancel={() => setPhraseOpenIdx(null)}
                   C={C}
                 />
-              </div>
-              {mode === 'sentence' && (
-                <span style={{ fontSize: '11px', color: C.textM, fontFamily: SH.fm, flexShrink: 0 }}>
-                  {new Set(t.sentenceIdxs || []).size}s
-                </span>
               )}
             </div>
-          ))}
+            );
+          })}
           {review.newTerms.length === 0 && (
             <div style={{ fontSize: '13px', color: C.textM, padding: '10px 2px' }}>
               Everything in this chunk is already known — nothing new to import.

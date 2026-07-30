@@ -91,7 +91,11 @@ export function segmentSentences(text) {
 // blocks), duplicates within the paste collapsed by surface form.
 // Cross-referencing against existing wordInputs is Stage 9.2
 // classification work, not parsing work — it does not happen here.
-export function segmentWords(text, cleanFn) {
+// Parse a word list keeping the original pasted line alongside each cleaned
+// surface. The raw line often carries a gloss or note that noise-cleaning
+// strips — the Import review shows it as context under the term. Dedupe key
+// and cleaning are identical to segmentWords, which delegates here.
+export function segmentWordsDetailed(text, cleanFn) {
   const clean = typeof cleanFn === 'function' ? cleanFn : (s) => String(s || '').trim();
   const seen = new Set();
   const out = [];
@@ -101,9 +105,13 @@ export function segmentWords(text, cleanFn) {
     const key = t.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    out.push(t);
+    out.push({ surface: t, raw: String(line).trim() });
   });
   return out;
+}
+
+export function segmentWords(text, cleanFn) {
+  return segmentWordsDetailed(text, cleanFn).map(d => d.surface);
 }
 
 // Cap a parsed item list to the per-run soft limit. The remainder is

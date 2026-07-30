@@ -27,11 +27,18 @@ export function uuid() {
 // Hanja brackets, trailing punctuation, and Korean-safe parentheticals.
 export function normalizeLemma(s) {
   if (!s) return '';
-  s = String(s).trim();
+  // NFC first: decomposed Hangul (jamo sequences) renders identically to
+  // composed syllables but fails string equality — normalize before any
+  // comparison so invisibly-different encodings can never split a lemma.
+  s = String(s).normalize('NFC').trim();
   s = s.replace(/^[\s"'\u201C\u201D\u2018\u2019]+/, '')
        .replace(/[\s"'\u201C\u201D\u2018\u2019]+$/, '');
   s = s.replace(/\uFEFF|\u200B|\u200C|\u200D/g, '');
-  s = s.replace(/^\([^)]*\)\s*/, '');
+// Leading parenthetical: mirror the trailing rule — Hangul content is a
+  // meaningful annotation ("(주먹을) 날리다" is a distinct collocation lemma,
+  // not the same lemma as 날리다), so keep it in the normalized form;
+  // non-Hangul content ("(1)", "(verb)") is dictionary noise and strips.
+  s = s.replace(/^\(([^)]*)\)\s*/, (m, inner) => /[가-힣]/.test(inner) ? inner + ' ' : '');
   s = s.replace(/^~\S*\s*/, '');
   s = s.replace(/\s*\[[^\]]*\]\s*$/, '');
   s = s.replace(/[\s.,:;!?-]+$/, '');
@@ -1050,20 +1057,40 @@ export function applyRelationConnect(prevData, lemmaIds, relType, showAVIToast) 
 }
 
 // ── Shared source/section lookup ───────────────────────────────
-// Returns the sections belonging to a source (by title), sorted by trailing
-// section number. Used anywhere that needs to know "does this source have
-// sections, and which ones" — the topbar source selector, the Source tab,
-// and the section-required gating on the input pages.
+// Returns the sections belonging to a source (by title), in Content Library
+// order: the source's explicit sectionOrder when present, natural compare on
+// the full content string otherwise (so 문법 1.2 sorts after 문법 1.1 and
+// named sections keep their CL position — no trailing-digit parsing). Used
+// anywhere that needs to know "does this source have sections, and which
+// ones" — the topbar source selector, the Source tab, and the
+// section-required gating on the input pages.
 export function getSourceSections(aviSources, aviSections, sourceTitle) {
   const src = aviSources.find(s => s.title === sourceTitle);
   if (!src) return [];
-  return aviSections
-    .filter(s => s.resourceId === src.id)
-    .sort((a, b) => {
-      const na = parseInt((a.content || '').match(/(\d+)$/)?.[1]) || 0;
-      const nb = parseInt((b.content || '').match(/(\d+)$/)?.[1]) || 0;
-      return na - nb;
+  const naturalKey = (str) => {
+    const parts = [];
+    (str || '').replace(/(\d+)|(\D+)/g, (_, num, txt) => { parts.push(num ? parseInt(num, 10) : txt.toLowerCase()); });
+    return parts;
+  };
+  const naturalCompare = (a, b) => {
+    const ka = naturalKey(a.content), kb = naturalKey(b.content);
+    for (let i = 0; i < Math.max(ka.length, kb.length); i++) {
+      const av = ka[i] ?? '', bv = kb[i] ?? '';
+      if (av < bv) return -1;
+      if (av > bv) return 1;
+    }
+    return 0;
+  };
+  const list  = aviSections.filter(s => s.resourceId === src.id);
+  const order = src.sectionOrder;
+  if (order?.length) {
+    const orderMap = Object.fromEntries(order.map((id, i) => [id, i]));
+    return list.sort((a, b) => {
+      const ai = orderMap[a.id] ?? Infinity, bi = orderMap[b.id] ?? Infinity;
+      return ai !== bi ? ai - bi : naturalCompare(a, b);
     });
+  }
+  return list.sort(naturalCompare);
 }
 
 // Builds a { 'YYYY-MM-DD': count } map of word/sentence mining activity —

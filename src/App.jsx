@@ -200,7 +200,7 @@ function AVISourceSelector({ sources, sections, currentSource, currentSection, o
         disabled={!activeSrc || srcSections.length === 0}
         style={{ fontSize: '12px', padding: '3px 8px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: activeSrc ? 'pointer' : 'default', outline: 'none', opacity: (!activeSrc || srcSections.length === 0) ? 0.4 : 1, maxWidth: isMobile ? 'none' : '90px', width: isMobile ? '100%' : undefined, marginTop: isMobile ? '10px' : 0 }}>
         <option value="">(All sections)</option>
-        {srcSections.map(s => <option key={s.id} value={s.content.match(/(\d+)$/)?.[1] || s.content}>{s.content}</option>)}
+        {srcSections.map(s => <option key={s.id} value={s.content}>{s.content}</option>)}
       </select>
     </>
   );
