@@ -136,6 +136,10 @@ export function buildGlobalStyles(C) {
     .topbar { height: 52px !important; padding: 0 14px !important; }
     input, textarea, select { font-size: 16px !important; }
   }
+  @media (pointer: coarse) and (hover: none) and (min-width: 701px) {
+    .content-pad { padding-bottom: 96px !important; }
+    .quiz-session { padding-bottom: 96px !important; }
+  }
 `;
 }
 
