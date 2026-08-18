@@ -325,7 +325,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   });
 
   useEffect(() => {
-    if (!isMobile) return;
+    if (!window.matchMedia('(pointer: coarse)').matches) return;
     const el = cardElRef.current;
     if (!el) return; // no active card on this phase; re-runs when one mounts
 
