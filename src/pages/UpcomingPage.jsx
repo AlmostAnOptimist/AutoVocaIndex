@@ -10,7 +10,7 @@ import { taskSortComparator } from '../utils/dragSort.js';
 import { getNextOccurrence } from '../utils/recurrenceEngine.js';
 import { CATEGORIES } from '../constants.js';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── Day detail popup (Phase E2 follow-up, mobile only) ──
 // On mobile, MonthCalendar and Planner (unarmed) cells show tasks as

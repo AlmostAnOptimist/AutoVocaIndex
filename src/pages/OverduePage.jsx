@@ -7,7 +7,7 @@ import { SH } from '../theme/buildStyles.js';
 import { useDragSort } from '../hooks/useDragSort.js';
 import { compareByPriorityPushCategoryTitle } from '../utils/dragSort.js';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 function MiniCalendar({ tasks, dsh, C }) {
   const today = getLogicalToday(dsh);

@@ -2121,7 +2121,7 @@ export function ContentLibraryPage({
   updateCards, updateDecks, onSourceCascadeComplete,
 }) {
   const { C, S } = useAppTheme();
-  const isMobile   = typeof window !== 'undefined' && window.innerWidth <= 700;
+  const isMobile   = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
   const dsh        = settings?.dayStartHour ?? 3;
   const adriftDays = settings?.adriftDays   ?? 14;
   const [sources,            setSources]            = useState(() => (aviSources || []).filter(s => !s.isSourceless));

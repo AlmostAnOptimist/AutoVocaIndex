@@ -24,7 +24,7 @@ import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 // Mobile cards are much heavier per-row than desktop's grid (two always-mounted
 // textareas + a live autocomplete component, vs compact grid cells) — keeping
 // far fewer of them mounted at once matters more on iOS Safari, which crashes

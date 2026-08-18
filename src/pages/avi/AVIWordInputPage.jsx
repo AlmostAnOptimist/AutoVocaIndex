@@ -24,7 +24,7 @@ import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
 
 const WI_PAGE_SIZE = 25;
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── Auto-card creation ────────────────────────────────────────
 // autoCreateWordCard and ensureNuanceFlashcard live in

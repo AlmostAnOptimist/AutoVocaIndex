@@ -19,7 +19,7 @@ const GRAMMAR_DECK_ID = 'deck_grammar';
 const GRAMMAR_PAGE_SIZE = 25;
 // Used now to keep the crow off mobile; the rest of the mobile pass lands in
 // the next stage, but this constant needs to exist before then.
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // Minimum interval (days) enforced per mastery level after grading.
 // Introduced has no floor — cards at that level are never in the due queue.

@@ -90,7 +90,7 @@ export function ContentLibraryGazette(props) {
     wordInputs, sentenceInputs, adAliases,
   } = props;
 
-  const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+  const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
   const [carouselIdx, setCarouselIdx] = useState(0);
   const [lettersPage, setLettersPage] = useState(0);  const [activityEndYM, setActivityEndYM] = useState(null);
   const lettersBoxRef = useRef(null);  // fold-line snap target for the ad (Stage A-2)

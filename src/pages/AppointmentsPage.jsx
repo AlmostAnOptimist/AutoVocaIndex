@@ -15,7 +15,7 @@ import { db, auth } from '../firebase.js';import {
   catColor, fmtApptDate, fmtTime, CATEGORY_LABELS,
 } from '../components/AppointmentModal.jsx';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── AppointmentRow ────────────────────────────────────────────
 

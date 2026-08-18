@@ -123,7 +123,7 @@ export function buildGlobalStyles(C) {
   .avi-index-panel { animation: indexDown 0.18s ease both; }
   @keyframes avi-spin { to { transform: rotate(360deg); } }
   .icon-spin { animation: avi-spin 0.8s linear infinite; }
-  @media (max-width: 700px) {
+  @media (max-width: 700px), (hover: none) and (pointer: coarse) and (orientation: portrait) {
     .sidebar { display: none !important; }
     .mobile-nav { display: flex !important; }
     .content-pad { padding: 16px !important; padding-bottom: 80px !important; }
@@ -131,7 +131,7 @@ export function buildGlobalStyles(C) {
     .stats-col { display: flex !important; flex-direction: column !important; gap: 14px !important; }
     .quiz-session { padding-bottom: 72px !important; }
     .quiz-macaw img { max-width: 100% !important; height: auto !important; }
-    .review-card { overflow-y: auto !important; max-height: calc(100vh - 200px) !important; }
+    .review-card { overflow-y: auto !important; max-height: calc(100dvh - 200px) !important; }
     .topbar-desktop { display: none !important; }
     .topbar { height: 52px !important; padding: 0 14px !important; }
     input, textarea, select { font-size: 16px !important; }
@@ -148,8 +148,8 @@ export function buildStyles(C) {
   const cts = C.bgTextS || C.textS;
   const ctm = C.bgTextM || C.textM;
   return {
-    root: { display: 'flex', height: '100vh', background: C.bg, overflow: 'hidden' },
-    sidebar: { width: '220px', minWidth: '220px', height: '100vh', background: C.surface, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 },
+    root: { display: 'flex', height: '100dvh', background: C.bg, overflow: 'hidden' },
+    sidebar: { width: '220px', minWidth: '220px', height: '100dvh', background: C.surface, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 },
     sidebarScroll: { flex: 1, overflowY: 'auto', overflowX: 'hidden' },
     main: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
     logoWrap: { padding: '0 18px', height: '74px', borderBottom: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0, background: C.surface, position: 'sticky', top: 0, zIndex: 10 },
@@ -207,7 +207,7 @@ taskCheck: (c, p) => { const pc = p === 'high' ? C.danger : p === 'med' ? C.warn
     recurChip: (a) => ({ fontFamily: SH.fp, padding: '2px 8px', fontSize: '11.5px', fontWeight: 500, border: '4px solid transparent', borderRadius: 0, borderImageSource: frameBevel(a ? C.accent : C.border), borderImageSlice: 6, borderImageWidth: '5px', borderImageRepeat: 'stretch', background: a ? C.accentSoft : 'transparent', backgroundClip: 'padding-box', color: a ? C.accent : C.textS, cursor: 'pointer', transition: 'color 0.15s, background 0.15s' }),
     dayChip: (a, dis) => ({ fontFamily: SH.fp, padding: '1px 6px', fontSize: '11px', fontWeight: 500, border: '4px solid transparent', borderRadius: 0, borderImageSource: frameBevel(a ? C.accent : C.border), borderImageSlice: 6, borderImageWidth: '5px', borderImageRepeat: 'stretch', background: a ? C.accentSoft : 'transparent', backgroundClip: 'padding-box', color: a ? C.accent : C.textS, cursor: dis ? 'default' : 'pointer', transition: 'color 0.15s, background 0.15s', minWidth: '38px', textAlign: 'center', opacity: dis ? 0.4 : 1 }),
     infoBox: { background: 'transparent', backgroundClip: 'padding-box', border: '5px solid transparent', borderRadius: 0, borderImageSource: frameBevelFilled(C.accent, C.accentSoft, 0.27), borderImageSlice: '6 fill', borderImageWidth: '6px', borderImageRepeat: 'stretch', padding: '5px 9px', fontSize: '12px', color: C.textS, marginTop: '8px', lineHeight: 1.5 },
-    themePanel: (o) => ({ position: 'fixed', top: 0, right: o ? 0 : '-280px', width: '272px', height: '100vh', background: C.surface, borderLeft: `1px solid ${C.border}`, zIndex: 200, padding: '24px', overflowY: 'auto', transition: 'right 0.3s cubic-bezier(0.4,0,0.2,1)' }),
+    themePanel: (o) => ({ position: 'fixed', top: 0, right: o ? 0 : '-280px', width: '272px', height: '100dvh', background: C.surface, borderLeft: `1px solid ${C.border}`, zIndex: 200, padding: '24px', overflowY: 'auto', transition: 'right 0.3s cubic-bezier(0.4,0,0.2,1)' }),
     themePanelTitle: { fontFamily: SH.fd, fontSize: '17px', fontWeight: 400, marginBottom: '20px', color: C.text },
     themeOption: (a) => ({ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px', borderRadius: '12px', cursor: 'pointer', marginBottom: '8px', border: `1.5px solid ${a ? C.accent : 'transparent'}`, background: a ? C.accentSoft : 'transparent', transition: 'all 0.15s' }),
     agendaTabs: { display: 'flex', gap: '4px', marginBottom: '24px', background: 'transparent', backgroundClip: 'padding-box', border: '5px solid transparent', borderRadius: 0, borderImageSource: frameBevelFilled(C.border, C.cardBg || C.surface), borderImageSlice: '6 fill', borderImageWidth: '6px', borderImageRepeat: 'stretch', width: 'fit-content' },

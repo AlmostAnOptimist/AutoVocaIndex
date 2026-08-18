@@ -22,7 +22,7 @@ import { AVIRecentPage } from './avi/AVIRecentPage.jsx';
 import { AVIMobileNav } from '../components/avi/AVIMobileNav.jsx';
 import { NUANCE_SOURCE_TITLE, normalizeLemma } from '../utils/aviUtils.js';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── Tab persistence key ───────────────────────────────────────
 const AVI_TAB_KEY = 'avi_tab';

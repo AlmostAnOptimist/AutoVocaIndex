@@ -50,7 +50,7 @@ const CLOZE_DEFAULTS = {
   choiceCount:   4,
 };
 const GRAMMAR_CONFIG_KEY = 'avi_quiz_grammar_config';
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 const RC_PAGE_SIZE = 5; // Session Log rows per page (similar height to By the Numbers box beside it)
 
 // ── Config persistence ────────────────────────────────────────

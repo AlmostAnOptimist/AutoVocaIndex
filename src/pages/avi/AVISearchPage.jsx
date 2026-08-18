@@ -16,7 +16,7 @@ import {
   applyRelationPin, applyRelationConnect,
 } from '../../utils/aviUtils.js';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── ConnectListModal ─────────────────────────────────────────
 // Paste a list of words, resolve to lemmas, connect them all.

@@ -26,7 +26,7 @@ import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
 
 const SI_PAGE_SIZE = 50;
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── Auto-card creation for sentence entries ───────────────────
 // autoCreateSentenceCard lives in src/utils/cardFactory.js

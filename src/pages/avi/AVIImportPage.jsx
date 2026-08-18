@@ -27,7 +27,7 @@ import {
 import { openEpub } from '../../utils/epubUtils.js';
 import { ProgressBar } from '../../components/ProgressBar.jsx';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 const MODES = [
   { id: 'sentence', label: 'Sentence Import', hint: 'Paste an excerpt, article, or dialogue. It will be split into sentences for review.' },

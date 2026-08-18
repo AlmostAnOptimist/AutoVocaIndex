@@ -13,7 +13,7 @@ import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import { normalizeLemma, getSourceSections, NUANCE_SOURCE_TITLE } from '../../utils/aviUtils.js';
 import { AVISourceSearchSelect } from '../../components/avi/AVISourceSearchSelect.jsx';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 export function AVISourcePage({
   data,

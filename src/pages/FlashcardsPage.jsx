@@ -34,7 +34,7 @@ const NEW_CARDS_PER_SESSION = 10;
 // `.grade-pulse` CSS animation duration in buildStyles.js.
 const GRADE_ANIM_MS = 220;
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── Grade buttons (Again / Hard / Good / Easy) ────────────────
 // Order matches the planned swipe mapping: Again=left, Easy=right.

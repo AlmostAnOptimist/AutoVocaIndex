@@ -12,7 +12,7 @@ import { useDragSort } from '../hooks/useDragSort.js';
 import { taskSortComparator, applyDragOrder } from '../utils/dragSort.js';
 import { uid } from '../utils/dateUtils.js';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData, flashcardDue, cards, srsSnapshot = {},
  }) {

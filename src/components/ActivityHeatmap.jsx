@@ -16,7 +16,7 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { toDateStr } from '../utils/dateUtils.js';
 
 // ── Layout constants ──────────────────────────────────────────
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 const CELL          = 16;
 const GAP           = 2;

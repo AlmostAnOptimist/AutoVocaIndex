@@ -12,7 +12,7 @@ import { DEMO } from '../demo/demoConfig.js';
 
 const PRESET_TAGS = ['vocabulary', 'grammar', 'reading', 'listening', 'speaking', 'writing', 'culture', 'review', 'question'];
 const TAB_KEY = 'avi_notes_tab';
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 // ── Helpers ───────────────────────────────────────────────────
 function formatDate(iso) {

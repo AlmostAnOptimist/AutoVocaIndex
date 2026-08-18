@@ -13,7 +13,7 @@ import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from './Def1Display.jsx';
 import { LemmaAutocompleteInput } from './LemmaAutocompleteInput.jsx';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 export function WordEditModal({
   rows,          // ordered array of word rows the modal can page across

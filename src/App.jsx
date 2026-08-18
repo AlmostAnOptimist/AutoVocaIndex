@@ -60,7 +60,19 @@ const FC_DECKS_PREFIX = 'avi_fc_decks_';
 // Module-level so every component in this file can see it (AVISourceSelector
 // in particular — it's defined outside the App function and was previously
 // reaching for a local isMobile that didn't exist in its scope).
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
+
+// Tablet rotation crosses the mobile/desktop layout boundary, but layout
+// mode is baked in at module load — reload to re-evaluate. Gated to
+// touch-only devices whose short edge exceeds the phone breakpoint, so
+// phone rotation never triggers it.
+if (
+  typeof window !== 'undefined' &&
+  window.matchMedia('(hover: none) and (pointer: coarse)').matches &&
+  Math.min(window.screen.width, window.screen.height) > 700
+) {
+  window.matchMedia('(orientation: portrait)').addEventListener('change', () => location.reload());
+}
 
 function fcRead(key) {
   try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : null; } catch { return null; }

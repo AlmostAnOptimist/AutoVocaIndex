@@ -11,7 +11,7 @@ import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { LemmaAutocompleteInput } from './LemmaAutocompleteInput.jsx';
 
-const isMobile = typeof window !== 'undefined' && window.innerWidth <= 700;
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
 export function SentenceEditModal({ row, lemmaMaster, onSave, onClose }) {
   const { C, S } = useAppTheme();
