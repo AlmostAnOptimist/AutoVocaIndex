@@ -1216,6 +1216,17 @@ function VocaQuizSession({ questions: initialQuestions, matchSets, config, onFin
   const [matchTermsDone, setMatchTermsDone] = useState(0);  // pairs completed in finished sets
   const [matchLiveCount, setMatchLiveCount] = useState(0);  // pairs matched in current active set
 
+  // Single-fire guard: the save awaits before the view changes, so on a slow
+  // connection the session UI (Continue / End) stays tappable for seconds.
+  // A second tap would re-run the finish math (double-counting the last
+  // matching set) and save a duplicate result doc.
+  const finishedRef = useRef(false);
+  const finishOnce = (...args) => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    onFinish(...args);
+  };
+
   const types       = config.questionTypes || [config.questionType || 'multiple'];
   const hasMatching = types.includes('matching') && matchSets && matchSets.length > 0;
   const linearTotal = questions.length;
@@ -1267,10 +1278,14 @@ function VocaQuizSession({ questions: initialQuestions, matchSets, config, onFin
             onClick={() => {
               // Ending early still counts any matching sets already finished —
               // otherwise the saved score silently drops their credit.
+              // Total counts only answered linear questions (matching the
+              // cloze End behavior) so unanswered questions don't silently
+              // drag the score down without appearing in the results tiles.
               const creditSum   = questions.reduce((s, qu) => s + (qu.credit ?? (qu.isCorrect ? 1.0 : 0.0)), 0);
               const matchCredit = matchCorrects.reduce((s, r) => s + r.correct, 0);
               const matchTotal  = matchCorrects.reduce((s, r) => s + r.total, 0);
-              onFinish(questions, creditSum + matchCredit, questions.length + matchTotal, matchMisses, matchTotal);
+              const answeredCount = questions.filter(qu => qu.answered).length;
+              finishOnce(questions, creditSum + matchCredit, (answeredCount + matchTotal) || 1, matchMisses, matchTotal);
             }}
             style={{
               fontSize: '12px', color: C.textM, padding: '3px 10px', borderRadius: '6px',
@@ -1291,7 +1306,7 @@ function VocaQuizSession({ questions: initialQuestions, matchSets, config, onFin
         setWaiting(false);
       } else {
         const creditSum = qs.reduce((s, qu) => s + (qu.credit ?? (qu.isCorrect ? 1.0 : 0.0)), 0);
-        onFinish(qs, creditSum, qs.length, matchMisses, 0);
+        finishOnce(qs, creditSum, qs.length, matchMisses, 0);
       }
     } else {
       setIdx(prev => prev + 1);
@@ -1343,20 +1358,23 @@ function VocaQuizSession({ questions: initialQuestions, matchSets, config, onFin
 
   // ── Matching set finished ──────────────────────────────────
   const handleMatchFinish = (correct, total, wrongPairs = []) => {
+    if (finishedRef.current) return;
     const newCorrects = [...matchCorrects, { correct, total }];
     const newMisses   = [...matchMisses, ...wrongPairs];
     setMatchCorrects(newCorrects);
     setMatchMisses(newMisses);
-    setMatchTermsDone(prev => prev + total);
+    // Direct values (not functional updates) so a double-tap on Continue
+    // before React commits is idempotent instead of double-advancing.
+    setMatchTermsDone(matchTermsDone + total);
     setMatchLiveCount(0);
 
     if (matchSetIdx + 1 >= matchSets.length) {
       const linearCredit = questions.reduce((s, qu) => s + (qu.credit ?? (qu.isCorrect ? 1.0 : 0.0)), 0);
       const matchCredit  = newCorrects.reduce((s, r) => s + r.correct, 0);
       const matchQTotal  = newCorrects.reduce((s, r) => s + r.total, 0);
-      onFinish(questions, linearCredit + matchCredit, linearTotal + matchQTotal, newMisses, matchQTotal);
+      finishOnce(questions, linearCredit + matchCredit, linearTotal + matchQTotal, newMisses, matchQTotal);
     } else {
-      setMatchSetIdx(prev => prev + 1);
+      setMatchSetIdx(matchSetIdx + 1);
     }
   };
 
@@ -1637,15 +1655,24 @@ function VocaTypeQ({ q, config, onAnswer, onOverride, onRelatedOverride, C, S })
 // RESULTS
 // ─────────────────────────────────────────────────────────────
 function VocaQuizResults({ questions, correct, total, matchMisses = [], matchTotal = 0, resultId, config, onUpdateResult, onDone, C, S }) {
-  const [localQs,      setLocalQs]      = useState(questions);
-  const [localCorrect, setLocalCorrect] = useState(correct);
-  const [saving,       setSaving]       = useState(false);
+  const [localQs, setLocalQs] = useState(questions);
+  const [saving,  setSaving]  = useState(false);
+  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
 
-  const rawPct = total > 0 ? localCorrect / total * 100 : 0;
+  // Resync if the parent hands down a different questions array (e.g. a
+  // late-landing duplicate finish over a slow connection replaced lastResult).
+  useEffect(() => { setLocalQs(questions); }, [questions]);
+
+  const getCredit = q => q.credit ?? (q.isCorrect ? 1.0 : 0.0);
+
+  // Headline % derives from the same per-question credits the tiles use —
+  // one source of truth, so the headline and tiles can never disagree.
+  const liveCorrect = localQs.reduce((s, q) => s + getCredit(q), 0)
+                    + Math.max(0, matchTotal - matchMisses.length);
+  const rawPct = total > 0 ? liveCorrect / total * 100 : 0;
   const pct    = formatScore(Math.round(rawPct * 10) / 10);
 
   const answered = localQs.filter(q => q.answered);
-  const getCredit = q => q.credit ?? (q.isCorrect ? 1.0 : 0.0);
 
   const correctCount   = answered.filter(q => getCredit(q) >= 1.0).length;
   const partialQs      = answered.filter(q => { const c = getCredit(q); return c > 0 && c < 1.0; });
@@ -1679,7 +1706,6 @@ const handleOverride = async (qIdx) => {
     const newQs = localQs.map((q, i) => i !== qIdx ? q : { ...q, credit: 1.0, isCorrect: true });
     const newCorrect = newQs.reduce((s, q) => s + getCredit(q), 0) + matchCorrectCount;
     setLocalQs(newQs);
-    setLocalCorrect(newCorrect);
     if (resultId && onUpdateResult) {
       setSaving(true);
       await onUpdateResult(resultId, newCorrect, total);
@@ -1695,7 +1721,6 @@ const handleOverride = async (qIdx) => {
     );
     const newCorrect = newQs.reduce((s, qu) => s + getCredit(qu), 0) + matchCorrectCount;
     setLocalQs(newQs);
-    setLocalCorrect(newCorrect);
     if (resultId && onUpdateResult) {
       setSaving(true);
       await onUpdateResult(resultId, newCorrect, total);
