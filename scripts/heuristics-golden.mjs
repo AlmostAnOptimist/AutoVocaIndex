@@ -74,7 +74,7 @@ if (!bundled) {
   }
 }
 
-const { extractLemmaCandidates, extractLemmaFromText, seedMappingPlausible } =
+const { extractLemmaCandidates, extractLemmaFromText, seedMappingPlausible, normalizeLemma } =
   await import(pathToFileURL(outfile).href);
 
 // ── Golden cases ──────────────────────────────────────────────
@@ -118,12 +118,29 @@ const CANDIDATE_CASES = {
     ['해요', '하다'], ['건너서', '건너다'], ['만나는', '만나다'],
     ['보는', '보다'],
   ],
+  'punctuation stripping (CJK & typographic marks)': [
+    ['날리다.', '날리다'], ['날리다\u2026', '날리다'],
+    ['\u300C날리다\u300D', '날리다'], ['날렸다~', '날리다'],
+    ['\u300E몰라요\u300F', '모르다'], ['해요\uFF01', '하다'],
+  ],
 };
 
 // Words the suffix table must never touch: primary result stays identity.
 // (Bare nouns like 이야기 that a naive strip WOULD touch are protected at
 // the system level by trusted identity rows in the map, not here.)
 const IDENTITY_CASES = ['시험', '안정', '사람', '시간', '살해', '혐의', '황새', '맛있다', '재미있다'];
+
+// normalizeLemma punctuation handling: [input, expected] — exact equality.
+const NORMALIZE_CASES = [
+  ['날리다.', '날리다'],
+  ['날리다\u2026', '날리다'],           // ellipsis
+  ['\u300C날리다\u300D', '날리다'],     // corner brackets
+  ['\u300E날리다\u300F', '날리다'],     // white corner brackets
+  ['날리다~', '날리다'],
+  ['날리다\uFF01', '날리다'],           // full-width exclamation
+  ['날리다\u3002', '날리다'],           // ideographic full stop
+  ['(주먹을) 날리다', '주먹을 날리다'], // Stage 1E leading-parenthetical rule preserved
+];
 
 // seedMappingPlausible: [surface, mapping, expected]
 const PLAUSIBLE_CASES = [
@@ -160,7 +177,18 @@ for (const [group, cases] of Object.entries(CANDIDATE_CASES)) {
     if (primary !== w) { failures++; misses.push([w, primary]); }
   }
   console.log(`${misses.length === 0 ? 'PASS' : 'FAIL'}  identity (must-not-mangle)  (${IDENTITY_CASES.length - misses.length}/${IDENTITY_CASES.length})`);
-  for (const [w, p] of misses) console.log(`      ${w} mangled to ${p}`);
+    for (const [w, p] of misses) console.log(`      ${w} mangled to ${p}`);
+}
+
+{
+  const misses = [];
+  for (const [inp, exp] of NORMALIZE_CASES) {
+    total++;
+    const got = normalizeLemma(inp);
+    if (got !== exp) { failures++; misses.push([inp, exp, got]); }
+  }
+  console.log(`${misses.length === 0 ? 'PASS' : 'FAIL'}  normalizeLemma punctuation  (${NORMALIZE_CASES.length - misses.length}/${NORMALIZE_CASES.length})`);
+  for (const [i, e, g] of misses) console.log(`      ${i} → expected ${e}, got ${g}`);
 }
 
 {

@@ -31,8 +31,8 @@ export function normalizeLemma(s) {
   // composed syllables but fails string equality — normalize before any
   // comparison so invisibly-different encodings can never split a lemma.
   s = String(s).normalize('NFC').trim();
-  s = s.replace(/^[\s"'\u201C\u201D\u2018\u2019]+/, '')
-       .replace(/[\s"'\u201C\u201D\u2018\u2019]+$/, '');
+  s = s.replace(/^[\s"'\u201C\u201D\u2018\u2019\u300C\u300E\u3008\u300A]+/, '')
+       .replace(/[\s"'\u201C\u201D\u2018\u2019\u300D\u300F\u3009\u300B]+$/, '');
   s = s.replace(/\uFEFF|\u200B|\u200C|\u200D/g, '');
 // Leading parenthetical: mirror the trailing rule — Hangul content is a
   // meaningful annotation ("(주먹을) 날리다" is a distinct collocation lemma,
@@ -41,7 +41,7 @@ export function normalizeLemma(s) {
   s = s.replace(/^\(([^)]*)\)\s*/, (m, inner) => /[가-힣]/.test(inner) ? inner + ' ' : '');
   s = s.replace(/^~\S*\s*/, '');
   s = s.replace(/\s*\[[^\]]*\]\s*$/, '');
-  s = s.replace(/[\s.,:;!?-]+$/, '');
+  s = s.replace(/[\s.,:;!?~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B-]+$/, '');
   s = s.replace(/\s*\([^)]*\)\s*$/, (m) => {
     const inner = m.replace(/^\s*\(/, '').replace(/\)\s*$/, '');
     return /[가-힣]/.test(inner) ? ' ' + inner : '';
@@ -210,9 +210,9 @@ export function extractLemmaFromText(cleaned) {
 
   const tidy = (s) => {
     if (!s) return '';
-    s = s.replace(/^[\u2018\u2019\u201C\u201D"'`]+\s*/g, '')
-         .replace(/\s*[\u2018\u2019\u201C\u201D"'`]+$/g, '');
-    return s.replace(/[.,:;?!]+$/, '').trim();
+    s = s.replace(/^[\u2018\u2019\u201C\u201D"'`\u300C\u300E\u3008\u300A]+\s*/g, '')
+         .replace(/\s*[\u2018\u2019\u201C\u201D"'`\u300D\u300F\u3009\u300B]+$/g, '');
+    return s.replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '').trim();
   };
 
   const deconjugate = (token) => {
@@ -259,7 +259,9 @@ export function extractLemmaCandidates(surface) {
 
   // Peel only the polite 요 (and a fully spelled 었어요/았어요) so the
   // contracted stem stays intact: 들어요→들어, 더워요→더워, 써요→써.
-  let t = String(surface || '').trim().replace(/[.,:;?!]+$/, '');
+  let t = String(surface || '').trim()
+    .replace(/^[\u300C\u300E\u3008\u300A]+/, '')
+    .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
   t = t.replace(/(었어요|았어요)$/, '').replace(/요$/, '');
   const nSyl = hangulCount(t);
   if (t && nSyl >= 1) {
@@ -313,7 +315,9 @@ export function extractLemmaCandidates(surface) {
     }
   }
   // Stage 3.3 — validated alternatives for three ambiguity classes:
-  const t2 = String(surface || '').trim().replace(/[.,:;?!]+$/, '');
+  const t2 = String(surface || '').trim()
+    .replace(/^[\u300C\u300E\u3008\u300A]+/, '')
+    .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
   // (a) X기 nominalizer vs noun ending in 기: 비치기→비치다 candidate;
   //     junk like 이야기→이야다 never survives validation.
   if (t2.endsWith('기') && hangulCount(t2) >= 3) {

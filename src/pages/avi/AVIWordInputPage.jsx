@@ -267,7 +267,8 @@ export function AVIWordInputPage({
 
       let normLemma = normalizeLemma(lemmaText);
       let existingLemmaEntry = data.lemmaMaster.find(
-        l => l.cleanedLemma === normLemma || l.lemma === lemmaText
+        l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
+             normalizeLemma(l.lemma) === normLemma
       );
 
       let def1 = '', def2 = '';
@@ -288,7 +289,8 @@ export function AVIWordInputPage({
             lemmaText = fb.lemma;
             normLemma = normalizeLemma(lemmaText);
             existingLemmaEntry = data.lemmaMaster.find(
-              l => l.cleanedLemma === normLemma || l.lemma === lemmaText
+              l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
+                   normalizeLemma(l.lemma) === normLemma
             );
           }
           if (existingLemmaEntry) {
