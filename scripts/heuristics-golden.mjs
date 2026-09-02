@@ -123,12 +123,47 @@ const CANDIDATE_CASES = {
     ['\u300C날리다\u300D', '날리다'], ['날렸다~', '날리다'],
     ['\u300E몰라요\u300F', '모르다'], ['해요\uFF01', '하다'],
   ],
+  'Stage B — table connectives & endings': [
+    ['가려고', '가다'], ['먹으려고', '먹다'], ['하려고', '하다'],
+    ['먹으러', '먹다'], ['가면서', '가다'], ['먹으면서', '먹다'],
+    ['먹어도', '먹다'], ['같아도', '같다'], ['먹어야', '먹다'],
+    ['가니까', '가다'], ['먹으니까', '먹다'], ['학생이니까', '학생'],
+    ['가다가', '가다'], ['먹거든', '먹다'], ['먹잖아', '먹다'],
+    ['가죠', '가다'], ['먹거나', '먹다'], ['먹습니까', '먹다'],
+    ['하십니다', '하다'], ['하겠다', '하다'], ['하겠어', '하다'],
+    ['가세요', '가다'], ['잡으세요', '잡다'], ['먹을까', '먹다'],
+    ['먹느냐', '먹다'], ['선생님께서', '선생님'],
+  ],
+  'Stage B — polite-요 retry': [
+    ['저는요', '저'], ['먹으니까요', '먹다'], ['먹거든요', '먹다'],
+    ['먹잖아요', '먹다'], ['먹을까요', '먹다'], ['우리도요', '우리'],
+  ],
+  'Stage B — validated candidates': [
+    ['배우러', '배우다'], ['예쁘네', '예쁘다'], ['가네요', '가다'],
+    ['가나요', '가다'], ['가자', '가다'], ['가지요', '가다'],
+    ['나보다', '나'], ['갈게', '가다'], ['살게', '살다'],
+    ['갈까요', '가다'], ['갈래', '가다'], ['하시다', '하다'],
+    ['하셨다', '하다'], ['갑니다', '가다'], ['합니까', '하다'],
+    ['가냐', '가다'], ['가야', '가다'], ['해야', '하다'],
+    ['와야', '오다'], ['가겠어요', '가다'], ['가고', '가다'],
+    ['자고', '자다'],
+  ],
+  'Stage B — quotatives': [
+    ['간다고', '가다'], ['먹는다고', '먹다'], ['예쁘다고', '예쁘다'],
+    ['가자고', '가다'], ['가라고', '가다'], ['먹으라고', '먹다'],
+    ['가냐고', '가다'], ['먹느냐고', '먹다'],
+  ],
 };
 
 // Words the suffix table must never touch: primary result stays identity.
 // (Bare nouns like 이야기 that a naive strip WOULD touch are protected at
 // the system level by trusted identity rows in the map, not here.)
-const IDENTITY_CASES = ['시험', '안정', '사람', '시간', '살해', '혐의', '황새', '맛있다', '재미있다'];
+const IDENTITY_CASES = [
+  '시험', '안정', '사람', '시간', '살해', '혐의', '황새', '맛있다', '재미있다',
+  // Stage B collision guards: the new table entries must leave these
+  // untouched (candidate-tier siblings are fine; blind mangling is not).
+  '컨트롤러', '트레일러', '사고', '과자', '여자', '바지', '동네',
+];
 
 // normalizeLemma punctuation handling: [input, expected] — exact equality.
 const NORMALIZE_CASES = [
@@ -178,6 +213,27 @@ for (const [group, cases] of Object.entries(CANDIDATE_CASES)) {
   }
   console.log(`${misses.length === 0 ? 'PASS' : 'FAIL'}  identity (must-not-mangle)  (${IDENTITY_CASES.length - misses.length}/${IDENTITY_CASES.length})`);
     for (const [w, p] of misses) console.log(`      ${w} mangled to ${p}`);
+}
+
+{
+  // Stage C — function-word stoplist: primary stays identity AND the
+  // candidate list is frozen at [word], so mangles that are real headwords
+  // (그러나→그러다) can never validate past it.
+  const FUNCTION_WORD_CASES = [
+    '그리고', '그래서', '그러나', '그런데', '그러면', '그러니까', '그래도',
+    '하지만', '함께', '빨리', '많이', '같이', '정말', '너무', '또는',
+  ];
+  const misses = [];
+  for (const w of FUNCTION_WORD_CASES) {
+    total++;
+    const primary = extractLemmaFromText(w);
+    const cands = extractLemmaCandidates(w);
+    if (primary !== w || cands.length !== 1 || cands[0] !== w) {
+      failures++; misses.push([w, primary, cands]);
+    }
+  }
+  console.log(`${misses.length === 0 ? 'PASS' : 'FAIL'}  Stage C — function-word stoplist  (${FUNCTION_WORD_CASES.length - misses.length}/${FUNCTION_WORD_CASES.length})`);
+  for (const [w, p, c] of misses) console.log(`      ${w} → primary ${p}, candidates [${c.join(', ')}]`);
 }
 
 {

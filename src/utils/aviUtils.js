@@ -152,9 +152,50 @@ const KOREAN_VERB_ENDINGS = [
   ['게','다',2], ['고','다',2], ['지','다',2], ['며','다',2], ['던','다',2],
   ['의','',2], ['로','',2], ['에','',2], ['도','',2], ['만','',2],
   ['들','',2], ['과','',2], ['와','',2],
+  // Stage B connective/ending coverage. minStem 1 throughout: none of
+  // these strings plausibly ends a noun. Collision-prone endings (러,
+  // 네(요), 나(요), 자, 지(요), 냐, 보다, fused ㄹ/ㅂ forms, quotatives)
+  // live in extractLemmaCandidates as validated candidates instead.
+  // Golden cases: scripts/heuristics-golden.mjs.
+  ['으려고','다',1], ['려고','다',1], ['으러','다',1],
+  ['으면서','다',1], ['면서','다',1],
+  ['어도','다',1], ['아도','다',1], ['여도','다',1],
+  ['어야','다',1], ['아야','다',1], ['여야','다',1],
+  ['이니까','',1], ['으니까','다',1], ['니까','다',1],
+  ['다가','다',1], ['거든','다',1], ['잖아','다',1], ['잖아요','다',1],
+  ['죠','다',1], ['거나','다',1],
+  ['으십니까','다',1], ['십니까','다',1], ['습니까','다',1],
+  ['으십니다','다',1], ['십니다','다',1],
+  ['겠다','다',1], ['겠어','다',1],
+  ['으세요','다',1], ['세요','다',1],
+  ['을까','다',1], ['느냐','다',1], ['으냐','다',1],
+  ['께서는','',1], ['께서도','',1], ['께서','',1],
 ];
 // Pre-sorted longest-first so 하는 wins over 는, 에서 over 에, etc.
 const KVE_SORTED = [...KOREAN_VERB_ENDINGS].sort((a, b) => b[0].length - a[0].length);
+
+// ── Stage C: function-word stoplist ───────────────────────────
+// Conjunctive adverbs and frequency adverbs that are dictionary headwords
+// in their own right and must NEVER deconjugate — the suffix table mangles
+// several (그리고→그리다, 그러면→그러다, 많이→많), and because some of
+// those mangles ARE real headwords (그리다, 그러다), no amount of
+// validation can reject them; only a stoplist can. Every entry must be its
+// own headword, never a conjugated form. Enforced in three places:
+// deconjugate (blind table), extractLemmaCandidates (freezes the candidate
+// list at the identity so no sibling can validate past it), and
+// resolveLemmaWithDictionary (blocks the seed tiers; an organic user
+// correction, checked earlier, still overrides).
+const KOREAN_FUNCTION_WORDS = new Set([
+  // Conjunctive adverbs
+  '그리고', '그래서', '그러나', '그런데', '그러면', '그러니까', '그러므로',
+  '그렇지만', '그래도', '하지만', '또는', '혹은', '및', '즉', '또한',
+  // Frequency/degree/manner adverbs
+  '함께', '빨리', '많이', '같이', '아직', '이미', '매우', '아주', '정말',
+  '진짜', '너무', '다시', '먼저', '서로', '가장', '별로', '계속', '자주',
+  '항상', '거의', '바로', '이제', '벌써', '아마', '특히', '역시', '물론',
+]);
+const isFunctionWord = (s) =>
+  !!s && KOREAN_FUNCTION_WORDS.has(String(s).normalize('NFC'));
 
 // ── Jamo compose / past-tense de-contraction ──────────────────
 // hangulToJamo (below) only decomposes; these are the recomposition side,
@@ -215,8 +256,7 @@ export function extractLemmaFromText(cleaned) {
     return s.replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '').trim();
   };
 
-  const deconjugate = (token) => {
-    if (!token || !/[가-힣]/.test(token)) return token;
+  const tryRules = (token) => {
     for (const rule of KVE_SORTED) {
       const suffix = rule[0], replacement = rule[1], minStem = rule[2];
       if (token.endsWith(suffix)) {
@@ -226,6 +266,21 @@ export function extractLemmaFromText(cleaned) {
           return decontractIfPast(cand) || token;
         }
       }
+    }
+    return null;
+  };
+  const deconjugate = (token) => {
+    if (!token || !/[가-힣]/.test(token)) return token;
+    if (isFunctionWord(token)) return token; // Stage C: never deconjugate
+    const direct = tryRules(token);
+    if (direct !== null) return direct;
+    // Polite-요 retry: no rule matched the full token — peel a trailing 요
+    // and run the table once more (는요→는→strip, 거든요→거든, 을까요→
+    // 을까…). Conservative: the bare form is adopted only when a rule
+    // actually fires on it, so 요-final nouns (필요) never lose their 요.
+    if (token.endsWith('요') && hangulCount(token) >= 2) {
+      const retried = tryRules(token.slice(0, -1));
+      if (retried !== null) return retried;
     }
     return token;
   };
@@ -256,6 +311,10 @@ export function extractLemmaCandidates(surface) {
   const out = [];
   const push = (c) => { if (c && /[가-힣]/.test(c) && !out.includes(c)) out.push(c); };
   push(extractLemmaFromText(surface) || '');
+  // Stage C: function words never conjugate — freeze the candidate list at
+  // the identity so no sibling (그러나→그러다, 그러면→그러다) can validate
+  // past it downstream.
+  if (isFunctionWord(out[0])) return out;
 
   // Peel only the polite 요 (and a fully spelled 었어요/았어요) so the
   // contracted stem stays intact: 들어요→들어, 더워요→더워, 써요→써.
@@ -406,6 +465,92 @@ export function extractLemmaCandidates(surface) {
       push(u + '다');
       const rest = { 9: 8, 14: 13, 1: 0 }[dU[1]];
       if (rest !== undefined) push(u.slice(0, -1) + composeSyllable(dU[0], rest, 0) + '다');
+    }
+  }
+  // Stage B — validated candidates for collision-prone endings. Every push
+  // here is guarded by headword validation in resolveLemmaWithDictionary;
+  // blind table rules would mangle the collisions noted per line.
+  {
+    const b = t2.endsWith('요') ? t2.slice(0, -1) : t2;
+    // Purpose 러 on a vowel stem (배우러→배우다) — blind mangles 러-final
+    // loanwords (컨트롤러, 트레일러).
+    if (b.endsWith('러') && hangulCount(b) >= 2) push(b.slice(0, -1) + '다');
+    // Sentence enders 네(요)/나(요) (예쁘네→예쁘다, 가나요→가다) — blind
+    // mangles 동네요/언니네/만나요.
+    if ((b.endsWith('네') || b.endsWith('나')) && hangulCount(b) >= 2) push(b.slice(0, -1) + '다');
+    // Proposative 자 (가자→가다) — blind mangles 여자/과자.
+    if (b.endsWith('자') && hangulCount(b) >= 2) push(b.slice(0, -1) + '다');
+    // 지(요) stays candidate-only — 바지요/아버지요 are polite noun echoes.
+    if (b.endsWith('지') && hangulCount(b) >= 2) push(b.slice(0, -1) + '다');
+    // Bare 냐 question (가냐→가다).
+    if (b.endsWith('냐') && hangulCount(b) >= 2) push(b.slice(0, -1) + '다');
+    // Fused 야 (가야→가다, 해야→하다, 와야→오다) — the copula strip in (f)
+    // already offers the noun reading; this adds the verb reading with the
+    // same contraction restore as (h).
+    if (b.endsWith('야') && hangulCount(b) >= 2) {
+      const st = b.slice(0, -1);
+      const dSt = decomposeSyllable(st[st.length - 1]);
+      push(st + '다');
+      if (dSt && dSt[2] === 0) {
+        const rest = { 9: 8, 14: 13, 1: 0 }[dSt[1]];
+        if (rest !== undefined) push(st.slice(0, -1) + composeSyllable(dSt[0], rest, 0) + '다');
+      }
+    }
+    // Comparison particle 보다 (나보다→나) — compound 보다 verbs (돌아보다)
+    // are protected by the GLM identity tier upstream.
+    if (b.endsWith('보다') && hangulCount(b) >= 3) push(b.slice(0, -2));
+    // Bare 고 connective on a 1-syllable stem, below the table's minStem 2
+    // (가고→가다, 자고→자다) — noun headwords (사고) are likewise protected
+    // by the identity tier.
+    if (b.endsWith('고') && hangulCount(b) === 2) push(b.slice(0, -1) + '다');
+    // Fused-ㄹ futures/questions 게/까/래(+요): the ㄹ may be the
+    // prospective (갈게→가다) or stem-final (살게→살다) — offer both,
+    // ㄹ-stripped first (higher corpus frequency).
+    const fut = b.slice(-1);
+    if ((fut === '게' || fut === '까' || fut === '래') && b.length >= 2) {
+      const st = b.slice(0, -1);
+      const dSt = decomposeSyllable(st[st.length - 1]);
+      if (dSt && dSt[2] === 8) {
+        push(st.slice(0, -1) + composeSyllable(dSt[0], dSt[1], 0) + '다');
+        push(st + '다');
+      }
+    }
+    // Fused ㅂ니다/ㅂ니까 (갑니다→가다, 합니까→하다) — the syllabic
+    // 습니다/습니까 forms are table rules; the fused ㅂ needs jamo work.
+    if ((b.endsWith('니다') || b.endsWith('니까')) && b.length >= 3) {
+      const dB = decomposeSyllable(b[b.length - 3]);
+      if (dB && dB[2] === 17) push(b.slice(0, -3) + composeSyllable(dB[0], dB[1], 0) + '다');
+    }
+  }
+  // Stage B — honorific and future markers on the primary: 하셨다's primary
+  // de-contracts to 하시다, and 가겠어요's to 가겠다 — peel 시다/으시다/겠다
+  // down to the plain headword as a validated alternative.
+  {
+    const pr = out[0] || '';
+    if (pr.endsWith('으시다') && hangulCount(pr) >= 4) push(pr.slice(0, -3) + '다');
+    else if (pr.endsWith('시다') && hangulCount(pr) >= 3) push(pr.slice(0, -2) + '다');
+    if (pr.endsWith('겠다') && hangulCount(pr) >= 3) push(pr.slice(0, -2) + '다');
+  }
+  // Stage B — quotative contractions (다고/라고/냐고/자고 families). The
+  // remainder re-enters the normal shapes: verbatim 다-final quotes
+  // (예쁘다고→예쁘다), fused-ㄴ declaratives (간다고→가다), syllabic
+  // 는다/은다 (먹는다고→먹다), and stem quotes (가자고/가라고/먹으라고/
+  // 가냐고→가다/먹다). The table's blind 라고/이라고 strips still supply
+  // the noun-quote reading (사과라고→사과) as the primary.
+  {
+    const dago = t2.endsWith('다고') ? t2.slice(0, -2) : null;
+    if (dago && hangulCount(dago) >= 1) {
+      push(dago + '다');
+      const dQ = decomposeSyllable(dago[dago.length - 1]);
+      if (dQ && dQ[2] === 4) push(dago.slice(0, -1) + composeSyllable(dQ[0], dQ[1], 0) + '다');
+      if (dago.endsWith('는') || dago.endsWith('은')) push(dago.slice(0, -1) + '다');
+    }
+    for (const suf of ['으라고', '라고', '으냐고', '느냐고', '냐고', '자고']) {
+      if (t2.endsWith(suf)) {
+        const st = t2.slice(0, -suf.length);
+        if (hangulCount(st) >= 1) push(st + '다');
+        break;
+      }
     }
   }
   return out;
@@ -572,6 +717,12 @@ const variants = [raw, normalizeLemma(raw) || raw];
     if (!seedMapping && entry && entry.cleanedLemma) seedMapping = entry.cleanedLemma;
   }
 
+  // Stage C: function words never conjugate. Placed after the trusted-GLM
+  // loop so an organic user correction still overrides, and before every
+  // seed tier so an untrusted seed rewrite (그리고→그리다) never can —
+  // 그리다 IS a headword, so the C2 gate below could not reject it.
+  if (isFunctionWord(normalizeLemma(raw) || raw)) return normalizeLemma(raw) || raw;
+
   const candidates = extractLemmaCandidates(raw);
   const primary = candidates[0] || raw;
 
@@ -588,7 +739,9 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // machine-generated with the same naive suffix assumptions as the
   // heuristic, so a validated headword candidate (이야기는→이야기) must
   // beat a seed row that merely agrees with a heuristic guess.
-  const toCheck = candidates.filter(c => c && c !== raw).slice(0, 4);
+  // Stage B widened the candidate set, so validate up to 6 (was 4) — the
+  // good candidate for chained endings can sit past index 3.
+  const toCheck = candidates.filter(c => c && c !== raw).slice(0, 6);
   if (toCheck.length) {
     const entries = await Promise.all(toCheck.map(c => fetchGlmEntry(globalLemmaKey(c))));
     for (let i = 0; i < toCheck.length; i++) {
@@ -608,7 +761,16 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // when it is structurally consistent with the surface. Ranked below both
   // headword validation and candidate corroboration; a user correction
   // (organic, trusted, checked first) permanently outranks it.
-  if (seedMapping && seedMappingPlausible(raw, seedMapping)) return seedMapping;
+  // Stage C: the 2-jamo shared prefix is trivially satisfied by any mapping
+  // sharing the first consonant+vowel (가고→갓다, 빨리→빠우다 both passed),
+  // so additionally require the mapping itself to validate as a GLM
+  // headword — junk strings like 갓다/빠우다 have no identity row and are
+  // rejected; legitimate irregulars (더워→덥다) keep passing. One extra
+  // read, only in this last-resort branch.
+  if (seedMapping && seedMappingPlausible(raw, seedMapping)) {
+    const mKey = globalLemmaKey(seedMapping);
+    if (glmEntryTrust(mKey, await fetchGlmEntry(mKey)).headword) return seedMapping;
+  }
 
   return primary || raw;
 }

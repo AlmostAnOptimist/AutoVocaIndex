@@ -829,12 +829,26 @@ export function AVISentenceInputPage({
     if (!targetChanged && !backChanged && !skipChanged) return;
     const now = new Date().toISOString();
 
+    // Retarget without a manual back edit: the current back belonged to
+    // the old target, so recompute it from the new target's defs. Blank
+    // when the new target has none yet — a wrong-word definition is worse
+    // than an empty one, and the row is unchecked below so its card
+    // re-creates once defs arrive.
+    const newTarget      = edits.targetWord !== undefined ? edits.targetWord : row.targetWord;
+    const newTargetEntry = targetChanged
+      ? data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(newTarget))
+      : null;
+    const autoBack = (targetChanged && !backChanged)
+      ? (newTargetEntry?.def2 || newTargetEntry?.def1 || '')
+      : null;
+
     updateData(prev => ({
       ...prev,
       sentenceInputs: prev.sentenceInputs.map(s => {
         if (s.uid !== rowUid) return s;
         const next = { ...s, ...edits };
         if (targetChanged) next.cardFront = (edits.targetWord || s.targetWord) + '\n' + (s.sentence || '');
+        if (autoBack !== null) next.cardBack = autoBack;
         if ((targetChanged || backChanged) && s.uploaded) {
           next.uploaded          = false;
           next.lastUncheckReason = 'fields edited';
@@ -847,11 +861,7 @@ export function AVISentenceInputPage({
     // Cascade to this row's card precisely: only sentence cards carrying
     // this exact sentence under the old target are touched.
     if (targetChanged || backChanged) {
-      const oldEntry  = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(row.targetWord));
-      const newTarget = edits.targetWord !== undefined ? edits.targetWord : row.targetWord;
-      const newEntry  = targetChanged
-        ? data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(newTarget))
-        : null;
+          const oldEntry  = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(row.targetWord));
       updateLinkedCards({
         lemmaID:   oldEntry?.lemmaID || null,
         lemmaText: row.targetWord,
@@ -861,9 +871,10 @@ export function AVISentenceInputPage({
             ...(targetChanged ? {
               lemma: newTarget,
               front: newTarget + '\n' + (c.sentence || ''),
-              linkedAVILemmaId: newEntry?.lemmaID || null,
+              linkedAVILemmaId: newTargetEntry?.lemmaID || null,
             } : {}),
             ...(backChanged ? { back: edits.cardBack } : {}),
+            ...(autoBack !== null ? { back: autoBack } : {}),
           };
         },
         cards, uid, updateCards,

@@ -688,9 +688,13 @@ export function AVIImportPage({
   // ════ STEP: DONE ══════════════════════════════════════════════
   if (step === 'done' && summary) {
     const committedSet = new Set(summary.committedUids || []);
-    const fillTargets  = (data.wordInputs || []).filter(
-      w => committedSet.has(w.uid) && !w.def2 && !w.skipUpload
-    );
+    // Stable modal row list: filtering the modal's rows by skipUpload made
+    // the Skip checkbox drop the open row out of `rows`, unmounting the
+    // modal mid-edit and discarding an unsaved Def2. The modal receives
+    // every committed row (Word Input parity — it pages def2-less rows
+    // itself); fillTargets still drives the Fill button and its count.
+    const committedRows = (data.wordInputs || []).filter(w => committedSet.has(w.uid));
+    const fillTargets   = committedRows.filter(w => !w.def2 && !w.skipUpload);
     return (
       <div style={{ maxWidth: '520px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {sectionLabel('Import complete')}
@@ -776,7 +780,7 @@ export function AVIImportPage({
         {fillUid && (
           <WordEditModal
             key={fillUid}
-            rows={fillTargets}
+            rows={committedRows}
             uid={fillUid}
             onSelectRow={setFillUid}
             updateRow={updateRowFn}
