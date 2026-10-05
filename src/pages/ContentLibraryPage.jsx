@@ -13,7 +13,7 @@ import { NotesPage } from './NotesPage.jsx';
 import { ContentLibraryGazette } from '../components/ContentLibraryGazette.jsx';
 import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
-import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded } from '../utils/contentUtils.js';
+import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded, stripHtml } from '../utils/contentUtils.js';
 import { DEMO } from '../demo/demoConfig.js';
 
 // ── Family grouping (D1) ──────────────────────────────────────
@@ -1638,9 +1638,6 @@ function CLOverviewTab({
     if (days === 1) return 'yesterday';
     return `${days} days ago`;
   };
-
-  const stripHtml = (html) =>
-    (html || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
 
   // ── Source classification ───────────────────────────────────
   const isComplete = useCallback((src) => {

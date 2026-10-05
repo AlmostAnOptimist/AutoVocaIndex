@@ -9,6 +9,7 @@ import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
 import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { DEMO } from '../demo/demoConfig.js';
+import { stripHtml, sanitizePastedHtml } from '../utils/contentUtils.js';
 
 const PRESET_TAGS = ['vocabulary', 'grammar', 'reading', 'listening', 'speaking', 'writing', 'culture', 'review', 'question'];
 const TAB_KEY = 'avi_notes_tab';
@@ -53,17 +54,6 @@ function mdToHtml(md) {
       return h || '<br>';
     })
     .join('\n');
-}
-
-// Strip all HTML tags — used for the NoteCard plain-text preview.
-function stripHtml(html) {
-  if (!html) return '';
-  return html
-    .replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '[toggle]')
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ').trim();
 }
 
 // ── Multi-picker modal (shared by Grammar and Section pickers) ─
@@ -353,7 +343,18 @@ function WysiwygEditor({ value, onChange, C, S }) {
 
   const handleHighlight = (color) => {
     editorRef.current?.focus();
-    document.execCommand('hiliteColor', false, color);
+        document.execCommand('hiliteColor', false, color);
+    onChange(editorRef.current?.innerHTML || '');
+  };
+
+  const handlePaste = (e) => {
+    e.preventDefault();
+    const html = e.clipboardData?.getData('text/html');
+    const text = e.clipboardData?.getData('text/plain') || '';
+    const clean = html ? sanitizePastedHtml(html) : '';
+    editorRef.current?.focus();
+    if (clean) document.execCommand('insertHTML', false, clean);
+    else if (text) document.execCommand('insertText', false, text);
     onChange(editorRef.current?.innerHTML || '');
   };
 
@@ -393,6 +394,7 @@ function WysiwygEditor({ value, onChange, C, S }) {
         className="avi-editor"
         style={editorStyle}
         onInput={handleInput}
+        onPaste={handlePaste}
         onCompositionStart={() => { isComposing.current = true; }}
         onCompositionEnd={() => { isComposing.current = false; handleInput(); }}
         onKeyDown={e => {

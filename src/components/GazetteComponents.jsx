@@ -378,11 +378,11 @@ export function NoticeEntry({ name, meta, flag, last, onClick }) {
       <div style={{ color: C.textM, fontSize: '11px', marginTop: '2px' }}>{meta}</div>
       {flag && (
         <span style={{
-          marginTop: '5px', display: 'inline-block', border: `1px solid ${C.danger}`, color: C.danger,
+          marginTop: '5px', display: 'inline-block', border: `1px solid ${C.danger}`,
+          background: `${C.danger}18`, color: C.text,
           fontFamily: SH.fp, fontSize: '10.5px', letterSpacing: '0.07em', textTransform: 'uppercase', padding: '2px 8px',
         }}>{flag}</span>
-      )}
-    </div>
+      )}    </div>
   );
 }
 

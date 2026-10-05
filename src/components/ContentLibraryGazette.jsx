@@ -297,7 +297,7 @@ export function ContentLibraryGazette(props) {
       {/* Library activity + by the numbers */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '30px' }}>
         <GazetteFig caption="Library Activity — twelve-month view">
-          <ActivityHeatmap data={libraryActivityByDay} today={todayStr} color={C.accent2} itemLabel="updates" monthsToShow={isMobile ? 3 : 12} windowEndYM={activityEndYM} onWindowChange={setActivityEndYM} />
+          <ActivityHeatmap data={libraryActivityByDay} today={todayStr} color={C.accent2} flat itemLabel={(n) => (n === 1 ? 'update' : 'updates')} monthsToShow={isMobile ? 3 : 12} windowEndYM={activityEndYM} onWindowChange={setActivityEndYM} />
         </GazetteFig>
         <GazetteBox title="By The Numbers">
           <BoxRow label="Grammar mastered" value={`${grammarMasteryCounts?.mastered ?? 0} / ${grammarMasteryCounts?.all ?? 0}`} />

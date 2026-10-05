@@ -10,6 +10,9 @@
 //   windowEndYM    'YYYY-MM'
 //   onWindowChange (newEndYM) => void
 //   itemLabel      string used in tooltip (e.g. 'reviews', 'words added')
+//   flat           when true, every active day renders at one full color (no
+//                  count-based opacity gradient). For low-frequency data (the
+//                  Content Library) where a gradient reads as disheartening.
 
 import { useMemo } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
@@ -29,6 +32,7 @@ const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'
 // Opacity range: smallest non-zero → MIN_ACTIVE, peak value → MAX.
 const MIN_ACTIVE_OPACITY = 0.15;
 const MAX_OPACITY        = 0.88;
+const FLAT_OPACITY       = 0.82;  // every active day in flat mode
 const EMPTY_OPACITY      = 0.30;  // zero-count past/today cells
 const FUTURE_OPACITY     = 0.08;  // future cells
 
@@ -108,6 +112,7 @@ export function ActivityHeatmap({
   windowEndYM,
   onWindowChange,
   itemLabel = 'entries',
+  flat = false,
 }) {
   const { C } = useAppTheme();
 
@@ -193,7 +198,7 @@ export function ActivityHeatmap({
                     const fillOpacity = isFuture
                       ? FUTURE_OPACITY
                       : count > 0
-                        ? (opacityMap[dateStr] ?? MIN_ACTIVE_OPACITY)
+                        ? (flat ? FLAT_OPACITY : (opacityMap[dateStr] ?? MIN_ACTIVE_OPACITY))
                         : EMPTY_OPACITY;
                     const fillColor   = count > 0 && !isFuture ? cellColor : C.border;
                     const tip         = count > 0 && !isFuture

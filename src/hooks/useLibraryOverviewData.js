@@ -7,7 +7,7 @@
 
 import { useMemo, useCallback } from 'react';
 import { getLogicalToday, toDateStr } from '../utils/dateUtils.js';
-import { isPassiveMediaExcluded, getSourceStatus } from '../utils/contentUtils.js';
+import { isPassiveMediaExcluded, getSourceStatus, stripHtml } from '../utils/contentUtils.js';
 
 const CEFR = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
 const cefrIdx = (level) => CEFR.indexOf(level);
@@ -28,10 +28,6 @@ export function useLibraryOverviewData({
     if (days === 1) return 'yesterday';
     return `${days} days ago`;
   }, [todayMs]);
-
-  const stripHtml = useCallback((html) =>
-    (html || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim(),
-  []);
 
   const isComplete = useCallback((src) => {
     if (src.archived || src.pendingArchive) return true;

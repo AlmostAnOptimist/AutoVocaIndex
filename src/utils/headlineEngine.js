@@ -83,25 +83,39 @@ export function getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries
   if ((adriftSources || []).length >= ADRIFT_HEADLINE_THRESHOLD) {
     const sorted = [...adriftSources].sort((a, b) => (a.lastActivityAt || '').localeCompare(b.lastActivityAt || ''));
     const [stalest, ...rest] = sorted;
-    let leadParagraph = describeAdriftSource(stalest, { allNotes, correctionSessions, queueByTier, todayStr });
-    // Only the titles actually named in the paragraph belong in `subjects` —
-    // when rest.length > 2, the trailing "and N more" doesn't name them, so
-    // they shouldn't be ad-matchable against today's headline either.
+    const para1 = describeAdriftSource(stalest, { allNotes, correctionSessions, queueByTier, todayStr });
+
+    // Second paragraph: the wider drift picture — how the rest break down by
+    // tier and how long the field as a whole has been quiet.
     const namedSubjects = [stalest];
+    const p2 = [];
     if (rest.length === 1) {
-      leadParagraph += ` It is not alone — "${rest[0].title}" has drifted as well.`;
+      p2.push(`It is not alone — "${rest[0].title}" has drifted as well.`);
       namedSubjects.push(rest[0]);
     } else if (rest.length > 1) {
       const named = rest.slice(0, 2);
       const names = named.map(s => `"${s.title}"`).join(' and ');
-      leadParagraph += ` It is not alone — ${names}${rest.length > 2 ? `, and ${rest.length - 2} more,` : ''} have likewise stalled.`;
+      p2.push(`It is not alone — ${names}${rest.length > 2 ? `, and ${rest.length - 2} more,` : ''} have likewise stalled.`);
       namedSubjects.push(...named);
     }
+    const tierSpread = ['grammar', 'mining', 'casual']
+      .map(tk => ({ tk, n: adriftSources.filter(s => s.studyIntent === tk).length }))
+      .filter(x => x.n > 0);
+    if (tierSpread.length > 1) {
+      p2.push(`The drift spans ${tierSpread.map(x => `${x.n} in ${TIER_LABEL[x.tk]}`).join(', ')}.`);
+    }
+    const withWriting = adriftSources.filter(s =>
+      (allNotes || []).some(n => n.linkedSourceId === s.id) ||
+      (correctionSessions || []).some(c => c.sourceId === s.id)).length;
+    p2.push(withWriting > 0
+      ? `${withWriting} of the ${adriftSources.length} already ${withWriting === 1 ? 'has' : 'have'} notes or corrections on file — a foothold for whichever picks back up first.`
+      : `None of the ${adriftSources.length} has any notes or corrections on file yet.`);
+
     return {
       kicker: 'Notices',
       headline: `${adriftSources.length} Sources Gone Adrift`,
       standfirst: 'No activity past the adrift threshold on several sources at once.',
-      leadParagraph,
+      leadParagraph: [para1, p2.join(' ')],
       subjects: namedSubjects.map(s => ({ id: s.id, title: s.title })),
     };
   }
@@ -116,15 +130,33 @@ export function getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries
       const levelRange = exact.levelMin
         ? (exact.levelMax && exact.levelMax !== exact.levelMin ? `${exact.levelMin}–${exact.levelMax}` : exact.levelMin)
         : null;
-      const sentences = [`"${exact.title}" sits at the front of the ${TIER_LABEL[tk]} tier, matched to your current level range.`];
-      sentences.push(`It's a ${bits.join(', ')}${levelRange ? `, rated ${levelRange}` : ''}${exact._total ? `, with ${exact._total} section${exact._total === 1 ? '' : 's'}` : ''}.`);
-      if (exact.series) sentences.push(`It's part of the "${exact.series}" series.`);
-      sentences.push('Will this title be the next entrant in the Active arena? Check back tomorrow for the latest update.');
+      const p1 = [`"${exact.title}" sits at the front of the ${TIER_LABEL[tk]} tier, matched to your current level range.`];
+      p1.push(`It's a ${bits.join(', ')}${levelRange ? `, rated ${levelRange}` : ''}${exact._total ? `, with ${exact._total} section${exact._total === 1 ? '' : 's'}` : ''}.`);
+      if (exact.series) p1.push(`It's part of the "${exact.series}" series.`);
+
+      // Second paragraph: the depth of the field behind it, so the lead reads
+      // as a standings report rather than a single-line callout.
+      const tierRest = (queueByTier[tk] || []).filter(s => s.id !== exact.id);
+      const p2 = [];
+      if (tierRest.length > 0) {
+        const next = tierRest[0];
+        p2.push(`Behind it, ${tierRest.length} other ${tierRest.length === 1 ? 'title waits' : 'titles wait'} in the ${TIER_LABEL[tk]} tier${next?.title ? `, led by "${next.title}"` : ''}.`);
+      } else {
+        p2.push(`Nothing else waits in the ${TIER_LABEL[tk]} tier — clear this one and the tier empties.`);
+      }
+      const otherTiers = ['grammar', 'mining', 'casual']
+        .filter(t => t !== tk)
+        .map(t => ({ t, n: (queueByTier?.[t] || []).length }))
+        .filter(x => x.n > 0);
+      if (otherTiers.length) {
+        p2.push(`Elsewhere, ${otherTiers.map(x => `${x.n} ${x.n === 1 ? 'sits' : 'sit'} in ${TIER_LABEL[x.t]}`).join(' and ')}.`);
+      }
+      p2.push('Will this title be the next entrant in the Active arena? Check back tomorrow for the latest update.');
       return {
         kicker: 'Queue Report',
         headline: `Next Up: ${exact.title}`,
         standfirst: `Matched to your current level range — ${TIER_LABEL[tk]} tier.`,
-        leadParagraph: sentences.join(' '),
+        leadParagraph: [p1.join(' '), p2.join(' ')],
         subjects: [{ id: exact.id, title: exact.title }],
       };
     }
@@ -137,14 +169,26 @@ export function getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries
     .filter(e => daysBetween(toDateStr(new Date(e.masteryLevelChangedAt)), todayStr) <= RECENT_MASTERY_WINDOW_DAYS)
     .sort((a, b) => b.masteryLevelChangedAt.localeCompare(a.masteryLevelChangedAt))[0];
   if (recentlyMastered) {
-    const sentences = [`"${recentlyMastered.glossaryTerm}" moved to Mastered status this week.`];
+    const p1 = [`"${recentlyMastered.glossaryTerm}" moved to Mastered status this week.`];
     if (recentlyMastered.compareTo) {
-      sentences.push(`It's often confused with ${recentlyMastered.compareTo}, but the distinction has clearly landed.`);
+      p1.push(`It's often confused with ${recentlyMastered.compareTo}, but the distinction has clearly landed.`);
     }
-    sentences.push('It now joins the grammar points that no longer need active review.');
+    if (recentlyMastered.pattern && recentlyMastered.pattern !== recentlyMastered.glossaryTerm) {
+      p1.push(`The point turns on the ${recentlyMastered.pattern} pattern.`);
+    }
+    p1.push('It now joins the grammar points that no longer need active review.');
+
+    // Second paragraph: where that leaves the grammar corpus overall.
+    const all = grammarEntries || [];
+    const masteredCount   = all.filter(e => e.masteryLevel === 'mastered').length;
+    const practicingCount = all.filter(e => e.masteryLevel === 'practicing').length;
+    const p2 = [`That brings the mastered count to ${masteredCount} of ${all.length} grammar ${all.length === 1 ? 'point' : 'points'} on record.`];
+    p2.push(practicingCount > 0
+      ? `Another ${practicingCount} ${practicingCount === 1 ? 'sits' : 'sit'} in active practice, working toward the same status.`
+      : 'Nothing else is in active practice at the moment.');
     return {
       kicker: 'Dispatches', headline: `${recentlyMastered.glossaryTerm} Reaches Mastered Status`, standfirst: '',
-      leadParagraph: sentences.join(' '),
+      leadParagraph: [p1.join(' '), p2.join(' ')],
     };
   }
 
@@ -153,13 +197,29 @@ export function getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries
   if (oldest?.createdAt) {
     const age = daysBetween(toDateStr(new Date(oldest.createdAt)), todayStr);
     if (age >= OPEN_QUESTION_STALE_DAYS) {
-      const sentences = [`A question logged ${age} days ago is still waiting for an answer: "${oldest.title}".`];
-      sentences.push(openQuestions.length > 1
+      const p1 = [`A question logged ${age} days ago is still waiting for an answer: "${oldest.title}".`];
+      p1.push(openQuestions.length > 1
         ? `It's one of ${openQuestions.length} open questions on file.`
         : "It's the only open question on file right now.");
+
+      // Second paragraph: the age spread of the backlog behind it.
+      const p2 = [];
+      if (openQuestions.length > 1) {
+        const newest = openQuestions[0];
+        const newestAge = newest?.createdAt ? daysBetween(toDateStr(new Date(newest.createdAt)), todayStr) : null;
+        const staleN = openQuestions.filter(q => q.createdAt && daysBetween(toDateStr(new Date(q.createdAt)), todayStr) >= OPEN_QUESTION_STALE_DAYS).length;
+        p2.push(`${staleN} of the ${openQuestions.length} ${staleN === 1 ? 'has' : 'have'} now passed the two-week mark.`);
+        if (newestAge != null) {
+          p2.push(newestAge === 0
+            ? 'The most recent went up today.'
+            : `The most recent went up ${newestAge} day${newestAge === 1 ? '' : 's'} ago.`);
+        }
+      } else {
+        p2.push('Clear this one and the Letters column empties entirely.');
+      }
       return {
         kicker: 'Letters To The Editor', headline: `Oldest Open Question: ${age} Days Unanswered`, standfirst: '',
-        leadParagraph: sentences.join(' '),
+        leadParagraph: [p1.join(' '), p2.join(' ')],
       };
     }
   }
@@ -171,11 +231,24 @@ export function getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries
     casual: queueByTier?.casual?.length || 0,
   };
   const total = tierCounts.grammar + tierCounts.mining + tierCounts.casual;
+  const grammarStanding = (grammarEntries || []);
+  const masteredCount = grammarStanding.filter(e => e.masteryLevel === 'mastered').length;
+  const p2Fallback = [];
+  if (grammarStanding.length > 0) {
+    p2Fallback.push(`On the grammar desk, ${masteredCount} of ${grammarStanding.length} ${grammarStanding.length === 1 ? 'point is' : 'points are'} mastered.`);
+  }
+  const openN = (openQuestions || []).length;
+  p2Fallback.push(openN > 0
+    ? `${openN} open question${openN === 1 ? '' : 's'} ${openN === 1 ? 'sits' : 'sit'} in the Letters column, none yet stale enough to lead.`
+    : 'The Letters column is empty — no open questions on file.');
   return {
     kicker: 'Queue Report',
     headline: `Queue Holds ${total} Source${total === 1 ? '' : 's'} Across Three Tiers`,
     standfirst: '',
-    leadParagraph: `Nothing urgent today — ${total} source${total === 1 ? '' : 's'} sit across the three queues. Breaking it down, that's ${tierCounts.grammar} in Study, ${tierCounts.mining} in Mining, and ${tierCounts.casual} in Casual. Any one of them could be the next Active Source.`,
+    leadParagraph: [
+      `Nothing urgent today — ${total} source${total === 1 ? '' : 's'} sit across the three queues. Breaking it down, that's ${tierCounts.grammar} in Study, ${tierCounts.mining} in Mining, and ${tierCounts.casual} in Casual. Any one of them could be the next Active Source.`,
+      p2Fallback.join(' '),
+    ],
   };
 }
 

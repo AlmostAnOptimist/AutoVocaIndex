@@ -86,3 +86,63 @@ export function isPassiveMediaExcluded(src) {
   const origin = src.origin?.toLowerCase() || '';
   return PASSIVE_MEDIA_ORIGINS.some(kw => origin.includes(kw));
 }
+
+// ── HTML text helpers (shared by Notes, Dream Log, Content Library) ─
+// Consolidated from five drifted local copies (I1-A). Plain-text extraction
+// for previews/search, and paste sanitization for the WYSIWYG editors.
+
+// Strip HTML to plain text. Block boundaries and <br> become a single space so
+// "girly.</div><div>But" reads "girly. But"; <details> toggles collapse to
+// "[toggle]"; entities are decoded; whitespace is collapsed.
+export function stripHtml(html) {
+  if (!html) return '';
+  return html
+    .replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '[toggle]')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/(p|div|li|h[1-6]|blockquote|tr|section)>/gi, ' ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, ' ').trim();
+}
+
+// Tags the editors keep on paste. Everything else is unwrapped to its text.
+// Block-level tags map to <div> (what contentEditable itself produces for
+// lines), so pasted paragraphs keep their line breaks without foreign markup.
+const PASTE_KEEP  = new Set(['b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del', 'a', 'ul', 'ol', 'li', 'br']);
+const PASTE_BLOCK = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'tr', 'section', 'article', 'header', 'footer']);
+const PASTE_DROP  = new Set(['script', 'style', 'head', 'title', 'meta', 'link', 'noscript', 'template', 'iframe', 'object', 'embed']);
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function sanitizeNode(node) {
+  if (node.nodeType === 3) return escapeHtml(node.nodeValue);
+  if (node.nodeType !== 1) return '';
+  const tag = node.tagName.toLowerCase();
+  if (PASTE_DROP.has(tag)) return '';
+  const inner = Array.from(node.childNodes).map(sanitizeNode).join('');
+  if (PASTE_KEEP.has(tag)) {
+    if (tag === 'br') return '<br>';
+    if (tag === 'a') {
+      const href = node.getAttribute('href') || '';
+      if (!/^https?:\/\//i.test(href)) return inner;
+      return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+    }
+    return `<${tag}>${inner}</${tag}>`;
+  }
+  if (tag === 'td' || tag === 'th') return inner + ' ';
+  if (PASTE_BLOCK.has(tag)) return inner.trim() ? `<div>${inner}</div>` : '';
+  return inner; // span, font, table cells, etc. — keep text, drop styling
+}
+
+// Reduce clipboard HTML to Chirp-styled markup: basic inline formatting,
+// lists, links, and line breaks survive; inline styles, colors, backgrounds,
+// fonts, classes, and unknown tags do not. Returns '' if nothing survives.
+export function sanitizePastedHtml(html) {
+  if (!html || typeof DOMParser === 'undefined') return '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  return Array.from(doc.body.childNodes).map(sanitizeNode).join('').trim();
+}
