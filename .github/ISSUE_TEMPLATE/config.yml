@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup help and questions
+    url: https://github.com/AlmostAnOptimist/AutoVocaIndex/discussions/categories/q-a
+    about: Questions about setting up, deploying, or using AutoVocaIndex.
+  - name: Ideas and feedback
+    url: https://github.com/AlmostAnOptimist/AutoVocaIndex/discussions/categories/ideas
+    about: Suggestions and general feedback.

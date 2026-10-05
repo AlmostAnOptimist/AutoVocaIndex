@@ -9,9 +9,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
-import { DEMO_TIER, DEMO_CAPS } from './demoConfig.js';
-
-const REPO_URL = 'https://github.com/AlmostAnOptimist/AutoVocaIndex';
+import { DEMO_TIER, DEMO_CAPS, REPO_URL } from './demoConfig.js';
 
 export function DemoBanner({ variant = 'chip' }) {
   const { C, S } = useAppTheme();

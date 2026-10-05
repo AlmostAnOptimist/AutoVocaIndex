@@ -42,9 +42,10 @@ import { runRecurrenceEngine, getNextOccurrence } from './utils/recurrenceEngine
 import { getOrderedSectionsForSource } from './utils/contentUtils.js';
 import { loadState, saveState, createInitialTasks } from './utils/storage.js';
 import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow } from './hooks/useFirestore.js';
-import { DEMO, DEMO_LIMIT_NOTE, demoCapReached } from './demo/demoConfig.js';
+import { DEMO, DEMO_LIMIT_NOTE, demoCapReached, isQuotaError } from './demo/demoConfig.js';
 import { ensureDemoSeed } from './demo/seedCopy.js';
 import { DemoBanner } from './demo/DemoBanner.jsx';
+import { DemoCapacityScreen } from './demo/DemoCapacityScreen.jsx';
 import {
   THEME_KEY, SOUND_KEY, QUIZ_SOUND_KEY, CATEGORIES,
   NAV_SECTIONS, PAGE_TITLES,
@@ -832,11 +833,17 @@ export default function App() {
   // In demo mode nothing loads per-user data until the seed copy has
   // completed (idempotent — returns immediately once the flag doc exists).
   const [seedReady, setSeedReady] = useState(!DEMO);
+  // True when the seed copy failed on the demo project's daily quota; the
+  // app is replaced by DemoCapacityScreen instead of an empty sandbox.
+  const [demoAtCapacity, setDemoAtCapacity] = useState(false);
   useEffect(() => {
     if (!DEMO || !authReady || !user || seedReady) return;
     let cancelled = false;
     ensureDemoSeed(user.uid)
-      .catch(e => console.error('AVI: demo seed copy failed', e))
+      .catch(e => {
+        console.error('AVI: demo seed copy failed', e);
+        if (!cancelled && isQuotaError(e)) setDemoAtCapacity(true);
+      })
       .finally(() => { if (!cancelled) setSeedReady(true); });
     return () => { cancelled = true; };
   }, [authReady, user, seedReady]);
@@ -1970,6 +1977,15 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
     return (
       <ThemeContext.Provider value={{ theme: themeState, setTheme }}>
         <SignInScreen />
+      </ThemeContext.Provider>
+    );
+  }
+
+  // ── Demo at daily quota ──────────────────────────────────────
+  if (DEMO && demoAtCapacity) {
+    return (
+      <ThemeContext.Provider value={{ theme: themeState, setTheme }}>
+        <DemoCapacityScreen />
       </ThemeContext.Provider>
     );
   }

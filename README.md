@@ -10,7 +10,7 @@ AutoVocaIndex is extracted from the author's own study app and is updated period
 
 ## Demo
 
-A hosted demo is available at **[autovocaindex.netlify.app](https://autovocaindex.netlify.app)**. The demo runs on shared infrastructure, so it caps most write actions and resets nightly at 03:00 KST. For real use, self-host against your own Firebase project — setup takes a few minutes and then everything runs on free tiers.
+A hosted demo is available at **[autovocaindex.netlify.app](https://autovocaindex.netlify.app)**. The demo runs on shared infrastructure, so it caps most write actions and resets nightly at 03:00 KST. It also runs on a free database plan with a daily limit; on a busy day it may show a "reached today's limit" page until the limit resets around midnight US Pacific time. For real use, self-host against your own Firebase project — setup takes a few minutes and then everything runs on free tiers.
 
 ## Setup at a glance
 
@@ -33,6 +33,10 @@ The full documentation set lives in [`docs/`](docs/):
 | [07 — Building with AI](docs/07-building-with-ai.md) | The working protocol for modifying AVI with an AI assistant |
 | [08 — Converting to another language](docs/08-converting-to-another-language.md) | Every Korean coupling site and its replacement contract |
 | [09 — Customizing themes](docs/09-customizing-themes.md) | The design system: themes, typography, frames, plates |
+
+## Feedback
+
+Questions, setup help, and ideas go in [Discussions](https://github.com/AlmostAnOptimist/AutoVocaIndex/discussions). Reproducible bugs can be reported as an [issue](https://github.com/AlmostAnOptimist/AutoVocaIndex/issues/new/choose) using the bug report form. Responses aren't guaranteed (see Maintenance posture), but reports are read, and fixes ship in a later update.
 
 ## Support
 
