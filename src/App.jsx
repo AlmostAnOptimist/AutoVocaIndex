@@ -1003,6 +1003,37 @@ export default function App() {
       try {
         const result = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
         if (result) setSrsSnapshot(result);
+
+        // Rollover reconcile: the spike task's title count was frozen days ago
+        // from an exact-date forecast. On the task's own day, rewrite it to the
+        // actual day-start total (dueAtDayStart, which includes carry-over); if
+        // that is at or under the cap, auto-complete the task instead. Marked
+        // per day so a later reload never overrides a manual uncheck or rename.
+        // Pure in-memory check; at most one task write per day.
+        if (typeof result?.dueAtDayStart === 'number') {
+          const n   = result.dueAtDayStart;
+          const cap = data.settings?.srsSpikeCap ?? DAILY_CAP;
+          setData(prev => {
+            let changed = false;
+            const tasksNext = (prev.tasks || []).map(t => {
+              if (t.source !== 'srs_forecast' || t.date !== logicalDate) return t;
+              if (t.completed || t.srsReconciledDate === logicalDate) return t;
+              const title = typeof t.title === 'string'
+                ? t.title.replace(/\(\d+ cards due\)/, `(${n} cards due)`)
+                : t.title;
+              const complete = n <= cap;
+              if (title === t.title && !complete) return t;
+              changed = true;
+              return {
+                ...t,
+                title,
+                srsReconciledDate: logicalDate,
+                ...(complete ? { completed: true, completedAt: new Date().toISOString() } : {}),
+              };
+            });
+            return changed ? { ...prev, tasks: tasksNext } : prev;
+          });
+        }
         // If triage moved overdue cards, refresh card state from Firestore.
         if (result?.triaged > 0) {
           const { getDocs: gd, collection: col } = await import('firebase/firestore');

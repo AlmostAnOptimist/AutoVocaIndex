@@ -1697,7 +1697,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
             <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textM, marginBottom: '12px' }}>
               Grammar
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)', gap: '12px' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 <DeckCard
                   deck={grammarDeck}
@@ -1717,10 +1717,10 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
                   Select cards to study
                 </button>
               </div>
-              {/* Column 2 left empty — the Dispatches box reads better at single-column
-                  width (matching its Content Library counterpart) than stretched across
-                  two columns. */}
-              <div style={{ gridColumn: '3 / 4' }}>
+              {/* Desktop: column 2 left empty — the Dispatches box reads better at
+                  single-column width (matching its Content Library counterpart) than
+                  stretched across two columns. Mobile: two columns, no empty gap. */}
+              <div style={{ gridColumn: isMobile ? '2 / 3' : '3 / 4' }}>
                 <GazetteBox title="Dispatches">
                   <div style={{ fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase', color: C.accent, marginBottom: '6px' }}>Recent Grammar</div>
                   {recentGrammarReviews.length === 0 ? (
