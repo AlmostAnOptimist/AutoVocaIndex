@@ -1,0 +1,12 @@
+{
+  "name": "autovocaindex-demo-tour",
+  "private": true,
+  "description": "Records a captioned video walkthrough of the hosted AutoVocaIndex demo.",
+  "type": "module",
+  "scripts": {
+    "tour": "node tour.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0"
+  }
+}

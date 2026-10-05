@@ -37,7 +37,9 @@ public/              favicon.svg (the single-source logo), PWA icons,
                      manifest
 seed/                globalLemmaMap.json + the Admin SDK import/export scripts
 scripts/             demo-reaper.cjs — maintenance for the hosted demo;
-                     inert in your deployment (no-ops without its secret)
+                     inert in your deployment (no-ops without its secret);
+                     demo-tour/ — records a captioned video walkthrough of
+                     the hosted demo (separate package.json; see its README)
 .github/workflows/   the schedule that runs it (same inertness)
 docs/                this documentation
 netlify.toml         build settings and the /api/* redirects
