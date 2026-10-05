@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { doc, updateDoc, collection, getDocs, writeBatch, query, where, setDoc, getDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
+import { doc, updateDoc, collection, getDocs, getDocsFromServer, writeBatch, query, where, setDoc, getDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
 import { db, auth } from './firebase.js';
 import { ThemeContext } from './theme/ThemeContext.js';
 import { useAppTheme } from './hooks/useAppTheme.js';
@@ -36,7 +36,7 @@ import { DevDashboard } from './pages/DevDashboard.jsx';
 import { birbSrc, decoBlockStyle } from './utils/decoAssets.js';
 
 import { uid, parseDate, isToday, isPast, toDateStr, getLogicalToday, getLogicalDateStr, getTaskDates, taskOccursOn, taskLastDate, isDateDone } from './utils/dateUtils.js';
-import { runDailyPipeline } from './utils/srsEngine.js';
+import { runDailyPipeline, DAILY_CAP } from './utils/srsEngine.js';
 import { isDueToday } from './utils/fsrs.js';
 import { runRecurrenceEngine, getNextOccurrence } from './utils/recurrenceEngine.js';
 import { getOrderedSectionsForSource } from './utils/contentUtils.js';
@@ -56,6 +56,9 @@ import {
 // localStorage provides instant first render; Firestore refreshes in the background.
 const FC_CARDS_PREFIX = 'avi_fc_cards_';
 const FC_DECKS_PREFIX = 'avi_fc_decks_';
+// Per-device, per-uid stamp of the last logical day a forced server read of
+// decks + flashcards succeeded. Drives the once-per-day freshness gate.
+const FC_REFRESH_PREFIX = 'avi_fc_refresh_';
 
 // Module-level so every component in this file can see it (AVISourceSelector
 // in particular — it's defined outside the App function and was previously
@@ -81,6 +84,44 @@ function fcWrite(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
 
+// Deck ordering shared by the load effect and the daily refresh: grammar deck
+// first, then by name.
+function sortDeckRows(rows) {
+  return [...rows].sort((a, b) => {
+    if (a.id === 'deck_grammar') return -1;
+    if (b.id === 'deck_grammar') return 1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+}
+
+// Drops backless vocabulary cards (grammar cards always kept).
+function filterCardRows(rows) {
+  return rows.filter(c => c.type === 'grammar' || (c.back !== '' && c.back != null));
+}
+
+// Key-order-independent serialization for change detection. A Firestore row
+// and a locally-merged row can carry identical fields in different key order,
+// which plain JSON.stringify would misreport as a change.
+function stableStringify(v) {
+  if (v === undefined) return 'null';
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
+    .map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+}
+
+// Returns `next` as the authoritative row set (server wins; rows deleted
+// elsewhere drop out) but reuses the existing object for any row whose content
+// is unchanged, so only rows that actually changed get a new reference.
+function mergeRowsPreservingIdentity(prev, next) {
+  if (!prev) return next;
+  const byId = new Map(prev.map(r => [r.id, r]));
+  return next.map(r => {
+    const cur = byId.get(r.id);
+    return cur && stableStringify(cur) === stableStringify(r) ? cur : r;
+  });
+}
+
 // Reads grammar mastery counts from localStorage so FlashcardsPage has data even
 // before GrammarIndexPage mounts in the current session.
 function readGrammarMasteryCounts() {
@@ -103,13 +144,20 @@ function readGrammarEntries() {
   } catch { return []; }
 }
 
-function useFlashcardData(uid) {
+function useFlashcardData(uid, dsh = 3) {
   const [decks,        setDecksState]  = useState(() => fcRead(uid ? FC_DECKS_PREFIX + uid : null) || []);
   const [cards,        setCardsState]  = useState(() => fcRead(uid ? FC_CARDS_PREFIX + uid : null));  // null = not yet loaded
   const [fcLoading,    setFcLoading]   = useState(() => !fcRead(uid ? FC_DECKS_PREFIX + uid : null));
 
-  const decksKey = uid ? FC_DECKS_PREFIX + uid : null;
-  const cardsKey = uid ? FC_CARDS_PREFIX + uid : null;
+  const decksKey   = uid ? FC_DECKS_PREFIX + uid : null;
+  const cardsKey   = uid ? FC_CARDS_PREFIX + uid : null;
+  const refreshKey = uid ? FC_REFRESH_PREFIX + uid : null;
+
+  // Latest day-start-hour, readable from callbacks without re-creating them
+  // or re-running the load effect.
+  const dshRef = useRef(dsh);
+  dshRef.current = dsh;
+  const refreshInFlight = useRef(false);
 
   // Stable updaters — write through to cache
   const updateCards = useCallback((updater) => {
@@ -132,10 +180,31 @@ function useFlashcardData(uid) {
   useEffect(() => {
     if (!uid) return;
 
+    // Daily freshness gate. Once per logical day per device the boot read is
+    // forced to the server so a cache-served load cannot pin stale card
+    // content for the whole day. Otherwise the cheap cache-permitted read is
+    // fine. The stamp is written only after BOTH phases succeed from the
+    // server; a fallback to cache leaves it unset so the next trigger retries.
+    const todayStr  = getLogicalDateStr(dshRef.current);
+    const needFresh = fcRead(refreshKey) !== todayStr;
+    const bootOk    = { decks: false, cards: false, fresh: needFresh };
+    const readCol = async (ref) => {
+      if (!needFresh) return getDocs(ref);
+      try { return await getDocsFromServer(ref); }
+      catch (e) {
+        bootOk.fresh = false;
+        console.warn('App: server read failed, falling back to cache', e);
+        return getDocs(ref);
+      }
+    };
+    const maybeStamp = () => {
+      if (bootOk.decks && bootOk.cards && bootOk.fresh) fcWrite(refreshKey, todayStr);
+    };
+
     // Phase 1: decks (fast — lets FlashcardsPage grid render immediately)
     (async () => {
       try {
-        const deckSnap = await getDocs(collection(db, 'users', uid, 'decks'));
+        const deckSnap = await readCol(collection(db, 'users', uid, 'decks'));
         const deckRows = deckSnap.docs
           .map(d => ({ id: d.id, ...d.data() }))
           .sort((a, b) => {
@@ -145,6 +214,8 @@ function useFlashcardData(uid) {
           });
         setDecksState(deckRows);
         fcWrite(decksKey, deckRows);
+        bootOk.decks = true;
+        maybeStamp();
       } catch (e) {
         console.error('App: deck load failed', e);
       } finally {
@@ -155,12 +226,14 @@ function useFlashcardData(uid) {
     // Phase 2: cards (background — pipeline runs here)
     (async () => {
       try {
-        const cardSnap = await getDocs(collection(db, 'users', uid, 'flashcards'));
+        const cardSnap = await readCol(collection(db, 'users', uid, 'flashcards'));
         const allRows  = cardSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         // Filter out backless vocabulary cards (grammar cards always kept)
         const cardRows = allRows.filter(c => c.type === 'grammar' || (c.back !== '' && c.back != null));
         setCardsState(cardRows);
         fcWrite(cardsKey, cardRows);
+        bootOk.cards = true;
+        maybeStamp();
       } catch (e) {
         console.error('App: card load failed', e);
       }
@@ -168,7 +241,36 @@ function useFlashcardData(uid) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
-  return { cards, decks, fcLoading, updateCards, updateDecks };
+  // Resume-time daily refresh. Warm resumes (bfcache / PWA restore) never
+  // re-run the load effect above, so without this a card edited on another
+  // device could stay hidden on this one indefinitely. Gated to one server
+  // read of decks + flashcards per logical day per device; the stamp is
+  // written only on success so an offline attempt retries on the next
+  // trigger. Rows merge preserving object identity — unchanged cards keep
+  // their references and only rows that actually changed are replaced.
+  const refreshFlashcardsIfStale = useCallback(async () => {
+    if (!uid || refreshInFlight.current) return;
+    const todayStr = getLogicalDateStr(dshRef.current);
+    if (fcRead(refreshKey) === todayStr) return;
+    refreshInFlight.current = true;
+    try {
+      const [deckSnap, cardSnap] = await Promise.all([
+        getDocsFromServer(collection(db, 'users', uid, 'decks')),
+        getDocsFromServer(collection(db, 'users', uid, 'flashcards')),
+      ]);
+      const deckRows = sortDeckRows(deckSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const cardRows = filterCardRows(cardSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      updateDecks(prev => mergeRowsPreservingIdentity(prev, deckRows));
+      updateCards(prev => mergeRowsPreservingIdentity(prev, cardRows));
+      fcWrite(refreshKey, todayStr);
+    } catch (e) {
+      console.warn('App: daily flashcard refresh failed (will retry on next trigger)', e);
+    } finally {
+      refreshInFlight.current = false;
+    }
+  }, [uid, refreshKey, updateDecks, updateCards]);
+
+  return { cards, decks, fcLoading, updateCards, updateDecks, refreshFlashcardsIfStale };
 }
 
 // ── Quick Add Buttons ─────────────────────────────────────────────────────────
@@ -616,6 +718,7 @@ triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection} 
           onClose={closeEdit}
           onSave={saveTask}
           onDelete={deleteTask}
+          appointments={appointments}
           dsh={dsh}
         />
 
@@ -770,14 +873,32 @@ export default function App() {
   });
 
   const [dataLoaded, setDataLoaded] = useState(false); // true once Firestore load completes
+  const [loadFailed, setLoadFailed] = useState(false);   // remote load exhausted all retries
+  const [loadRetryNonce, setLoadRetryNonce] = useState(0); // bump to re-run the load effect
 
   // ── Load from Firestore once auth is ready and user is signed in ──
   useEffect(() => {
     if (!authReady || !user || !seedReady) return;
     let cancelled = false;
     (async () => {
-      const remote = await firestoreLoad(user.uid);
+      // Silent retry with backoff: transient failures must never fall through
+      // to setDataLoaded(true) with an unseeded sync baseline, or the debounced
+      // sync mass-writes the local (possibly stale) snapshot over Firestore.
+      const RETRY_DELAYS = [2000, 6000, 15000];
+      let remote = await firestoreLoad(user.uid);
+      for (let i = 0; remote === 'error' && i < RETRY_DELAYS.length; i++) {
+        await new Promise(res => setTimeout(res, RETRY_DELAYS[i]));
+        if (cancelled) return;
+        remote = await firestoreLoad(user.uid);
+      }
       if (cancelled) return;
+      if (remote === 'error') {
+        // All attempts failed: stay in local read-only mode. dataLoaded stays
+        // false, so the persist effect never enables Firestore sync.
+        setLoadFailed(true);
+        return;
+      }
+      setLoadFailed(false);
       if (remote) {
         const dsh = remote.settings?.dayStartHour ?? 3;
         const { tasks: updatedTasks, changed } = runRecurrenceEngine(remote.tasks || [], dsh);
@@ -836,11 +957,11 @@ export default function App() {
       setDataLoaded(true);
     })();
     return () => { cancelled = true; };
-  }, [authReady, user, seedReady]);
+  }, [authReady, user, seedReady, loadRetryNonce]);
 
   // ── Sync status & Firestore hook ─────────────────────────────
   const [syncStatus, setSyncStatus] = useState('local');
-  const { cards, decks, fcLoading, updateCards, updateDecks } = useFlashcardData(seedReady ? (user?.uid ?? null) : null);
+  const { cards, decks, fcLoading, updateCards, updateDecks, refreshFlashcardsIfStale } = useFlashcardData(seedReady ? (user?.uid ?? null) : null, data.settings?.dayStartHour ?? 3);
 
   // Deck IDs whose whole set is paused — held out of due counts, triage, and
   // the spike forecast (Phase D2).
@@ -872,6 +993,7 @@ export default function App() {
   useEffect(() => {
     const uid = user?.uid;
     if (!uid || !cards) return;
+    if (!dataLoaded) return; // never run against pre-remote local state
     const dsh = data.settings?.dayStartHour ?? 3;
     const logicalDate = getLogicalDateStr(dsh);
     const pipelineKey = `${uid}:${logicalDate}`;
@@ -879,7 +1001,7 @@ export default function App() {
     pipelineRanForUid.current = pipelineKey;
     (async () => {
       try {
-        const result = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds);
+        const result = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
         if (result) setSrsSnapshot(result);
         // If triage moved overdue cards, refresh card state from Firestore.
         if (result?.triaged > 0) {
@@ -893,9 +1015,11 @@ export default function App() {
         console.error('App: SRS pipeline failed', e);
       }
     })();
-  // cards intentionally included so the effect fires as soon as cards finish loading.
+  // cards intentionally included so the effect fires as soon as cards finish
+  // loading; dataLoaded included so it fires once the remote load lands even
+  // when cards won the race.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, cards]);
+  }, [user?.uid, cards, dataLoaded]);
 
   // Called by FlashcardsPage after each session ends (spike-only re-run result).
   const onPipelineResult = useCallback((result) => {
@@ -1145,7 +1269,7 @@ export default function App() {
       if (document.visibilityState !== 'visible') return;
       try {
         const remote = await firestoreLoad(uid);
-        if (!remote) return;
+        if (!remote || remote === 'error') return;
         const dsh = remote.settings?.dayStartHour ?? 3;
         const { tasks: updatedTasks, changed } = runRecurrenceEngine(remote.tasks || [], dsh);
         const freshTasks = changed ? updatedTasks : remote.tasks;
@@ -1182,7 +1306,7 @@ export default function App() {
       lastVisibilityRefresh.current = now;
       try {
         const remote = await firestoreLoad(user.uid);
-        if (!remote) return;
+        if (!remote || remote === 'error') return;
         const dsh = remote.settings?.dayStartHour ?? 3;
         const { tasks: updatedTasks, changed } = runRecurrenceEngine(remote.tasks || [], dsh);
         const freshTasks = changed ? updatedTasks : remote.tasks;
@@ -1199,6 +1323,11 @@ export default function App() {
             console.warn('AVI: visibility refresh engine write failed', e)
           );
         }
+
+        // Daily card/deck freshness (self-gated to one server read per logical
+        // day). Awaited so the day-flip refresh below reads an already-updated
+        // local cache instead of racing it.
+        await refreshFlashcardsIfStale();
 
         // Day-flip detection: if the pipeline ran for a different date, reset it
         // and refresh cards so the pipeline re-runs for the new logical day.
@@ -1342,6 +1471,27 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
             completedAt: new Date().toISOString(),
             recurrence: { ...t.recurrence, nextDue },
           };
+        }
+
+        // ── Unscheduled tasks (dateless, non-recurring): completing files
+        // the task under today's logical date so it leaves Unscheduled,
+        // shows in Today's done list, and survives rollover as a dated
+        // record in the month calendar. Unchecking an auto-dated task
+        // before rollover returns it to Unscheduled (field removed by
+        // omission — the task sync writes whole docs).
+        if (!t.date && completing && (!t.recurrence || t.recurrence.type === 'none')) {
+          const dshU = prev.settings?.dayStartHour ?? 3;
+          return {
+            ...t,
+            completed: true,
+            completedAt: new Date().toISOString(),
+            date: toDateStr(getLogicalToday(dshU)),
+            autoDatedOnComplete: true,
+          };
+        }
+        if (t.autoDatedOnComplete && !completing) {
+          const { autoDatedOnComplete: _adc, ...rest } = t;
+          return { ...rest, completed: false, completedAt: null, date: null };
         }
 
         return {
@@ -1512,9 +1662,12 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
   }, []);
 
   const saveTask = useCallback((updatedTask) => {
+    // followUpQueue is a transient carrier from EditTaskModal's appointment
+    // variant — it belongs on the appointment doc, never on the task doc.
+    const { followUpQueue: fuQueue, ...taskToStore } = updatedTask;
     updateData(prev => ({
       ...prev,
-      tasks: prev.tasks.map(t => t.id === updatedTask.id ? updatedTask : t),
+      tasks: prev.tasks.map(t => t.id === taskToStore.id ? taskToStore : t),
     }));
     if (updatedTask.isAppointmentTask && updatedTask.appointmentId) {
       const uid = auth.currentUser?.uid;
@@ -1526,6 +1679,14 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         };
         if (updatedTask.date) apptSync.date = updatedTask.date;
         if (updatedTask.time != null) apptSync.time = updatedTask.time || '';
+        if (fuQueue !== undefined) {
+          // Queue edited from the task modal — legacy single-date fields
+          // are nulled so the promotion effect and AppointmentModal read
+          // only the queue (null is falsy at both check sites).
+          apptSync.followUpQueue = fuQueue;
+          apptSync.followUpDate  = null;
+          apptSync.followUpTime  = null;
+        }
         setDoc(doc(db, 'users', uid, 'appointments', updatedTask.appointmentId),
           apptSync,
           { merge: true }
@@ -1803,6 +1964,24 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
   // ── Main app ──────────────────────────────────────────────────
   return (
     <ThemeContext.Provider value={{ theme: themeState, setTheme }}>
+      {loadFailed && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+          background: '#7a2e2e', color: '#fff', padding: '10px 16px',
+          fontSize: 14, textAlign: 'center',
+        }}>
+          Couldn't reach the server — showing local data. Changes are not being saved.
+          <button
+            onClick={() => { setLoadFailed(false); setLoadRetryNonce(n => n + 1); }}
+            style={{
+              marginLeft: 12, padding: '4px 12px', border: '1px solid #fff',
+              borderRadius: 6, background: 'transparent', color: '#fff', cursor: 'pointer',
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
       <InnerApp
         data={data} page={page} setPage={navigateTo}
         themeOpen={themeOpen} setThemeOpen={setThemeOpen}

@@ -12,6 +12,7 @@ import { auth } from '../../firebase.js';
 import {
   uuid, normalizeLemma, cleanStagingText, getSourceSections,
   resolveLemmaWithDictionary, writeGlobalLemma, fetchDefinition,
+  filterNewSentenceRows, filterNewWordRows, filterNewLemmas,
 } from '../../utils/aviUtils.js';
 import { prewarmTtsAudio } from '../../utils/ttsUtils.js';
 import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
@@ -583,10 +584,10 @@ export function AVIImportPage({
 
       updateData(prev => ({
         ...prev,
-        wordInputs:     [...newWordInputs, ...prev.wordInputs],
-        lemmaMaster:    [...newLemmas, ...prev.lemmaMaster],
+        wordInputs:     [...filterNewWordRows(prev.wordInputs, newWordInputs), ...prev.wordInputs],
+        lemmaMaster:    [...filterNewLemmas(prev.lemmaMaster, newLemmas), ...prev.lemmaMaster],
         ...(mode === 'sentence'
-          ? { sentenceInputs: [...newSentenceRows, ...prev.sentenceInputs] }
+          ? { sentenceInputs: [...filterNewSentenceRows(prev.sentenceInputs, newSentenceRows), ...prev.sentenceInputs] }
           : {}),
       }));
 

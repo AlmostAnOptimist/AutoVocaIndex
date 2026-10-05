@@ -4,6 +4,7 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { TaskItem } from '../components/TaskItem.jsx';
 import { ProgressBar } from '../components/ProgressBar.jsx';
 import { CATEGORIES } from '../constants.js';
+import { DAILY_CAP } from '../utils/srsEngine.js';
 import { playSound } from '../utils/soundEngine.js';
 import { doc, setDoc } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';import { SH } from '../theme/buildStyles.js';
@@ -11,10 +12,11 @@ import { Icons } from '../components/Icons.jsx';
 import { useDragSort } from '../hooks/useDragSort.js';
 import { taskSortComparator, applyDragOrder } from '../utils/dragSort.js';
 import { uid } from '../utils/dateUtils.js';
+import { isDueToday } from '../utils/fsrs.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
-export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData, flashcardDue, cards, srsSnapshot = {},
+export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData, flashcardDue, settings, cards, srsSnapshot = {},
  }) {
   const { C, S } = useAppTheme();
   const [filter, setFilter] = useState('all');
@@ -37,6 +39,21 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
       return ms >= windowStart && ms < windowEnd;
     }).length;
   }, [cards, dsh]);
+
+  // Live count of due (non-new, non-grammar) cards still pending — used for Left.
+  // Of the cards that were due when today's pipeline ran, how many are still due?
+  // Scoped to the snapshot's ID list, so new-card reviews and paused-deck overdue
+  // cards can't affect it; Agained cards stay counted until actually resolved.
+  // null until the snapshot (with IDs) is available — caller falls back.
+  const srsDueLeft = useMemo(() => {
+    const dueIds = srsSnapshot.dueCardIds;
+    if (!cards || !dueIds) return null;
+    const byId = new Map(cards.map(c => [c.id, c]));
+    return dueIds.reduce((n, id) => {
+      const c = byId.get(id);
+      return c && isDueToday(c, dsh) ? n + 1 : n;
+    }, 0);
+  }, [cards, srsSnapshot.dueCardIds, dsh]);
 
   // ── Tasks ─────────────────────────────────────────────────────
   const todayTasks = useMemo(() => {
@@ -95,8 +112,17 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 
-  const srsDone   = srsReviewed;
-  const srsTotal_ = srsSnapshot.dueAtDayStart ?? 0;
+  const srsDone      = srsReviewed;
+  const srsTotal_    = srsSnapshot.dueAtDayStart ?? 0;
+  const spikeCap     = settings?.srsSpikeCap ?? DAILY_CAP;
+  const srsRemaining = srsDueLeft ?? Math.max(0, srsTotal_ - srsDone);
+  const tomorrowCount = srsSnapshot.tomorrowCount ?? 0;
+  // Show when unfinished reviews would push tomorrow over the cap,
+  // but tomorrow is not already a confirmed spike on its own.
+  const showConditionalSpike =
+    srsRemaining > 0 &&
+    (srsRemaining + tomorrowCount) > spikeCap &&
+    tomorrowCount <= spikeCap;
 
   return (
     <>
@@ -193,7 +219,7 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
                   />
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px', fontSize: '12px', color: C.textS }}>
                     <span>Done: <span style={{ fontFamily: SH.fm, color: C.accent2 || C.accent }}>{srsDone}</span></span>
-                    <span>Left: <span style={{ fontFamily: SH.fm, color: C.text }}>{Math.max(0, srsTotal_ - srsDone)}</span></span>
+<span>Left: <span style={{ fontFamily: SH.fm, color: C.text }}>{srsRemaining}</span></span>
                   </div>
                 </div>
               )}
@@ -219,6 +245,23 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* Conditional spike warning — incomplete reviews today would push
+                  tomorrow over the cap, but tomorrow is not already a hard spike */}
+              {showConditionalSpike && (
+                <div style={{
+                  padding: '10px 12px', borderRadius: '8px',
+                  border: `1px dashed ${C.warning}`,
+                  background: `${C.warning}09`,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.alert}</span>
+                    <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
+                      Tomorrow: {srsRemaining + tomorrowCount} cards due if reviews incomplete
+                    </div>
+                  </div>
                 </div>
               )}
 

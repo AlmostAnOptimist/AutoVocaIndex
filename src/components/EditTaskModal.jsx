@@ -6,6 +6,7 @@ import { CATEGORIES } from '../constants.js';
 import { playSound } from '../utils/soundEngine.js';
 import { uid, parseDate, fmtDate } from '../utils/dateUtils.js';
 import { DatePicker } from './DatePicker.jsx';
+import { fmtApptDate, fmtTime } from './AppointmentModal.jsx';
 import { SH } from '../theme/buildStyles.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ function DeleteConfirm({ task, onConfirm, onCancel }) {
 
 // ── Main modal ──────────────────────────────────────────────────────────────
 
-export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3 }) {
+export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, appointments = [] }) {
   const { C, S } = useAppTheme();
   const [title, setTitle]             = useState('');
   const [category, setCategory]       = useState('lang');
@@ -55,6 +56,11 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3 }
   const [persistent, setPersistent]       = useState(false);
   const [push, setPush]                   = useState(false);
   const [confirmOpen, setConfirmOpen]     = useState(false);
+  // Follow-up queue (appointment tasks only) — mirrors AppointmentModal's
+  // queue editor; saved back to the appointment doc via saveTask's sync.
+  const [followUpQueue, setFollowUpQueue] = useState([]);
+  const [newQueueDate,  setNewQueueDate]  = useState('');
+  const [newQueueTime,  setNewQueueTime]  = useState('');
   useEffect(() => {
     if (open && task) {
       setTitle(task.title || '');
@@ -69,7 +75,24 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3 }
       setPersistent(task.persistent || false);
       setPush(task.push || false);
       setConfirmOpen(false);
+      if (task.isAppointmentTask && task.appointmentId) {
+        const appt = (appointments || []).find(a => a.id === task.appointmentId);
+        if (appt?.followUpQueue) {
+          setFollowUpQueue([...appt.followUpQueue].sort((a, b) => a.date.localeCompare(b.date)));
+        } else if (appt?.followUpDate) {
+          setFollowUpQueue([{ date: appt.followUpDate, time: appt.followUpTime || '' }]);
+        } else {
+          setFollowUpQueue([]);
+        }
+      } else {
+        setFollowUpQueue([]);
+      }
+      setNewQueueDate('');
+      setNewQueueTime('');
     }
+    // `appointments` deliberately omitted from deps — the queue is seeded
+    // once per open; re-running on the listener echo of our own save would
+    // clobber in-progress edits.
   }, [open, task]);
 
   const notesRef = useRef(null);
@@ -94,6 +117,16 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3 }
   };
   const removeDateChip = (ds) => setMultiDates(prev => prev.filter(x => x !== ds));
 
+  const addToQueue = () => {
+    if (!newQueueDate) return;
+    setFollowUpQueue(prev =>
+      [...prev, { date: newQueueDate, time: newQueueTime }]
+        .sort((a, b) => a.date.localeCompare(b.date))
+    );
+    setNewQueueDate('');
+    setNewQueueTime('');
+  };
+
   const handleSave = () => {
     if (!title.trim()) return;
     const finalDates = multiDates.length > 1 ? multiDates : null;
@@ -102,6 +135,11 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3 }
     const { dates: _dates, completedDates: _cd, ...taskRest } = task;
     onSave({
       ...taskRest,
+      // Transient — stripped from the task and routed to the appointment
+      // doc by saveTask.
+      ...(task.isAppointmentTask ? {
+        followUpQueue: [...followUpQueue].sort((a, b) => a.date.localeCompare(b.date)),
+      } : {}),
       title: title.trim(), category, priority,
       date: finalDates ? finalDates[0] : (multiDates.length === 1 ? multiDates[0] : (date || null)),
       time: time || null,
@@ -282,6 +320,45 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3 }
               style={{ ...S.formInput, resize: 'vertical', minHeight: '80px', overflow: 'hidden' }}
               value={notes} onChange={e => setNotes(e.target.value)} />
           </div>
+
+          {isAppt && (
+            <div style={S.formGroup}>
+              <label style={S.formLabel}>
+                Follow-up Queue
+                {followUpQueue.length > 0 && (
+                  <span style={{ fontSize: '10px', color: C.textM, fontWeight: 400, marginLeft: '6px' }}>
+                    ({followUpQueue.length} scheduled)
+                  </span>
+                )}
+              </label>
+              {followUpQueue.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+                  {followUpQueue.map((item, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ flex: 1, padding: '6px 10px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.surface, fontSize: '12px', color: C.text, fontFamily: SH.fm }}>
+                        {fmtApptDate(item.date)}{item.time ? ` · ${fmtTime(item.time)}` : ''}
+                      </div>
+                      <button onClick={() => setFollowUpQueue(prev => prev.filter((_, j) => j !== i))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textM, fontSize: '16px', padding: '0 4px', lineHeight: 1 }}>{Icons.x}</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: '8px', alignItems: 'flex-end' }}>
+                <div>
+                  <label style={{ ...S.formLabel, fontSize: '10px', marginBottom: '3px' }}>Date</label>
+                  <DatePicker value={newQueueDate} onChange={setNewQueueDate} dsh={dsh} />
+                </div>
+                <div>
+                  <label style={{ ...S.formLabel, fontSize: '10px', marginBottom: '3px' }}>Time (optional)</label>
+                  <input type="time" value={newQueueTime} onChange={e => setNewQueueTime(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); addToQueue(); } }} style={S.formInput} />
+                </div>
+                <button onClick={addToQueue} disabled={!newQueueDate} style={{ ...S.btnGhost, padding: '8px 12px', fontSize: '12px', opacity: newQueueDate ? 1 : 0.4 }} className="btn-ghost">Add</button>
+              </div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '6px' }}>
+                Queued dates promote onto this appointment as each visit passes.
+              </div>
+            </div>
+          )}
 
           <div style={{ ...S.formActions, justifyContent: 'space-between' }}>
             <button style={S.btnDanger} onClick={() => setConfirmOpen(true)}>Delete</button>

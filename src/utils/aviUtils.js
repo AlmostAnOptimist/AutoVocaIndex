@@ -856,28 +856,30 @@ export async function writeGlobalLemma(surface, cleanedLemma) {
 }
 
 // ── Update flashcard fields by linkedAVILemmaId ───────────────
-// Shared by Lemma Master and Word Input cascades. Falls back to normalized
-// lemma text if no cards are found by ID (covers cards created with
-// linkedAVILemmaId: null), and repairs linkedAVILemmaId on matched cards as
-// a side-effect unless the caller's updates already set it.
+// Shared by Lemma Master and Word Input cascades. Matches cards by the
+// UNION of the ID lookup and the normalized-lemma-text lookup: one lemma's
+// cards can carry different linkedAVILemmaId values (a stale ID left by a
+// deleted-then-recreated entry, a nuance-deck card minted against a later
+// entry), and the old ID-first/text-fallback order silently skipped those
+// siblings whenever the ID matched at least one card — a def2 edit then
+// updated one card and left the others stale. Repairs linkedAVILemmaId on
+// matched cards as a side-effect unless the caller's updates already set it.
 // Accepts either a static `updates` object or a per-card `buildUpdates(card)`
 // function — return null/undefined from buildUpdates to skip that card.
 export async function updateLinkedCards({ lemmaID, lemmaText, updates, buildUpdates, cards, uid, updateCards }) {
   if ((!lemmaID && !lemmaText) || !cards || !uid) return;
 
-  // Primary lookup by lemmaID
-  let linked = lemmaID ? cards.filter(c => c.linkedAVILemmaId === lemmaID) : [];
-
-  // Fallback: find non-grammar cards by normalized lemma text
-  if (!linked.length && lemmaText) {
-    const norm = normalizeLemma(lemmaText);
-    linked = cards.filter(c =>
-      c.type !== 'grammar' && c.lemma && normalizeLemma(c.lemma) === norm
-    );
-    if (!linked.length) {
-      console.warn('updateLinkedCards: no cards found for lemmaID', lemmaID, '/ lemma', lemmaText);
-      return;
-    }
+  const byIdMatch = lemmaID ? cards.filter(c => c.linkedAVILemmaId === lemmaID) : [];
+  const normText  = lemmaText ? normalizeLemma(lemmaText) : '';
+  const byTextMatch = normText
+    ? cards.filter(c => c.type !== 'grammar' && c.lemma && normalizeLemma(c.lemma) === normText)
+    : [];
+  const linkedMap = new Map();
+  for (const c of [...byIdMatch, ...byTextMatch]) linkedMap.set(c.id, c);
+  const linked = [...linkedMap.values()];
+  if (!linked.length) {
+    console.warn('updateLinkedCards: no cards found for lemmaID', lemmaID, '/ lemma', lemmaText);
+    return;
   }
 
   const pairs = [];
@@ -1339,4 +1341,61 @@ export function buildAviRecords(byDay, dsh = 3) {
   }
 
   return { bestDay, bestWeek, bestMonth, longestStreak, currentStreak: computeStreak(byDay, dsh) };
+}
+
+
+// ── Row-level duplicate filters (append-time backstops) ───────
+// Used inside updateData functional updaters by the Sentence Input and
+// Import flows. Functional updaters always see the latest state, so
+// filtering here is race-proof against double-fired handlers and
+// stale-closure bursts — the same race class as the cardFactory guards,
+// applied to rows. Each filter also dedupes within the incoming batch
+// itself (a repeated token in one sentence, two surface forms resolving
+// to one lemma).
+
+// One sentence row per (source, target lemma, sentence) — the same key
+// as the Sentence Input page's classifySentenceDup.
+export function filterNewSentenceRows(existingRows, newRows) {
+  const keyOf = r => `${r.source}|${normalizeLemma(r.targetWord)}|${r.sentence}`;
+  const seen = new Set((existingRows || []).map(keyOf));
+  const out = [];
+  for (const r of newRows || []) {
+    const k = keyOf(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
+// One word row per (source, section, lemma). Deliberately NOT keyed on
+// source alone: a lemma recaptured in a later section of the same source
+// still gets its row (section counts — the wordRowUpdater precedent).
+// Stricter per-flow rules (alreadyInSource, input-anywhere) remain at
+// their call sites as pre-checks; this is the uniform floor.
+export function filterNewWordRows(existingRows, newRows) {
+  const keyOf = r => `${r.source}|${r.section}|${normalizeLemma(r.lemma)}`;
+  const seen = new Set((existingRows || []).map(keyOf));
+  const out = [];
+  for (const r of newRows || []) {
+    const k = keyOf(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
+// One lemmaMaster entry per normalized lemma.
+export function filterNewLemmas(existingLemmas, newLemmas) {
+  const keyOf = l => l.cleanedLemma || normalizeLemma(l.lemma);
+  const seen = new Set((existingLemmas || []).map(keyOf));
+  const out = [];
+  for (const l of newLemmas || []) {
+    const k = keyOf(l);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(l);
+  }
+  return out;
 }

@@ -14,8 +14,9 @@ import {
   getDueDateStr, AGAIN, FSRS_DEFAULTS,
 } from '../utils/fsrs.js';
 import { playSound } from '../utils/soundEngine.js';
+import { normalizeLemma } from '../utils/aviUtils.js';
 import { getLogicalDateStr } from '../utils/dateUtils.js';
-import { runSpikeForecast } from '../utils/srsEngine.js';
+import { runSpikeForecast, DAILY_CAP } from '../utils/srsEngine.js';
 import { ActivityHeatmap, shiftMonth } from '../components/ActivityHeatmap.jsx';
 import { applyReviewToStats, getEffectiveCurrentStreak, EMPTY_REVIEW_STATS } from '../utils/reviewStatsEngine.js';
 import { GazetteBox, BoxRow, GazetteMasthead, GoldRule, BylineRule, RecordsStrip, fmtRecordDate, fmtMonthLabel, fmtWeekRange } from '../components/GazetteComponents.jsx';
@@ -1283,7 +1284,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     // batch of new cards reviewed today is immediately factored into the 7-day forecast.
     if (!DEMO && uid && cards && session?.deckId !== 'deck_grammar') {
       try {
-        const result = await runSpikeForecast(uid, cards, dsh || 3, addTask, tasks || [], [...pausedDeckIds]);
+        const result = await runSpikeForecast(uid, cards, dsh || 3, addTask, tasks || [], [...pausedDeckIds], settings?.srsSpikeCap ?? DAILY_CAP);
         if (onPipelineResult) onPipelineResult(result);
       } catch (e) {
         console.error('FlashcardsPage: post-session spike forecast failed', e);
@@ -1323,7 +1324,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     updateDecks(prev => prev.filter(d => !deckIdSet.has(d.id)));
   }, [uid, cards, updateCards, updateDecks]);
 
-  // ── Cleanup orphaned / backless cards ─────────────────────
+  // ── Cleanup orphaned / backless cards + resync backs ──────
   const handleCleanup = useCallback(async () => {
     if (!uid) return;
     const deckIdSet = new Set(decks.map(d => d.id));
@@ -1344,8 +1345,80 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       return isBackless || isOrphaned;
     });
 
-    if (!toDelete.length) {
-      setCleanupResult(0);
+    // ── Duplicate cards (one card per lemma per deck; sentence cards
+    // additionally keyed by sentence — mirroring the cardFactory guards).
+    // Survivor preference: reviewed over new, then earliest createdAt,
+    // then id. Multi-deck cards are never auto-deleted (removing them
+    // here would also remove them from their other decks). Deck
+    // totalCards is decremented for these deletions, since unlike
+    // backless/orphaned cards they live in real decks.
+    const deletingIds = new Set(toDelete.map(c => c.id));
+    const dupGroups   = new Map();
+    for (const c of allCardsForCleanup) {
+      if (c.type === 'grammar' || !c.lemma || deletingIds.has(c.id)) continue;
+      for (const deckId of (c.deckIds || [])) {
+        if (!deckIdSet.has(deckId)) continue;
+        const key = c.type === 'sentence'
+          ? `${deckId}|s|${normalizeLemma(c.lemma)}|${(c.sentence || '').normalize('NFC')}`
+          : `${deckId}|w|${normalizeLemma(c.lemma)}`;
+        if (!dupGroups.has(key)) dupGroups.set(key, []);
+        dupGroups.get(key).push(c);
+      }
+    }
+    const deckDecrements = new Map();
+    for (const group of dupGroups.values()) {
+      if (group.length < 2) continue;
+      const sorted = [...group].sort((a, b) => {
+        const ar = isNewCard(a) ? 1 : 0, br = isNewCard(b) ? 1 : 0;
+        if (ar !== br) return ar - br;
+        const ac = a.createdAt || '', bc = b.createdAt || '';
+        if (ac !== bc) return ac.localeCompare(bc);
+        return a.id.localeCompare(b.id);
+      });
+      for (const c of sorted.slice(1)) {
+        if ((c.deckIds || []).length > 1 || deletingIds.has(c.id)) continue;
+        deletingIds.add(c.id);
+        toDelete.push(c);
+        const deckId = (c.deckIds || [])[0];
+        deckDecrements.set(deckId, (deckDecrements.get(deckId) || 0) + 1);
+      }
+    }
+
+    // ── Resync card backs from Lemma Master (def2 → back) ─────
+    // Repairs cards whose back has drifted from their lemma's Definition 2.
+    // The def2 edit cascade historically updated only cards matching one
+    // linkedAVILemmaId, so a lemma whose cards carry different IDs kept an
+    // old back on the cards the edit missed. Source of truth mirrors the
+    // cascade and cardFactory: a card's back is its lemma's def2. Entries
+    // without a def2 are skipped (never blank a back — the backless filter
+    // above deletes those), grammar cards are untouched, and the matching
+    // entry also repairs linkedAVILemmaId so future ID lookups converge.
+    const resyncPairs = [];
+    try {
+      const lmSnap = await getDocs(collection(db, 'users', uid, 'lemmaMaster'));
+      const bestByNorm = new Map();
+      lmSnap.docs.forEach(d => {
+        const l = d.data();
+        if (!l.def2 || !l.lemma) return;
+        const key = normalizeLemma(l.lemma);
+        if (!key) return;
+        const cur = bestByNorm.get(key);
+        if (!cur || (l.lastUpdated || '') > (cur.lastUpdated || '')) bestByNorm.set(key, l);
+      });
+      for (const c of allCardsForCleanup) {
+        if (c.type === 'grammar' || !c.lemma || deletingIds.has(c.id)) continue;
+        const entry = bestByNorm.get(normalizeLemma(c.lemma));
+        if (!entry || c.back === entry.def2) continue;
+        const u = { back: entry.def2 };
+        if (entry.lemmaID && c.linkedAVILemmaId !== entry.lemmaID) u.linkedAVILemmaId = entry.lemmaID;
+        resyncPairs.push([c.id, u]);
+      }
+    } catch (e) {
+      console.error('Flashcards: def resync failed', e);
+    }
+
+    if (!toDelete.length && !resyncPairs.length) {
+      setCleanupResult('Nothing to clean up.');
       setTimeout(() => setCleanupResult(null), 5000);
       return;
     }
@@ -1364,13 +1437,38 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       ops++;
       if (ops >= 490) await flush();
     }
+    for (const [cardId, u] of resyncPairs) {
+      batch.update(doc(db, 'users', uid, 'flashcards', cardId), u);
+      ops++;
+      if (ops >= 490) await flush();
+    }
+    for (const [deckId, n] of deckDecrements) {
+      batch.update(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(-n) });
+      ops++;
+      if (ops >= 490) await flush();
+    }
     await flush();
 
     const toDeleteIds = new Set(toDelete.map(c => c.id));
-    updateCards(prev => prev ? prev.filter(c => !toDeleteIds.has(c.id)) : prev);
-    setCleanupResult(toDelete.length);
+    const resyncById  = new Map(resyncPairs);
+    updateCards(prev => prev
+      ? prev
+          .filter(c => !toDeleteIds.has(c.id))
+          .map(c => resyncById.has(c.id) ? { ...c, ...resyncById.get(c.id) } : c)
+      : prev);
+    if (deckDecrements.size) {
+      updateDecks(prev => prev.map(d =>
+        deckDecrements.has(d.id)
+          ? { ...d, totalCards: Math.max(0, (d.totalCards || 0) - deckDecrements.get(d.id)) }
+          : d
+      ));
+    }
+    const doneParts = [];
+    if (toDelete.length)    doneParts.push(`${toDelete.length} card${toDelete.length !== 1 ? 's' : ''} removed`);
+    if (resyncPairs.length) doneParts.push(`${resyncPairs.length} back${resyncPairs.length !== 1 ? 's' : ''} resynced`);
+    setCleanupResult(doneParts.join(' · ') + '.');
     setTimeout(() => setCleanupResult(null), 5000);
-  }, [uid, decks, updateCards]);
+  }, [uid, decks, updateCards, updateDecks]);
 
   // ── Resync Grammar ─────────────────────────────────────────
   // Re-pushes explanation/examples from each grammar entry to its linked card
@@ -1438,6 +1536,15 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     ? enrichedCards.filter(c => c.type !== 'grammar' && isDueToday(c, dsh ?? 3) && !isCardPaused(c)).length
     : null;
 
+  // ── Spike forecast ────────────────────────────────────────
+  const spikeCap        = settings?.srsSpikeCap ?? DAILY_CAP;
+  const spikeRemaining  = totalDue ?? 0;
+  const fcTomorrowCount = srsSnapshot?.tomorrowCount ?? 0;
+  const showFcConditional =
+    spikeRemaining > 0 &&
+    (spikeRemaining + fcTomorrowCount) > spikeCap &&
+    fcTomorrowCount <= spikeCap;
+
   const virtualDecks = [
     { id: 'all',           name: 'All Cards' },
     { id: 'all_words',     name: 'All Words' },
@@ -1469,6 +1576,38 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       />
       <GoldRule />
       <BylineRule left="autovocaindex / flashcards" right={todayStr} />
+
+      {/* Spike flags — hard spikes and conditional */}
+      {((srsSnapshot?.spikes ?? []).length > 0 || showFcConditional) && (
+        <div style={{ marginBottom: '20px', display: 'flex', flexDirection: 'column', gap: '8px', width: 'fit-content' }}>
+          {(srsSnapshot?.spikes ?? []).map(spike => (
+            <div key={spike.taskDateStr} style={{
+              padding: '10px 12px', borderRadius: '8px',
+              border: `1px solid ${C.warning}`,
+              background: `${C.warning}11`,
+              display: 'flex', alignItems: 'center', gap: '8px',
+            }}>
+              <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.shield}</span>
+              <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
+                {spike.dueCount} card spike on {spike.dayName}
+              </div>
+            </div>
+          ))}
+          {showFcConditional && (
+            <div style={{
+              padding: '10px 12px', borderRadius: '8px',
+              border: `1px dashed ${C.warning}`,
+              background: `${C.warning}09`,
+              display: 'flex', alignItems: 'center', gap: '8px',
+            }}>
+              <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.alert}</span>
+              <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
+                Tomorrow: {spikeRemaining + fcTomorrowCount} cards due if reviews incomplete
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Review heatmap */}
       <div style={{ marginBottom: '28px' }}>
@@ -1638,10 +1777,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       <div style={{ marginTop: '32px', marginBottom: isMobile ? '72px' : 0 }}>
         {cleanupResult !== null && (
           <div style={{ ...S.infoBox, marginBottom: '12px', textAlign: 'center' }}>
-            {cleanupResult === 0
-              ? 'Nothing to clean up.'
-              : `${cleanupResult} card${cleanupResult !== 1 ? 's' : ''} removed.`
-            }
+            {cleanupResult}
           </div>
         )}
         {resyncResult !== null && (

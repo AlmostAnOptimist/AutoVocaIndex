@@ -29,7 +29,7 @@ export async function firestoreLoad(uid) {
     return { tasks, settings };
   } catch (e) {
     console.error('AVI: Firestore load failed', e);
-    return null;
+    return 'error'; // distinct from null (new user) so callers can fail safe
   }
 }
 

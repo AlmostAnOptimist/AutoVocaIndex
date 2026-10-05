@@ -65,6 +65,7 @@ function DayDetailPopup({ dateStr, tasks, C, S, onClose, onEditTask }) {
                   <div style={{ marginTop: '3px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <span style={{ fontFamily: SH.fp, fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM }}>{catLabel}</span>
                     {t._virtual && <span style={{ fontFamily: SH.fm, fontSize: '10px', color: C.textM }}>{t._followUp ? 'follow-up' : 'recurring'}</span>}
+                    {t._doneRecord && <span style={{ fontFamily: SH.fm, fontSize: '10px', color: C.textM }}>done</span>}
                   </div>
                 </div>
               </div>
@@ -194,7 +195,16 @@ function MonthCalendar({ tasks, dsh, C, S, onEdit }) {
         }
       } else {
         // Non-recurring: show on every due date within the month that isn't done
-        if (!t.completed) {
+        if (t.completed) {
+          // Completed unscheduled tasks keep their auto-applied completion
+          // date as a struck-through calendar record.
+          if (t.autoDatedOnComplete && t.date) {
+            const d = parseDate(t.date);
+            if (d && d.getFullYear() === viewYear && d.getMonth() === viewMonth) {
+              add(t.date, { ...t, _doneRecord: true });
+            }
+          }
+        } else {
           const taskDates = getTaskDates(t);
           taskDates.forEach(ds => {
             if (isDateDone(t, ds)) return;
@@ -291,7 +301,7 @@ function MonthCalendar({ tasks, dsh, C, S, onEdit }) {
               {isMobile ? (dayTasks.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', rowGap: '3px', padding: '1px 0' }}>
                   {dayTasks.map((t, idx) => (
-                    <span key={`${t.id}-${idx}`} style={{ display: 'flex', opacity: t._virtual ? 0.5 : 1 }}>
+                    <span key={`${t.id}-${idx}`} style={{ display: 'flex', opacity: (t._virtual || t._doneRecord) ? 0.5 : 1 }}>
                       <PriDot priority={t.priority} C={C} />
                     </span>
                   ))}
@@ -304,10 +314,11 @@ function MonthCalendar({ tasks, dsh, C, S, onEdit }) {
                   style={{
                     display: 'flex', alignItems: 'center',
                     fontSize: '9.5px', lineHeight: 1.35,
-                    color: t._virtual ? C.textM : C.textS,
+                    color: (t._virtual || t._doneRecord) ? C.textM : C.textS,
                     cursor: t._virtual ? 'default' : 'pointer',
                     marginBottom: '2px',
-                    opacity: t._virtual ? 0.7 : 1,
+                    opacity: t._virtual ? 0.7 : (t._doneRecord ? 0.55 : 1),
+                    textDecoration: t._doneRecord ? 'line-through' : 'none',
                   }}
                 >
                   <PriDot priority={t.priority} C={C} />

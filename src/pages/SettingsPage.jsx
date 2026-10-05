@@ -387,6 +387,23 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
           Changes take effect on the next review.
         </p>
 
+        {/* Daily Review Cap */}
+        <div style={{ marginBottom: '18px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM, marginBottom: '4px' }}>
+            Daily Review Cap
+          </div>
+          <p style={{ fontSize: '12px', color: C.textM, marginBottom: '8px', lineHeight: 1.5 }}>
+            Days forecast to exceed this many reviews are flagged as spikes. Default: 80.
+          </p>
+          <input
+            type="number"
+            min="10" max="500" step="5"
+            value={settings.srsSpikeCap ?? 80}
+            onChange={e => onUpdate({ ...settings, srsSpikeCap: Math.max(10, Number(e.target.value)) })}
+            style={{ ...S.formInput, width: '80px' }}
+          />
+        </div>
+
         {/* Desired Retention */}
         <div style={{ marginBottom: '18px' }}>
           <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM, marginBottom: '4px' }}>

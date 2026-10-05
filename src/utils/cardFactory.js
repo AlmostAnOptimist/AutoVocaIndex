@@ -70,14 +70,68 @@ async function resolveDeckId({ uid, deckName, sourceTitle, decks, aviSources, up
   }
 }
 
+// ── Race-safe card creation ───────────────────────────────────
+// Same race class as deck resolution: a burst of factory calls (the
+// Sentence Input add loop, an Import commit, a double-fired handler)
+// shares one closure-captured cards array, so a persisted-duplicate
+// check alone is missed by every caller in the burst. One in-flight
+// promise per dedupe key makes the first caller create and every
+// concurrent caller await that same creation. Entries are removed on
+// settle so a card deleted later in the session can be legitimately
+// re-created.
+const cardCreatesInFlight = new Map(); // dedupeKey -> Promise<cardId|null>
+
+async function withCardCreateLock(key, create) {
+  if (cardCreatesInFlight.has(key)) return cardCreatesInFlight.get(key);
+  const creation = create();
+  cardCreatesInFlight.set(key, creation);
+  try {
+    return await creation;
+  } finally {
+    cardCreatesInFlight.delete(key);
+  }
+}
+
 // ── Auto-card creation ────────────────────────────────────────
 // Creates a vocab flashcard for a word entry.
-// Returns the new card's Firestore ID, or null on failure.
-export async function autoCreateWordCard({
+// Returns the new card's Firestore ID; returns the EXISTING card's ID
+// (without creating) when the source's deck already holds a non-grammar
+// card for this lemma; null on failure.
+// The deck-level duplicate guard lives HERE, not at call sites: the
+// Sentence Input and Import word-card paths call this factory directly,
+// so any guard outside it can be bypassed (the bug behind duplicate
+// cards in single-source decks). The older guards in AVIWordInputPage
+// staging, wordRowUpdater, and ensureNuanceFlashcard remain as
+// redundant backstops.
+export async function autoCreateWordCard(args) {
+  const { entry, cards, decks, uid } = args;
+  if (!entry.def2 || entry.skipUpload || !uid) return null;
+
+  const normLemma = normalizeLemma(entry.lemma);
+  const deckName  = entry.source || 'Unknown';
+
+  // Persisted-duplicate guard — same predicate as the Word Input staging
+  // guard (one card per lemma per source deck).
+  const existingDeck = decks.find(d => d.name === deckName);
+  if (existingDeck) {
+    const existingCard = (cards || []).find(c =>
+      c.type !== 'grammar' && c.lemma &&
+      normalizeLemma(c.lemma) === normLemma &&
+      (c.deckIds || []).includes(existingDeck.id)
+    );
+    if (existingCard) return existingCard.id;
+  }
+
+  // Burst guard — concurrent creations for the same (uid, deck, lemma)
+  // all read the same stale cards array, so the check above alone can be
+  // missed by every caller in a burst.
+  return withCardCreateLock(`${uid}|${deckName}|${normLemma}`, () => createWordCardUnchecked(args));
+}
+
+async function createWordCardUnchecked({
   entry, lemmaMaster, cards, decks, uid,
   updateCards, updateDecks, aviSources, dsh = 3,
 }) {
-  if (!entry.def2 || entry.skipUpload || !uid) return null;
   if (demoCardBudgetExhausted(cards)) return null;
   if (DEMO) demoCardsCreated++;
 
@@ -153,10 +207,39 @@ export async function ensureNuanceFlashcard({
 }
 
 // ── Auto-card creation for sentence entries ───────────────────
-export async function autoCreateSentenceCard({
+// Same guard structure as autoCreateWordCard, keyed one sentence card
+// per (deck, target word, sentence) — re-mining the same sentence for a
+// DIFFERENT target word still gets its own card. Sentence text is
+// NFC-normalized on both sides of the comparison, matching the search
+// bars' convention.
+export async function autoCreateSentenceCard(args) {
+  const { entry, cards, decks, uid } = args;
+  if (!entry.cardBack || entry.skipUpload || !uid) return null;
+
+  const normTarget   = normalizeLemma(entry.targetWord);
+  const normSentence = (entry.sentence || '').normalize('NFC');
+  const deckName     = entry.source ? `${entry.source} (sentence mining)` : 'Sentence Mining';
+
+  const existingDeck = decks.find(d => d.name === deckName);
+  if (existingDeck) {
+    const existingCard = (cards || []).find(c =>
+      c.type === 'sentence' &&
+      normalizeLemma(c.lemma) === normTarget &&
+      (c.sentence || '').normalize('NFC') === normSentence &&
+      (c.deckIds || []).includes(existingDeck.id)
+    );
+    if (existingCard) return existingCard.id;
+  }
+
+  return withCardCreateLock(
+    `${uid}|${deckName}|${normTarget}|${normSentence}`,
+    () => createSentenceCardUnchecked(args)
+  );
+}
+
+async function createSentenceCardUnchecked({
   entry, lemmaMaster, cards, decks, uid, updateCards, updateDecks, aviSources, dsh = 3,
 }) {
-  if (!entry.cardBack || entry.skipUpload || !uid) return null;
   if (demoCardBudgetExhausted(cards)) return null;
   if (DEMO) demoCardsCreated++;
 

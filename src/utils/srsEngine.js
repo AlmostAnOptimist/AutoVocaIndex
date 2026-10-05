@@ -9,7 +9,7 @@ import {
   isNewCard, isDueToday, triageBucket, compressInterval, getDueDateStr,
 } from './fsrs.js';
 
-const DAILY_CAP        = 80;
+export const DAILY_CAP        = 80;
 const FORECAST_DAYS    = 7;
 const MAX_DISPLAY_SPIKES = 3;
 
@@ -33,7 +33,7 @@ function filterActiveCards(cards, pausedDeckIds) {
 //
 // dueAtDayStart is a snapshot of how many non-grammar, non-new cards are due
 // at the moment the pipeline runs — used as the fixed daily total in TodayPage.
-export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks = [], pausedDeckIds = []) {
+export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks = [], pausedDeckIds = [], dailyCap = DAILY_CAP) {
   const today   = getLogicalDateStr(dsh);
   const planRef = doc(db, 'users', uid, 'dailyplan', today);
 
@@ -45,10 +45,13 @@ export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks =
   const activeCards = filterActiveCards(cards, pausedDeckIds);
 
   // Snapshot of cards due right now (fixed total shown in TodayPage all day).
-  const dueAtDayStart = activeCards.filter(c => {
+  // IDs are kept so TodayPage can count how many of *these* cards remain due —
+  // new-card reviews and paused-deck overdue cards can never leak into that count.
+  const dueCardIds = activeCards.filter(c => {
     if (c.type === 'grammar' || isNewCard(c)) return false;
     return isDueToday(c, dsh);
-  }).length;
+  }).map(c => c.id);
+  const dueAtDayStart = dueCardIds.length;
 
   // Pass 1 — triage
   const overdue = activeCards.filter(c => {
@@ -72,14 +75,16 @@ export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks =
   }
 
   // Pass 2 — spike forecast
-  const { spikes, spikeDetected } = _computeSpikes(activeCards, today, addTask, existingTasks);
+  const { spikes, spikeDetected, tomorrowCount } = _computeSpikes(activeCards, today, addTask, existingTasks, dailyCap);
 
   const output = {
     date: today,
     triaged: updates.length,
     dueAtDayStart,
+    dueCardIds,
     spikes,
     spikeDetected,
+    tomorrowCount,
     generatedAt: new Date().toISOString(),
   };
 
@@ -98,12 +103,12 @@ export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks =
 // added today are factored into the forecast immediately.
 // Uses updateDoc with dot-notation to patch only the spike fields.
 // Returns the full pipelineOutput (existing fields preserved).
-export async function runSpikeForecast(uid, cards, dsh, addTask, existingTasks = [], pausedDeckIds = []) {
+export async function runSpikeForecast(uid, cards, dsh, addTask, existingTasks = [], pausedDeckIds = [], dailyCap = DAILY_CAP) {
   const today   = getLogicalDateStr(dsh);
   const planRef = doc(db, 'users', uid, 'dailyplan', today);
 
   const activeCards = filterActiveCards(cards, pausedDeckIds);
-  const { spikes, spikeDetected } = _computeSpikes(activeCards, today, addTask, existingTasks);
+  const { spikes, spikeDetected, tomorrowCount } = _computeSpikes(activeCards, today, addTask, existingTasks, dailyCap);
 
   // Read existing output so we can return a full merged object to the caller.
   let existingOutput = {};
@@ -115,24 +120,26 @@ export async function runSpikeForecast(uid, cards, dsh, addTask, existingTasks =
   try {
     // Dot-notation update touches only the spike fields, preserving triaged / dueAtDayStart.
     await updateDoc(planRef, {
-      'pipelineOutput.spikes':        spikes,
-      'pipelineOutput.spikeDetected': spikeDetected,
+      'pipelineOutput.spikes':         spikes,
+      'pipelineOutput.spikeDetected':  spikeDetected,
+      'pipelineOutput.tomorrowCount':  tomorrowCount,
     });
   } catch {
     // Doc not yet written (edge case on first open of a new day) — write it fully.
     await setDoc(planRef, {
       logicalDate: today,
-      pipelineOutput: { ...existingOutput, spikes, spikeDetected },
+      pipelineOutput: { ...existingOutput, spikes, spikeDetected, tomorrowCount },
       generatedAt: new Date().toISOString(),
     });
   }
 
-  return { ...existingOutput, spikes, spikeDetected };
+  return { ...existingOutput, spikes, spikeDetected, tomorrowCount };
 }
 
 // ── Internal: spike computation and task creation ─────────────────────────────
-function _computeSpikes(cards, today, addTask, existingTasks) {
+function _computeSpikes(cards, today, addTask, existingTasks, dailyCap = DAILY_CAP) {
   const detectedSpikes = [];
+  let tomorrowCount = 0;
 
   // Base the forecast on the logical today date, not the raw clock.
   // Using noon local avoids any DST edge case when doing setDate arithmetic.
@@ -157,7 +164,9 @@ function _computeSpikes(cards, today, addTask, existingTasks) {
       return getDueDateStr(c) === targetStr;
     }).length;
 
-    if (dueCount > DAILY_CAP) {
+    if (d === 1) tomorrowCount = dueCount;
+
+    if (dueCount > dailyCap) {
       detectedSpikes.push({ dueCount, taskDateStr, dayName });
     }
   }
@@ -182,5 +191,5 @@ function _computeSpikes(cards, today, addTask, existingTasks) {
   }
 
   // Return up to MAX_DISPLAY_SPIKES for TodayPage flag display.
-  return { spikes: detectedSpikes.slice(0, MAX_DISPLAY_SPIKES), spikeDetected };
+  return { spikes: detectedSpikes.slice(0, MAX_DISPLAY_SPIKES), spikeDetected, tomorrowCount };
 }

@@ -16,6 +16,7 @@ import {
   fetchDefinition, fetchDefinitionWithFallback, extractLemmaCandidates,
   getSourceSections, resolveLemmaWithDictionary,
   writeGlobalLemma, updateLinkedCards,
+  filterNewSentenceRows, filterNewWordRows, filterNewLemmas,
 } from '../../utils/aviUtils.js';
 import { SentenceEditModal } from '../../components/avi/SentenceEditModal.jsx';
 import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
@@ -472,11 +473,17 @@ export function AVISentenceInputPage({
     }
     const newRows = [];
     const skippedDupes = [];
+    const batchSeen = new Set();
     for (const input of inputTokens) {
       const wi = data.wordInputs.find(w =>
         w.input === input || normalizeLemma(w.lemma) === normalizeLemma(input)
       );
       const safeTarget = wi?.lemma || input;
+      // Intra-batch dedupe: the same token repeated in one sentence (or two
+      // surface forms resolving to one lemma) collapses to a single row —
+      // classifySentenceDup only sees rows persisted before this call.
+      if (batchSeen.has(normalizeLemma(safeTarget))) continue;
+      batchSeen.add(normalizeLemma(safeTarget));
       const dup = classifySentenceDup(sentence, safeTarget, effSource);
       if (dup.skip) { skippedDupes.push(safeTarget); continue; }
       const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
@@ -502,7 +509,7 @@ export function AVISentenceInputPage({
     if (newRows.length) {
       updateData(prev => ({
         ...prev,
-        sentenceInputs: [...newRows, ...prev.sentenceInputs],
+        sentenceInputs: [...filterNewSentenceRows(prev.sentenceInputs, newRows), ...prev.sentenceInputs],
       }));
     }
     return newRows;
@@ -517,8 +524,12 @@ export function AVISentenceInputPage({
     }
     const newRows = [];
     const skippedDupes = [];
+    const batchSeen = new Set();
     for (const t of terms) {
       const safeTarget = t.lemma || t.input;
+      // Intra-batch dedupe — see createSentenceRows above.
+      if (batchSeen.has(normalizeLemma(safeTarget))) continue;
+      batchSeen.add(normalizeLemma(safeTarget));
       const dup = classifySentenceDup(sentence, safeTarget, effSource);
       if (dup.skip) { skippedDupes.push(safeTarget); continue; }
       const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
@@ -543,7 +554,7 @@ export function AVISentenceInputPage({
     if (newRows.length) {
       updateData(prev => ({
         ...prev,
-        sentenceInputs: [...newRows, ...prev.sentenceInputs],
+        sentenceInputs: [...filterNewSentenceRows(prev.sentenceInputs, newRows), ...prev.sentenceInputs],
       }));
     }
     return newRows;
@@ -597,10 +608,17 @@ export function AVISentenceInputPage({
         uploaded: false, skipUpload: false,
         lastUncheckReason: '', lastUncheckDate: '',
       };
-      updateData(prev => ({
-        ...prev,
-        wordInputs: [newWI, ...prev.wordInputs],
-      }));
+      updateData(prev => {
+        // Race-proof recheck: functional updaters see the latest state, so
+        // a burst of same-lemma terms (or a double-fired handler) cannot
+        // append the row twice — the closure-captured alreadyInSource check
+        // above cannot guarantee that on its own.
+        const dupRow = prev.wordInputs.some(w =>
+          (w.input === t.input || normalizeLemma(w.lemma) === normTok) &&
+          w.source === effSource
+        );
+        return dupRow ? prev : { ...prev, wordInputs: [newWI, ...prev.wordInputs] };
+      });
       // Auto-create word card if def2 is present
       if (newWI.def2) {
         autoCreateWordCard({
@@ -757,8 +775,8 @@ export function AVISentenceInputPage({
 
     updateData(prev => ({
       ...prev,
-      wordInputs:  [...newWordInputs, ...prev.wordInputs],
-      lemmaMaster: [...newLemmas,     ...prev.lemmaMaster],
+      wordInputs:  [...filterNewWordRows(prev.wordInputs, newWordInputs), ...prev.wordInputs],
+      lemmaMaster: [...filterNewLemmas(prev.lemmaMaster, newLemmas), ...prev.lemmaMaster],
     }));
 
     // Create sentence rows using confirmed lemmas
