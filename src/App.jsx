@@ -623,7 +623,7 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
             </div>
           </div>
           {DEMO && (isMobile || page === 'avi') && <DemoBanner variant="strip" />}
-          <div style={S.contentArea} className="content-pad">
+          <div style={S.contentArea} className={page === 'avi' ? 'content-pad content-pad-flush' : 'content-pad'}>
             {page === 'today' && (
               <TodayPage
                 {...sharedPageProps}

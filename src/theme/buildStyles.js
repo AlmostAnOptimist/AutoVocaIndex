@@ -109,6 +109,7 @@ export function buildGlobalStyles(C) {
   @keyframes particlePop { 0% { opacity: 1; transform: translate(0,0) scale(1); } 100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(0); } }
   @keyframes gradePulse { 0% { transform: scale(1); box-shadow: 0 0 0 0 currentColor; } 35% { transform: scale(1.1); box-shadow: 0 0 12px 2px currentColor; } 100% { transform: scale(1); box-shadow: 0 0 0 0 currentColor; } }
   .fade-up { animation: fadeUp 0.2s ease both; }
+  .content-pad.content-pad-flush { padding-bottom: 0 !important; }
   .slide-up { animation: slideUp 0.28s cubic-bezier(0.34, 1.2, 0.64, 1) both; }
   .grade-pulse { animation: gradePulse 0.22s ease; }
   .task-row:last-child { border-bottom: none !important; }

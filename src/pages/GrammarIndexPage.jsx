@@ -842,6 +842,9 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   const [selectMode,  setSelectMode]  = useState(false);
   const [grammarPage, setGrammarPage] = useState(0);
   const listScrollRef = useRef(null);
+  // Remembers which deep-link target has already been opened, so the
+  // defaultOpenEntryId effect below opens it once instead of on every save.
+  const consumedTargetRef = useRef(null);
 
   useEffect(() => {
   const uid = auth.currentUser?.uid;
@@ -920,7 +923,9 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
 
   useEffect(() => {
     if (!defaultOpenEntryId || loading) return;
+    if (consumedTargetRef.current === defaultOpenEntryId) return;
     const found = entries.find(e => e.id === defaultOpenEntryId);
+    if (found) consumedTargetRef.current = defaultOpenEntryId;
     if (found) {
       setSelected(found);
       setPanelOpen(true);
@@ -1654,6 +1659,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       {selected && panelOpen && !showNewForm && (
         <div style={{ position: 'relative', zIndex: 1, height: '100%', overflow: 'hidden' }}>
           <EntryDetail
+            key={selected.id}
             entry={selected}
             allEntries={entries}
             linkedCardId={cardMap[selected.id] || null}

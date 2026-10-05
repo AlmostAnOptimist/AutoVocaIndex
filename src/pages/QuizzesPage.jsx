@@ -2249,6 +2249,7 @@ const VERDICT_STYLE = {
 };
 
 function GrammarTranslationResults({ questions, translations, assessment, onDone, C, S }) {
+  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
   const pct = assessment
     ? Math.round((assessment.filter(a => a.verdict === 'O').length / assessment.length) * 100)
     : 0;
@@ -2440,6 +2441,7 @@ function GrammarSelectionResults({ questions, userSelections, onDone, C, S }) {
   const [explanations,     setExplanations]     = useState({});
   const [explaining,       setExplaining]       = useState(false);
   const [explainError,     setExplainError]     = useState(false);
+  useGlobalKey(e => { if (e.key === 'Enter') onDone(); }, { enabled: !showExplainModal });
 
   // Determine correct/incorrect per sentence per question
   const results = questions.map((q, qi) => {
@@ -3840,6 +3842,7 @@ function ClozeQuizSession({ questions: initialQuestions, onFinish, C, S }) {
 }
 
 function ClozeQuizResults({ questions, correct, total, onDone, C, S }) {
+  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
   const rawPct = total > 0 ? correct / total * 100 : 0;
   const pct    = formatScore(Math.round(rawPct * 10) / 10);
 

@@ -16,6 +16,49 @@ import { isDueToday } from '../utils/fsrs.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
+// Projects all due dates for a recurring task within [start, end) from its recurrence rule.
+function getRecurringWeekDates(t, start, end) {
+  const r = t.recurrence || {};
+  const results = [];
+
+  if (r.type === 'daily') {
+    const d = new Date(start);
+    while (d < end) { results.push(toDateStr(d)); d.setDate(d.getDate() + 1); }
+    return results;
+  }
+
+  if (r.type === 'specific_days' || r.type === 'twice_weekly') {
+    const DAY_MAP = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 };
+    const targets = (r.days || []).map(n => DAY_MAP[n]).filter(n => n !== undefined);
+    const d = new Date(start);
+    while (d < end) {
+      if (targets.includes(d.getDay())) results.push(toDateStr(d));
+      d.setDate(d.getDate() + 1);
+    }
+    return results;
+  }
+
+  if (!t.date) return results;
+  const anchor = parseDate(t.date);
+  if (!anchor) return results;
+
+  if (r.type === 'biweekly' || r.type === 'every_n_days') {
+    const step = r.type === 'biweekly' ? 14 : Math.max(2, Math.min(100, r.interval || 3));
+    const d = new Date(anchor);
+    while (d >= start) d.setDate(d.getDate() - step);
+    while (true) {
+      d.setDate(d.getDate() + step);
+      if (d >= end) break;
+      if (d >= start) results.push(toDateStr(d));
+    }
+    return results;
+  }
+
+  // Monthly / yearly: at most one occurrence per week — use anchor directly
+  if (anchor >= start && anchor < end) results.push(toDateStr(anchor));
+  return results;
+}
+
 export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData, flashcardDue, settings, cards, srsSnapshot = {},
  }) {
   const { C, S } = useAppTheme();
@@ -90,19 +133,56 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
   const done  = todayTasks.filter(t => isDateCounted(t, todayDateStr)).length;
   const total = todayTasks.length;
 
+  // Monday-start week: (getDay()+6)%7 maps Sun→6, Mon→0
   const weekStart = new Date(today);
-  weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-  const weekEnd   = new Date(weekStart);
+  const _wday = weekStart.getDay();
+  weekStart.setDate(weekStart.getDate() - ((_wday + 6) % 7));
+  const weekEnd = new Date(weekStart);
   weekEnd.setDate(weekEnd.getDate() + 7);
-  // Per-date counting: each due date in the week is one unit; a date is done
-  // iff isDateCounted says so (completedDates membership on multi-date tasks).
+
   let weekTotal = 0;
   let weekDone  = 0;
   tasks.forEach(t => {
     if (filter !== 'all' && t.category !== filter) return;
+
+    // Always On (persistent): only count if activated within this week
+    if (t.persistent) {
+      if (t.activeToday && t.activatedOn) {
+        const aDate = parseDate(t.activatedOn);
+        if (aDate && aDate >= weekStart && aDate < weekEnd) {
+          weekTotal += 1;
+          if (t.completed) weekDone += 1;
+        }
+      }
+      return;
+    }
+
+    // Recurring: enumerate every occurrence in the week from the recurrence rule.
+    // Past slots count as done if the engine has advanced the task beyond them —
+    // this prevents weekDone from dropping to zero when the engine resets at midnight.
+    const r = t.recurrence;
+    if (r && r.type && r.type !== 'none') {
+      const recurDates = getRecurringWeekDates(t, weekStart, weekEnd);
+      weekTotal += recurDates.length;
+      const currentDue = t.date ? parseDate(t.date) : null;
+      for (const ds of recurDates) {
+        const d = parseDate(ds);
+        if (!d) continue;
+        if (ds < todayDateStr) {
+          // Engine has already advanced past this slot — count as done
+          if (currentDue && currentDue > d) weekDone += 1;
+        } else if (ds === todayDateStr) {
+          if (t.completed) weekDone += 1;
+        }
+        // Future dates: not yet done
+      }
+      return;
+    }
+
+    // Push / normal / multi-date: per-date counting (unchanged)
     getTaskDates(t).forEach(ds => {
       const d = parseDate(ds);
-      if (!d || d < weekStart || d > weekEnd) return;
+      if (!d || d < weekStart || d >= weekEnd) return;
       weekTotal += 1;
       if (isDateCounted(t, ds)) weekDone += 1;
     });

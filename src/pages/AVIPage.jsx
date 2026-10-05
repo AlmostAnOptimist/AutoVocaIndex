@@ -29,6 +29,11 @@ const AVI_TAB_KEY = 'avi_tab';
 const AVI_SRC_KEY = 'avi_src';
 const AVI_SEC_KEY = 'avi_sec';
 
+// Bottom clearance at the end of AVI's scroll shell. Mobile clears the
+// 56px fixed nav bar plus breathing room (same 80px other pages get from
+// .content-pad); desktop keeps the 28px the content area used to supply.
+const AVI_BOTTOM_CLEARANCE = isMobile ? 80 : 28;
+
 // ── Tab definitions ───────────────────────────────────────────
 const AVI_TABS = [
   { id: 'overview',  label: 'Overview'       },
@@ -291,8 +296,10 @@ export function AVIPage({
   // Tabs that have adopted the flowing-content + sticky-stack layout
   // (Stage 2+). Everything else keeps today's self-contained internal
   // scroll box, so this is a no-op for them until they opt in.
-  const FLOWING_TABS = ['search'];
-  const isFlowing = FLOWING_TABS.includes(activeTab);
+  const FLOWING_TABS = ['search', 'overview'];
+  // Tabs whose layout is height:auto on mobile (internal scroll on desktop).
+  const MOBILE_FLOWING_TABS = ['word', 'sentence', 'import'];
+  const isFlowing = FLOWING_TABS.includes(activeTab) || (isMobile && MOBILE_FLOWING_TABS.includes(activeTab));
 
   if (loading) {
     return (
@@ -306,7 +313,7 @@ export function AVIPage({
   }
 
   return (
-    <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', height: '100%', paddingBottom: isMobile ? '56px' : 0 }}>
+    <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
 
       {/* ── Scroll shell: sticky tab strip + tab content share one
            scrolling ancestor so flowing tabs can stack sticky layers
@@ -408,6 +415,8 @@ export function AVIPage({
         {activeTab === 'source'    && <AVISourcePage           {...sharedProps} />}
         {activeTab === 'recent'    && <AVIRecentPage           {...sharedProps} />}
       </div>
+      {/* End-of-scroll clearance (see AVI_BOTTOM_CLEARANCE) */}
+      <div aria-hidden="true" style={{ flexShrink: 0, height: AVI_BOTTOM_CLEARANCE }} />
 
       </div>
       {/* ── AVI toast ─────────────────────────────────────────── */}
