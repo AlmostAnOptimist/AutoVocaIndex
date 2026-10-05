@@ -25,6 +25,12 @@ Cause: the diff sync compares previous in-memory state to next; if a loading rac
 Rule: a pass that would delete every document in a collection of more than five is refused and logged. There is no legitimate "clear everything" action for these collections, so many-to-zero is always treated as a bug, not intent.
 Where: `useAVIData.syncCollection`.
 
+**A failed boot load must never fall through to the sync.**
+Symptom (prevented): tasks deleted on another device come back, or newer edits are overwritten, after the app opens on a weak connection.
+Cause: if the boot read fails and the app carries on as though it loaded, the diff sync has no Firestore baseline and treats this device's local snapshot (possibly days old) as the truth, writing it over the database.
+Rule: `firestoreLoad` returns `'error'` on failure, distinct from `null` (a brand-new account). The boot load retries, then stays read-only: `dataLoaded` stays false, so the sync never starts, and the SRS pipeline waits for it too. Every caller must check for `'error'` explicitly. A bare `if (!remote) return;` lets the string through, and a failed background refresh then sets `tasks` to `undefined`.
+Where: `useFirestore.firestoreLoad`; the boot load, the hourly run, and the visibility refresh in `App.jsx`.
+
 **Absent, `null`, and `[]` are equivalent — and stripping is preferred.**
 Cause: optional array fields (`dates`, `completedDates`, link arrays) accumulated two "no value" representations over time.
 Rule: every reader guards (`Array.isArray` / `|| []`), so all three states are safe; when clearing a field, new code should *strip it from the object* rather than write an explicit `null`. Both patterns coexist in the shipped tree; don't churn old code to convert it.
@@ -36,11 +42,19 @@ Cause: first paint would otherwise wait on network.
 Rule: paint immediately from a localStorage cache, then unconditionally refetch; Firestore wins. The cache is a paint optimization, never a source of truth.
 Where: task/settings state (`avi_v1` via `storage.js`), quiz results (`avi_quiz_results_{uid}`), theme (`avi_theme`).
 
-**Local-echo and loading races.** Four verified instances of the same disease — async work racing in-memory state — each with its shipped cure:
+**An "unconditional refetch" can still be answered from cache.**
+Symptom: a card edited on one device (a new back, a corrected definition) keeps showing its old content on another device all day.
+Cause: the app runs Firestore's persistent local cache (`firebase.js`), so a boot `getDocs` can be served from that cache instead of the server, and a phone resumed from the background never re-runs the boot load at all.
+Rule: once per logical day per device, flashcards and decks are read with `getDocsFromServer`, at boot and again on returning to the tab. The day is stamped (`avi_fc_refresh_{uid}`) only after a successful server read, so an offline attempt retries on the next trigger. Rows merge by content, so unchanged cards keep their object identity and only changed rows re-render.
+Where: `useFlashcardData` and `refreshFlashcardsIfStale` in `App.jsx`. As a repair, the Flashcards Clean up button also resyncs card backs from Lemma Master.
+
+**Local-echo and loading races.** Six verified instances of the same disease — async work racing in-memory state — each with its shipped cure:
 - *Duplicate source on add:* an `addDoc` plus an optimistic state append can double up. Cure: guard the append — `prev.some(s => s.id === ref.id) ? prev : [...prev, ...]` (`ContentLibraryPage.handleAddSource`).
 - *Duplicate deck on concurrent card creation:* two card factories miss the same not-yet-created deck and each create it. Cure: a shared in-flight promise map keyed on `(uid, deckName)` — first miss creates, everyone else awaits the same promise, entry removed on settle so a later-deleted deck is never resurrected (`cardFactory.resolveDeckId`).
 - *Late-arriving props overwrite local edits:* App.jsx loads inputs asynchronously and can hand them to `useAVIData` after the user has already edited. Cure: a `hasEditedRef` — props catch-up is allowed only until the first local edit, after which local state is authoritative (`useAVIData`).
 - *Background refresh clobbers a fresher list:* quiz results fetched during a session could be shorter than the in-memory list. Cure: higher count wins on merge (`QuizzesPage`).
+- *Duplicate cards in a burst:* the Sentence Input add loop, an Import commit, or a double-fired handler calls the card factory several times from one closure-captured `cards` array, so a "does this card exist?" check passes for every caller. Cure: the duplicate check lives inside the factory itself (one word card per lemma per deck; one sentence card per target word and sentence per deck), and concurrent calls for the same key share one in-flight creation (`cardFactory.withCardCreateLock`). The Flashcards Clean up button removes duplicates that predate the fix, keeping reviewed cards over new ones, then the oldest; cards in more than one deck are never auto-deleted.
+- *Duplicate rows on append:* the same race for word rows, sentence rows, and lemma entries. Cure: filter inside the functional updater, which always sees the latest state (`filterNewWordRows`, `filterNewSentenceRows`, `filterNewLemmas` in `aviUtils.js`).
 Rule for new code: any pairing of "await a write" with "update local state" needs one of these patterns.
 
 **Firestore is called directly throughout — known coupling, explicit non-goal** *(decision)*.
@@ -110,7 +124,7 @@ Where: `buildStyles.js` mobile block; rationale comment in `QuizzesPage.jsx`.
 **iOS Safari: `padding-bottom` on non-body scroll containers is unreliable as a scroll boundary.**
 Symptom: the last rows of a scrollable list sit under the mobile nav and can't be scrolled into view.
 Rule: use a rendered spacer element at the end of the scrollable content instead of container `padding-bottom`.
-Where: applied in the mobile scroll surfaces; treat as the standing rule for any new scrollable sheet or list.
+Where: applied in the mobile scroll surfaces. AVI's scroll shell is the clearest example: an `AVI_BOTTOM_CLEARANCE` spacer ends the scrollable content, and the `content-pad-flush` class switches off the content area's own bottom padding on that page. Treat this as the standing rule for any new scrollable sheet or list.
 
 **iOS Safari: `100vh` clips under the browser chrome.**
 Symptom: modal frames extend past the visible viewport top/bottom on iOS.
@@ -172,6 +186,12 @@ Where: the engine effects in `App.jsx`; the hidden-state wait loops in `AVIImpor
 Symptom (prevented): the last edit before navigating away never persists.
 Rule: any debounced writer must flush pending state in its cleanup.
 Where: `useAVIData` (cleanup calls `flush()` if anything is pending); `useFirestore` follows the same pattern.
+
+**iOS can corrupt localStorage; boot has to survive it.**
+Symptom (prevented): the app white-screens on every load until site data is cleared by hand.
+Cause: iOS Safari can evict or partially corrupt localStorage while the app is in the background, and the first render reads the persisted snapshot synchronously, so a bad value throws before anything appears.
+Rule: an error boundary wraps the app and turns a render-time crash into a screen with one button, "Reset local data and reload." It clears localStorage only: real data reloads from Firestore, and the sign-in (kept in IndexedDB) survives. It catches render and lifecycle errors, not async rejections or event handlers, which don't blank the screen.
+Where: `BootErrorBoundary` in `main.jsx`.
 
 ---
 

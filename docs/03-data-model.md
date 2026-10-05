@@ -72,6 +72,9 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 | `persistent` | boolean | Persistent tasks skip all recurrence/overdue logic |
 | `push` | boolean | Push-forward behavior for non-recurring tasks; forced `false` on multi-date tasks |
 | `activeToday`, `activatedOn` | boolean, string \| null | Unscheduled-task activation |
+| `autoDatedOnComplete` | boolean | Set when a dateless, non-recurring task is completed: `date` is filled with that logical day so the task leaves Unscheduled and stays on the month calendar as a done record (struck through on desktop, a faded dot on mobile). Unchecking it clears `date` and returns it to Unscheduled |
+| `source` | string | `'srs_forecast'` on spike-warning tasks created by the daily pipeline |
+| `srsReconciledDate` | string | Spike tasks only. On the task's own day the pipeline rewrites the card count in its title to the actual day-start total, or completes the task if that total is at or under `srsSpikeCap`; this stamp limits that to once per day so a manual uncheck or rename is never overridden |
 | `created` | string | ISO timestamp |
 | `linkedSectionId` | string | Present on tasks created from a Content Library section |
 | `isAppointmentTask`, `appointmentId`, `apptProvider`, `linkedApptId` | mixed | Present on appointment-linked tasks (reminder tasks and follow-ups) |
@@ -82,7 +85,7 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 
 ## users/{uid}/appointments/{apptId}
 
-Scheduled sessions (tutoring, classes, exchanges). Document ID is `uid()`, duplicated in the `id` field. Written directly from `AppointmentModal.jsx`.
+Scheduled sessions (tutoring, classes, exchanges). Document ID is `uid()`, duplicated in the `id` field. Written directly from `AppointmentModal.jsx`, by the follow-up promotion effect in `App.jsx`, and by `saveTask` (date, time, and follow-up queue, merged) when the linked task is edited.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -93,7 +96,7 @@ Scheduled sessions (tutoring, classes, exchanges). Document ID is `uid()`, dupli
 | `category` | string | `'lang'` |
 | `summary`, `results` | string | Pre-session notes / post-session outcomes |
 | `outcome` | string \| null | |
-| `followUpQueue` | array | `{ id, title, date, notes }`-shaped rows, kept date-sorted; converted to tasks on save |
+| `followUpQueue` | array | `{ date, time }` entries (`time` may be `''`), kept date-sorted. When the appointment's date passes, the earliest queued date becomes its new `date`/`time` and each passed date is logged into `results`. Editable from `AppointmentModal.jsx` or from the linked task's edit window (`EditTaskModal.jsx`). Legacy single `followUpDate` / `followUpTime` fields are migrated into the queue on read and stripped or nulled on write |
 | `cost`, `costCurrency` | null | Written as literal `null` (legacy single-cost fields) |
 | `costs` | array | `{ id, label, date, amount (number), currency, notes }` |
 | `taskId` | string \| null | The linked reminder task |
@@ -288,7 +291,7 @@ An incrementally maintained aggregate over `reviewLog` so the Flashcards page ne
 
 ## users/{uid}/dailyplan/{YYYY-MM-DD}
 
-The once-per-logical-day SRS pipeline cache (`srsEngine.js`): `{ logicalDate, pipelineOutput: { date, triaged, dueAtDayStart, spikes, spikeDetected, generatedAt }, generatedAt }`. `dueAtDayStart` freezes the day's due total for the Today page; the post-session spike re-run patches only `pipelineOutput.spikes` / `pipelineOutput.spikeDetected` via dot-notation `updateDoc`.
+The once-per-logical-day SRS pipeline cache (`srsEngine.js`): `{ logicalDate, pipelineOutput: { date, triaged, dueAtDayStart, dueCardIds, spikes, spikeDetected, tomorrowCount, generatedAt }, generatedAt }`. `dueAtDayStart` freezes the day's due total for the Today page, and `dueCardIds` lists those cards so Reviews Left counts only cards from that set that are still due (new-card reviews and paused decks can't skew it). `tomorrowCount` drives the "Tomorrow: N cards due if reviews incomplete" warning. The post-session spike re-run patches only `pipelineOutput.spikes` / `pipelineOutput.spikeDetected` / `pipelineOutput.tomorrowCount` via dot-notation `updateDoc`.
 
 ## users/{uid}/settings/main
 
@@ -300,6 +303,7 @@ The single shared settings document. Two writers merge into it independently: th
 | `dayStartHour` | 3 | The `dsh` behind the logical-day convention |
 | `defaultCategory` | | |
 | `fsrs` | `{}` | `{ desiredRetention (0.9), maximumInterval (1095), graduatingInterval (1), easyInterval (3) }`; each key falls back to `FSRS_DEFAULTS` |
+| `srsSpikeCap` | 80 | The Daily Review Cap (Settings; minimum 10). Forecast days above it are flagged as spikes; also used by the "tomorrow" warning and the spike-task rollover reconcile. Absent means `DAILY_CAP` (80) from `srsEngine.js` |
 | `ttsEnabled`, `ttsSpeed`, `autoTtsOnImport` | | TTS toggles |
 | `anthropicApiKey` | | Stored from Settings; used client-side as the "grammar quizzes enabled" gate (`QuizzesPage.handleGrammarStart` returns early without it). The serverless functions authenticate with their own `ANTHROPIC_API_KEY` environment variable — this field's value is not what the server uses |
 | `customApptTypes` | | Extra appointment types; readers accept array or keyed-object-of-arrays |

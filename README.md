@@ -2,11 +2,11 @@
 
 A self-hosted Korean study environment: sentence mining and vocabulary intake with automatic lemma resolution, FSRS-scheduled flashcards, cloze and vocabulary quizzes, a grammar index, a content library, and language-study task and appointment planning — all wrapped in a newsprint Gazette interface. Built for Korean, and [convertible to another language](docs/08-converting-to-another-language.md).
 
-*Version 1.0 — published July 2026.*
+*Version 1.1 — October 2026 (first published July 2026).*
 
 ## Maintenance posture
 
-AutoVocaIndex is published as a frozen snapshot. It is complete and working as shipped, but it is not an actively maintained project: there is no feature roadmap, and issues and pull requests may not receive responses. It is offered as-is for self-hosting, study, and adaptation — fork freely under the MIT license.
+AutoVocaIndex is extracted from the author's own study app and is updated periodically as that app improves: fixes and refinements are proven there first, then synced here in batches. There is no feature roadmap, and issues and pull requests may not receive responses. It is offered as-is for self-hosting, study, and adaptation — fork freely under the MIT license.
 
 ## Demo
 
