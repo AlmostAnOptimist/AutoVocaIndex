@@ -58,3 +58,29 @@ export function demoCapReached(arr, capKey) {
   if (typeof cap !== 'number') return false;
   return nonSeededCount(arr) >= cap;
 }
+
+// ── Video tour sample forecast ───────────────────────────────
+// The recorded video tour (scripts/demo-tour) opens the demo with ?tour in
+// the address. The demo's sample cards have almost no review history, so on
+// their own they never fill Today's Reviews or trigger a spike warning; in
+// tour mode the review widgets show this sample forecast instead, so the
+// video can show what those features look like in use. Never active outside
+// the demo, and nothing is written: only the on-screen snapshot changes.
+export const DEMO_TOUR = DEMO && typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('tour');
+
+export function tourSampleSnapshot(result, logicalDate) {
+  const tomorrow = new Date(`${logicalDate}T12:00:00`);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const p2 = n => String(n).padStart(2, '0');
+  const taskDateStr = `${tomorrow.getFullYear()}-${p2(tomorrow.getMonth() + 1)}-${p2(tomorrow.getDate())}`;
+  const dayName = tomorrow.toLocaleDateString('en-US', { weekday: 'long' });
+  return {
+    ...result,
+    dueAtDayStart: 34,
+    dueCardIds: null,
+    tomorrowCount: 101,
+    spikes: [{ dueCount: 101, taskDateStr, dayName }],
+    spikeDetected: true,
+  };
+}

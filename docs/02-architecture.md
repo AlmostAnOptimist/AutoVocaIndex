@@ -10,7 +10,7 @@ Two companion documents go deeper where this one points: the [data model guide (
 
 AVI is a single-page React 19 application built with Vite, hosted as static files on Netlify. There is no application server: the client talks to Firestore directly through the Firebase SDK (auth via Firebase Authentication, Google sign-in), and four small Netlify serverless functions exist solely to hold API keys and talk to external services (KRDict, Anthropic, Google Cloud TTS) on the client's behalf. Everything else — scheduling math, lemma resolution, recurrence, stats — runs in the browser.
 
-A demo-mode configuration exists behind `VITE_DEMO_MODE` / `VITE_DEMO_TIER` flags for the public demo site (including `DemoCapacityScreen`, shown when the demo's free-tier daily quota runs out). In your deployment those flags are unset and the demo branches are dead code; you can ignore them entirely.
+A demo-mode configuration exists behind `VITE_DEMO_MODE` / `VITE_DEMO_TIER` flags for the public demo site (including `DemoCapacityScreen`, shown when the demo's free-tier daily quota runs out, and a `?tour` sample review forecast used only by the recorded video tour). In your deployment those flags are unset and the demo branches are dead code; you can ignore them entirely.
 
 ## Repository layout
 

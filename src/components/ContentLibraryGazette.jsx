@@ -65,22 +65,6 @@ function LibrarySourceItem({ src, sectionsBySource, fmtDaysAgo, onNavigateToSour
   );
 }
 
-// Placeholder for the future Goals page — renders inside whichever of
-// Active/Adrift currently has fewer sources, so the two-column band stays
-// visually balanced rather than one side trailing off shorter than the other.
-function GoalsPlaceholder({ C }) {
-  return (
-    <div style={{ border: `1px dashed ${C.borderB}`, padding: '10px 12px', marginTop: '10px', textAlign: 'center' }}>
-      <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '11px', letterSpacing: '0.04em', textTransform: 'uppercase', fontStyle: 'italic', color: C.textM, marginBottom: '4px' }}>
-        Goals — Coming Soon
-      </div>
-      <div style={{ fontFamily: SH.fp, fontStyle: 'italic', fontSize: '10.5px', color: C.textM }}>
-        A future notice, reserved.
-      </div>
-    </div>
-  );
-}
-
 export function ContentLibraryGazette(props) {
   const { C } = useAppTheme();
   const {
@@ -283,14 +267,12 @@ export function ContentLibraryGazette(props) {
             ? <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '9px 0' }}>Nothing active.</div>
             : activeSources.map(src => <LibrarySourceItem key={src.id} src={src} sectionsBySource={sectionsBySource} fmtDaysAgo={fmtDaysAgo} onNavigateToSource={onNavigateToSource} C={C} />)
           }
-          {activeSources.length <= adriftSources.length && <GoalsPlaceholder C={C} />}
         </div>
         <GazetteBox title="Sources Gone Adrift" variant={adriftSources.length > 0 ? 'warning' : 'default'}>
           {adriftSources.length === 0
             ? <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>Nothing adrift.</div>
             : adriftSources.map(src => <LibrarySourceItem key={src.id} src={src} sectionsBySource={sectionsBySource} fmtDaysAgo={fmtDaysAgo} onNavigateToSource={onNavigateToSource} faded C={C} />)
           }
-          {activeSources.length > adriftSources.length && <GoalsPlaceholder C={C} />}
         </GazetteBox>
       </div>
 

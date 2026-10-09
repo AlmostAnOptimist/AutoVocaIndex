@@ -42,7 +42,7 @@ import { runRecurrenceEngine, getNextOccurrence } from './utils/recurrenceEngine
 import { getOrderedSectionsForSource } from './utils/contentUtils.js';
 import { loadState, saveState, createInitialTasks } from './utils/storage.js';
 import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow } from './hooks/useFirestore.js';
-import { DEMO, DEMO_LIMIT_NOTE, demoCapReached, isQuotaError } from './demo/demoConfig.js';
+import { DEMO, DEMO_LIMIT_NOTE, demoCapReached, isQuotaError, DEMO_TOUR, tourSampleSnapshot } from './demo/demoConfig.js';
 import { ensureDemoSeed } from './demo/seedCopy.js';
 import { DemoBanner } from './demo/DemoBanner.jsx';
 import { DemoCapacityScreen } from './demo/DemoCapacityScreen.jsx';
@@ -1009,7 +1009,7 @@ export default function App() {
     (async () => {
       try {
         const result = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
-        if (result) setSrsSnapshot(result);
+        if (result) setSrsSnapshot(DEMO_TOUR ? tourSampleSnapshot(result, logicalDate) : result);
 
         // Rollover reconcile: the spike task's title count was frozen days ago
         // from an exact-date forecast. On the task's own day, rewrite it to the
