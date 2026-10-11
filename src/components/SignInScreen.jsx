@@ -4,7 +4,7 @@
 import { useState } from 'react';
 import { signInWithPopup, signInAnonymously } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase.js';
-import { DEMO } from '../demo/demoConfig.js';
+import { DEMO, DEMO_TOUR_URL, SHOW_TOUR_LINK } from '../demo/demoConfig.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { AVILogo } from './AVILogo.jsx';
 import { buildGlobalStyles, SH } from '../theme/buildStyles.js';
@@ -87,6 +87,17 @@ export function SignInScreen({ preparing = false }) {
           >
             {loading ? 'Entering…' : 'Enter the demo'}
           </button>
+        )}
+
+        {SHOW_TOUR_LINK && !preparing && (
+          <a
+            href={DEMO_TOUR_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: C.accent, fontSize: '14px', textDecoration: 'none', marginTop: '-8px' }}
+          >
+            Watch the video tour
+          </a>
         )}
 
         {!DEMO && !preparing && (

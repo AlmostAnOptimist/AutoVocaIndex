@@ -9,7 +9,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
-import { DEMO_TIER, DEMO_CAPS, REPO_URL } from './demoConfig.js';
+import { DEMO_TIER, DEMO_CAPS, REPO_URL, DEMO_TOUR_URL, SHOW_TOUR_LINK } from './demoConfig.js';
 
 export function DemoBanner({ variant = 'chip' }) {
   const { C, S } = useAppTheme();
@@ -35,6 +35,34 @@ export function DemoBanner({ variant = 'chip' }) {
     </button>
   );
 
+  // Link to the recorded walkthrough, styled to match the chip. The strip
+  // (mostly phones) uses a shorter label so both fit on one line.
+  const tourLink = SHOW_TOUR_LINK && (
+    <a
+      href={DEMO_TOUR_URL}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: '6px',
+        border: `1px solid ${C.border}`, borderRadius: '999px', padding: '4px 12px',
+        color: C.textM, fontSize: '12px', fontFamily: SH.fm, textDecoration: 'none',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <svg width="9" height="10" viewBox="0 0 9 10" aria-hidden="true">
+        <path d="M0 0 L9 5 L0 10 Z" fill={C.accent} />
+      </svg>
+      {variant === 'strip' ? 'Video' : 'Video tour'}
+    </a>
+  );
+
+  const bar = (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+      {chip}
+      {tourLink}
+    </div>
+  );
+
   return (
     <>
       {variant === 'strip' ? (
@@ -42,9 +70,9 @@ export function DemoBanner({ variant = 'chip' }) {
           display: 'flex', justifyContent: 'center', padding: '6px 10px',
           borderBottom: `1px solid ${C.border}`, background: C.raised, flexShrink: 0,
         }}>
-          {chip}
+          {bar}
         </div>
-      ) : chip}
+      ) : bar}
       {open && createPortal(
         <div
           onClick={() => setOpen(false)}

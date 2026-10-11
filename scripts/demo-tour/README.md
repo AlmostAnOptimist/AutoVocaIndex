@@ -44,7 +44,7 @@ Every caption is in the `CAP` list near the top of `tour.mjs`. Each caption stay
 
 ## The sample review forecast
 
-The demo's sample cards have almost no review history, so on their own they never fill Today's Reviews or trigger a spike warning. The tour opens the demo with `?tour` in the address, which makes those widgets show a sample forecast (34 reviews today and a 101-card spike tomorrow), so the video can show what the features look like in use. This only affects the demo, only with `?tour`, and nothing is saved. The sample numbers are in `tourSampleSnapshot` in `src/demo/demoConfig.js`.
+The demo's sample cards have almost no review history, so on their own they never fill Today's Reviews or trigger a spike warning. The tour opens the demo with `?tour` in the address, which makes those widgets show a sample forecast (34 reviews today and a 101-card spike tomorrow), so the video can show what the features look like in use. This only affects the demo, only with `?tour`, and nothing is saved. The sample numbers are in `tourSampleSnapshot` in `src/demo/demoConfig.js`. `?tour` also hides the demo's links to the published video (on the sign-in screen, next to the Guide chip, and on the limit screen), so a new recording doesn't show links to itself. The video address is `DEMO_TOUR_URL` in the same file.
 
 ## Chapters
 

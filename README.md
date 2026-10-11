@@ -12,6 +12,8 @@ AutoVocaIndex is extracted from the author's own study app and is updated period
 
 A hosted demo is available at **[autovocaindex.netlify.app](https://autovocaindex.netlify.app)**. The demo runs on shared infrastructure, so it caps most write actions and resets nightly at 03:00 KST. It also runs on a free database plan with a daily limit; on a busy day it may show a "reached today's limit" page until the limit resets around midnight US Pacific time. For real use, self-host against your own Firebase project — setup takes a few minutes and then everything runs on free tiers.
 
+If you'd rather watch first, or the demo has reached its limit, a captioned [video tour](https://youtu.be/whuBe4oynxA) walks through the demo.
+
 ## Setup at a glance
 
 Create a Firebase project, copy `.env.example` to `.env` and fill in the six `VITE_FIREBASE_*` values, deploy the shipped Firestore rules with the Firebase CLI, run `npm install`, then develop under `netlify dev`. Optional integrations (KRDict dictionary lookups, AI definitions and grammar quizzes, Google Cloud text-to-speech) each need one additional key, documented in `.env.example`. A seed for the global lemma map ships in `seed/` with an import script — note the `updatedAt` preservation warning in the script header before running it.

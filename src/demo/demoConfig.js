@@ -22,9 +22,10 @@ export const DEMO_LIMIT_NOTE =
 
 export const REPO_URL = 'https://github.com/AlmostAnOptimist/AutoVocaIndex';
 
-// Link to the recorded walkthrough, shown on the capacity screen. Empty
-// until a video is published; the link is hidden while it is empty.
-export const DEMO_TOUR_URL = '';
+// Link to the recorded walkthrough (scripts/demo-tour), shown on the sign-in
+// screen, next to the Guide chip, and on the capacity screen. Set it to ''
+// to hide all three links.
+export const DEMO_TOUR_URL = 'https://youtu.be/whuBe4oynxA';
 
 // True when a Firestore call failed because the project's daily free-tier
 // quota is used up (the demo runs on the Spark plan).
@@ -68,6 +69,9 @@ export function demoCapReached(arr, capKey) {
 // the demo, and nothing is written: only the on-screen snapshot changes.
 export const DEMO_TOUR = DEMO && typeof window !== 'undefined'
   && new URLSearchParams(window.location.search).has('tour');
+
+// Links to the video are hidden while the video itself is being recorded.
+export const SHOW_TOUR_LINK = DEMO && !!DEMO_TOUR_URL && !DEMO_TOUR;
 
 export function tourSampleSnapshot(result, logicalDate) {
   const tomorrow = new Date(`${logicalDate}T12:00:00`);

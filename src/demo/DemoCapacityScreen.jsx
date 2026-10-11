@@ -11,7 +11,7 @@
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { AVILogo } from '../components/AVILogo.jsx';
 import { SH } from '../theme/buildStyles.js';
-import { REPO_URL, DEMO_TOUR_URL, nextPacificMidnight } from './demoConfig.js';
+import { REPO_URL, DEMO_TOUR_URL, SHOW_TOUR_LINK, nextPacificMidnight } from './demoConfig.js';
 
 export function DemoCapacityScreen() {
   const { C, G } = useAppTheme();
@@ -50,7 +50,7 @@ export function DemoCapacityScreen() {
         </p>
 
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
-          {DEMO_TOUR_URL && (
+          {SHOW_TOUR_LINK && (
             <a href={DEMO_TOUR_URL} target="_blank" rel="noreferrer" style={linkStyle}>
               Watch the video tour
             </a>
