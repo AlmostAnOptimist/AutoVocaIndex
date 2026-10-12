@@ -1,3 +1,5 @@
+const { verifyUser } = require("../lib/verifyUser.cjs");
+
 // [LANG-SPECIFIC] KRDict is the Korean dictionary provider; swap the API
 // endpoint and response parsing for another language (docs/08).
 
@@ -25,6 +27,21 @@ exports.handler = async function (event) {
     if (fenceCount > FENCE_MAX) {
       return { statusCode: 429, body: JSON.stringify({ error: "Rate limited" }) };
     }
+  }
+
+  // Only signed-in users on ALLOWED_UIDS may use the KRDict key. Demo site:
+  // any signed-in demo visitor (anonymous uids can't be listed); the token is
+  // still required and verified, and the burst fence above still applies.
+  const caller = await verifyUser(
+    event.headers?.authorization || event.headers?.Authorization,
+    { requireAllowlist: process.env.DEMO_MODE !== 'true' },
+  );
+  if (!caller.ok) {
+    return {
+      statusCode: caller.status,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: caller.error }),
+    };
   }
 
   try {

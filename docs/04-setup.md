@@ -34,7 +34,7 @@ Firebase provides sign-in and the database. At [console.firebase.google.com](htt
 
 ## Step 3 — Configure the environment
 
-Copy `.env.example` to `.env` in the project root and fill in the six `VITE_FIREBASE_*` lines from the config block you just generated. That's the whole required configuration — the optional keys further down the file stay commented out until their steps below, and the demo block at the bottom stays exactly as shipped (`VITE_DEMO_MODE=false`).
+Copy `.env.example` to `.env` in the project root and fill in the six `VITE_FIREBASE_*` lines from the config block you just generated. That's all the app needs to start. The one other required line, `ALLOWED_UIDS`, can only be filled once you've signed in for the first time — step 5 covers it. The optional keys further down the file stay commented out until their steps below, and the demo block at the bottom stays exactly as shipped (`VITE_DEMO_MODE=false`).
 
 `.env` is gitignored and must never be committed. The `VITE_FIREBASE_*` values themselves are public by design — Firebase web config is not a secret — but the file will also hold real secrets once you add the optional keys, so treat it as private from the start.
 
@@ -66,6 +66,14 @@ Open the port the CLI prints (usually `http://localhost:8888`) — that's the wr
 Two things worth knowing about that startup output. First, the line beginning **"Injected .env file env vars:"** lists exactly which variables were loaded — it's the fastest way to audit your environment when something isn't working. Second, once this folder is *linked* to a Netlify site (which happens in the deployment guide), `netlify dev` also injects the linked site's variables, so the values you're running with may no longer be only the ones in your `.env` — when in doubt, read the injection lines to see where each variable came from.
 
 Sign in with Google. You should land on an empty Today page with the full navigation — no data yet, no errors. Add a task and reload to confirm the database round-trip works. The app is now fully functional for everything that doesn't need an external key: content library, word and sentence input (with the offline resolution heuristics), lemma master, flashcards, vocabulary and cloze quizzes, the grammar index, tasks, and appointments.
+
+**Allow your account to use the functions (required).** Every serverless function — dictionary lookups, AI definitions, grammar quizzes, TTS — checks who is calling. The app sends your Firebase sign-in token with each request, and the function only answers if your account's uid is listed in `ALLOWED_UIDS`. This is what stops anyone else who signs into your site (any Google account can) from spending your API keys. To set it up:
+
+1. In the Firebase console: Build → **Authentication → Users**. Your account appears after your first sign-in; copy its **User UID**.
+2. Paste it into `.env` as `ALLOWED_UIDS=your-uid`. To allow more than one account, separate the uids with commas.
+3. Restart `netlify dev`.
+
+If `ALLOWED_UIDS` is missing or empty, every function call is refused — that's deliberate, so a forgotten step fails closed rather than leaving your keys open. In the `netlify dev` terminal, a **403** means the server is refusing the account (the allowlist is empty, or your uid isn't on it — check for a typo), and a **401** means no valid sign-in token arrived (sign out and back in).
 
 ## Step 6 — The KRDict key (recommended, free)
 
@@ -105,9 +113,9 @@ The script prints the row count, writes in safe batches, refuses to run if any r
 
 ## Step 8 — AI features (optional, paid)
 
-An Anthropic API key enables two features: AI-generated reference definitions (the `api` dictionary mode in Settings) and grammar quizzes. Get a key at [console.anthropic.com](https://console.anthropic.com), uncomment `ANTHROPIC_API_KEY=` in `.env`, and restart. Each definition lookup and each grammar quiz is one API call, billed to your key; the serverless functions pin the model and cap the tokens, so per-call cost is small and bounded.
+An Anthropic API key enables two features: AI-generated reference definitions (the `api` dictionary mode in Settings) and grammar quizzes. Get a key at [console.anthropic.com](https://console.anthropic.com), uncomment `ANTHROPIC_API_KEY=` in `.env`, and restart. Each definition lookup is one API call, billed to your key; a grammar quiz is a few (one to write the questions and one to assess your answers, with long quizzes split into batches of 10). The serverless functions pin the model and cap the tokens, so per-call cost is small and bounded, and only the accounts on `ALLOWED_UIDS` (step 5) can make these calls.
 
-One quirk to expect: the Settings page also has an "Anthropic API key" field. That field only switches the grammar-quiz UI on — the functions authenticate with the `ANTHROPIC_API_KEY` environment variable, never with the value typed in Settings. Both need to be present for grammar quizzes: the env var to do the work, the Settings field to unlock the button.
+The environment variable is the only key — there is no API-key field in Settings. Once `ANTHROPIC_API_KEY` is set, grammar quizzes are available from the Quizzes page.
 
 ## Step 9 — Text-to-speech (optional, paid past the free allowance)
 

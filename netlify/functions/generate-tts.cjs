@@ -1,6 +1,11 @@
 const textToSpeech = require('@google-cloud/text-to-speech');
 const { Storage }   = require('@google-cloud/storage');
 const crypto        = require('crypto');
+const { verifyUser } = require('../lib/verifyUser.cjs');
+
+// Longest text accepted (S-D5). Google rejects requests over 5,000 bytes,
+// about 1,600 Korean characters, so nothing that worked before is lost.
+const MAX_TTS_CHARS = 1500;
 
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
@@ -13,6 +18,16 @@ exports.handler = async (event) => {
     return { statusCode: 403, body: 'Disabled in demo' };
   }
 
+  // Only signed-in users on ALLOWED_UIDS may run TTS and write to the bucket.
+  const caller = await verifyUser(event.headers?.authorization || event.headers?.Authorization);
+  if (!caller.ok) {
+    return {
+      statusCode: caller.status,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: caller.error }),
+    };
+  }
+
   let text;
   try {
     ({ text } = JSON.parse(event.body || '{}'));
@@ -22,6 +37,9 @@ exports.handler = async (event) => {
 
   if (!text || typeof text !== 'string' || !text.trim()) {
     return { statusCode: 400, body: 'Missing or empty text' };
+  }
+  if (text.trim().length > MAX_TTS_CHARS) {
+    return { statusCode: 400, body: 'Text too long' };
   }
 
   const bucketName = process.env.GCP_TTS_BUCKET;

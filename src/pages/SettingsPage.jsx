@@ -338,47 +338,6 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
         })}
       </div>
 
-      {/* ── AI Features (Grammar Quiz, Hard Mode) ──────────────────── */}
-      <div style={{ ...S.statCard, marginBottom: '16px' }}>
-        <div style={S.statCardTitle}>AI Features</div>
-        <p style={{ fontSize: '13px', color: C.textS, marginBottom: '14px', lineHeight: 1.6 }}>
-          Used for Grammar Quizzes. Key is stored in your account and synced across devices.
-        </p>
-        <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM, marginBottom: '6px' }}>
-          Anthropic API Key
-        </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <input
-            type="password"
-            placeholder={settings.anthropicApiKey ? '••••••••••••••••' : 'sk-ant-…'}
-            value={settings.anthropicApiKey || ''}
-            onChange={e => onUpdate({ ...settings, anthropicApiKey: e.target.value })}
-            style={{
-              flex: 1, padding: '8px 12px', borderRadius: '8px', fontSize: '13px',
-              border: `1px solid ${C.border}`, background: C.bg, color: C.text,
-              fontFamily: SH.fm, outline: 'none',
-            }}
-          />
-          {settings.anthropicApiKey && (
-            <button
-              onClick={() => onUpdate({ ...settings, anthropicApiKey: '' })}
-              style={{
-                padding: '8px 12px', borderRadius: '8px', fontSize: '12px',
-                border: `1px solid ${C.border}`, background: 'transparent',
-                color: C.textM, cursor: 'pointer', flexShrink: 0,
-              }}
-            >
-              Clear
-            </button>
-          )}
-        </div>
-        {settings.anthropicApiKey && (
-          <p style={{ fontSize: '11px', color: C.textM, marginTop: '8px' }}>
-            Key saved. Hard Mode is available in the quiz config.
-          </p>
-        )}
-      </div>
-
       {/* ── Flashcard Scheduling (FSRS) ───────────────────── */}
       <div style={{ ...S.statCard, marginBottom: '16px' }}>
         <div style={S.statCardTitle}>Flashcard Scheduling (FSRS)</div>

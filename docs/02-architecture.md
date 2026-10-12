@@ -8,7 +8,7 @@ Two companion documents go deeper where this one points: the [data model guide (
 
 ## Stack at a glance
 
-AVI is a single-page React 19 application built with Vite, hosted as static files on Netlify. There is no application server: the client talks to Firestore directly through the Firebase SDK (auth via Firebase Authentication, Google sign-in), and four small Netlify serverless functions exist solely to hold API keys and talk to external services (KRDict, Anthropic, Google Cloud TTS) on the client's behalf. Everything else — scheduling math, lemma resolution, recurrence, stats — runs in the browser.
+AVI is a single-page React 19 application built with Vite, hosted as static files on Netlify. There is no application server: the client talks to Firestore directly through the Firebase SDK (auth via Firebase Authentication, Google sign-in), and four small Netlify serverless functions exist solely to hold API keys and talk to external services (KRDict, Anthropic, Google Cloud TTS) on the client's behalf — each one verifies the caller's Firebase sign-in and an allowlist of uids before doing anything. Everything else — scheduling math, lemma resolution, recurrence, stats — runs in the browser.
 
 A demo-mode configuration exists behind `VITE_DEMO_MODE` / `VITE_DEMO_TIER` flags for the public demo site (including `DemoCapacityScreen`, shown when the demo's free-tier daily quota runs out, and a `?tour` mode used only when recording the video tour, which shows a sample review forecast and hides the demo's links to the video). In your deployment those flags are unset and the demo branches are dead code; you can ignore them entirely.
 
@@ -33,6 +33,8 @@ src/
   assets/            decorative art and gazette-plates/library/ — globbed,
                      optional, ships empty (see the theming guide)
 netlify/functions/   the four serverless functions
+netlify/lib/         verifyUser.cjs — the shared sign-in/allowlist check
+                     (outside functions/ so it isn't deployed as one)
 public/              favicon.svg (the single-source logo), PWA icons,
                      manifest
 seed/                globalLemmaMap.json + the Admin SDK import/export scripts
@@ -96,9 +98,13 @@ All Firestore access is direct — there is no data-access layer, a known coupli
 | `generate-tts.cjs` | v1 handler (CommonJS) | Google Cloud TTS with bucket-cached audio |
 | `grammar-quiz.js` | Functions 2.0 (ESM) | Grammar quiz generation and assessment |
 
-All four are reached at `/api/<name>`, but by two mechanisms: `grammar-quiz` routes *itself* via its exported `config.path` (a Functions 2.0 feature, which also grants it a 30-second timeout for the larger prompts), while the three v1 handlers get their `/api` form from redirects in `netlify.toml` — v1 handlers don't support `config.path`. Those redirects sit above the SPA fallback (`/* → /index.html`) and must stay there; redirect order matters.
+All four are reached at `/api/<name>`, but by two mechanisms: `grammar-quiz` routes *itself* via its exported `config.path` (a Functions 2.0 feature, which also lets it declare a per-IP rate limit of 20 requests a minute), while the three v1 handlers get their `/api` form from redirects in `netlify.toml` — v1 handlers don't support `config.path`. Those redirects sit above the SPA fallback (`/* → /index.html`) and must stay there; redirect order matters.
 
 The functions are the key boundary: every external API secret (`KRDICT_API_KEY`, `ANTHROPIC_API_KEY`, the split `GCP_*` credentials) lives in function environment variables and never reaches the client. The `VITE_FIREBASE_*` values in the client bundle are public by design — Firebase web config is not a secret, which is why `netlify.toml` lists them in `SECRETS_SCAN_OMIT_KEYS` (details in the deployment guide). The three `.cjs` extensions are load-bearing; the gotchas guide explains why they must not be renamed.
+
+**Who may call them.** The client calls the functions through `src/utils/apiFetch.js`, which attaches the signed-in user's Firebase ID token as `Authorization: Bearer <token>`. Each function passes that header to `netlify/lib/verifyUser.cjs`, which verifies the token with `firebase-admin` (it needs only the project ID, from `FIREBASE_PROJECT_ID` or `VITE_FIREBASE_PROJECT_ID` — no service-account key) and then requires the uid to be listed in `ALLOWED_UIDS`. Answers: 401 for a missing or invalid token, 403 for a uid that isn't allowed (or an empty allowlist — every request is refused until it's set), 500 if the server can't check sign-in at all. Any sign-in is not enough on its own, because anyone with a Google account can sign into a deployed copy. `get-definition` and `generate-tts` also cap their input length.
+
+**Timing.** Netlify's synchronous functions have a fixed 60-second limit that can't be configured. `grammar-quiz` aborts its Anthropic call at 50 seconds to return a clean 504, and the client waits 58 seconds; quizzes over 10 questions (and their assessments) are split into parallel requests to stay well inside that.
 
 The functions never touch Firestore. Anything worth persisting from a function's response — a fetched definition, a generated audio URL — is written by the client afterward.
 

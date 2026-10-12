@@ -253,6 +253,8 @@ Firestore auto-ID. Three card types share one collection, discriminated by `type
 
 One document per completed quiz session. `{ type, score (0–100, one decimal), correct, total, date (ISO), meta }` — `meta` is quiz-type-specific and is JSON-cleaned before writing (the `undefined`-stripping backstop). Loaded with `orderBy('date', 'asc')` and cached in localStorage per user (`avi_quiz_results_{uid}`) for instant paint.
 
+Grammar results carry `meta.mode` (`'selection'`, otherwise Translation; older untagged results count as Translation) and `meta.scoring` (`'g3'` for point-scored Translation, `'g4'` for per-question Selection). Translation scores are points, so `correct` can be fractional (0.5 per concept pick plus 0.5 per translation in Broad mode; △ earns half). The per-question record for a result lives in `users/{uid}/quiz_result_details/{resultId}` — for grammar, the questions, answers, assessments, concept picks, and for Selection the picks as `[{ picked: [...] }]` (Firestore can't nest an array directly inside an array) plus explanations merged in as they're fetched. An unfinished grammar session is kept on the device only (`avi_grammar_session_v1_{uid}` in localStorage, ignored after 14 days), never in Firestore.
+
 ## users/{uid}/grammar_entries/{grammar_n}
 
 Grammar Index entries. Document ID is `` `grammar_${entryNumber}` ``.
@@ -279,7 +281,7 @@ Notes, questions, and corrections share this collection, discriminated by shape.
 
 **Regular notes** (questions are notes whose `tags` include `'question'`): `title`, `bodyHtml` (rich text), `tags` (string[]), `answered` (boolean, for questions), `linkedGrammarIds` (string[]), `linkedSourceId` / `linkedSectionId` / `linkedApptId` (string \| null), `createdAt`, `updatedAt`.
 
-**Correction sets** (`type: 'correction'`): `title`, `rows` (array of `{ topic, original, corrected }`), `sourceId` / `sectionId` / `linkedApptId` (string \| null), `locked` (boolean), `createdAt`, `updatedAt`. The grammar-quiz assessment path creates these directly via `createCorrectionNote.js` with an additional `sourceLabel` field.
+**Correction sets** (`type: 'correction'`): `title`, `rows` (array of `{ topic, original, corrected }`), `sourceId` / `sectionId` / `linkedApptId` (string \| null), `locked` (boolean), `createdAt`, `updatedAt`. The grammar quizzes create these directly via `createCorrectionNote.js` with an additional `sourceLabel` field — Translation from its assessment, Selection with one row per incorrect sentence the learner selected.
 
 ## users/{uid}/reviewLog/{YYYY-MM-DD}
 
@@ -305,7 +307,7 @@ The single shared settings document. Two writers merge into it independently: th
 | `fsrs` | `{}` | `{ desiredRetention (0.9), maximumInterval (1095), graduatingInterval (1), easyInterval (3) }`; each key falls back to `FSRS_DEFAULTS` |
 | `srsSpikeCap` | 80 | The Daily Review Cap (Settings; minimum 10). Forecast days above it are flagged as spikes; also used by the "tomorrow" warning and the spike-task rollover reconcile. Absent means `DAILY_CAP` (80) from `srsEngine.js` |
 | `ttsEnabled`, `ttsSpeed`, `autoTtsOnImport` | | TTS toggles |
-| `anthropicApiKey` | | Stored from Settings; used client-side as the "grammar quizzes enabled" gate (`QuizzesPage.handleGrammarStart` returns early without it). The serverless functions authenticate with their own `ANTHROPIC_API_KEY` environment variable — this field's value is not what the server uses |
+| `anthropicApiKey` | | Legacy and unused. Older versions stored a key here from a Settings field that only unlocked the grammar-quiz button; the field is gone and nothing reads this value. Accounts that set it may still have it |
 | `customApptTypes` | | Extra appointment types; readers accept array or keyed-object-of-arrays |
 | `exchangeRates`, `ratesUpdated` | | `{ USD, EUR, ... }` as KRW-per-unit numbers; `ratesUpdated` is a `'YYYY-MM-DD'` stamp |
 | `adriftDays` | | Unscheduled-task aging threshold |

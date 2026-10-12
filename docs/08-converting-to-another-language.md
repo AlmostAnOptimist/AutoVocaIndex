@@ -20,7 +20,7 @@ Every coupling site of the first kind is tagged with a `[LANG-SPECIFIC]` comment
 | 8 | `netlify/functions/generate-tts.cjs` | The `ko-KR` voice configuration |
 | 9 | `netlify/functions/get-definition.cjs` | The Korean-dictionary-assistant persona prompt |
 | 10 | `netlify/functions/get-krdict-api.cjs` | KRDict, the Korean dictionary provider |
-| 11 | `netlify/functions/grammar-quiz.js` — `buildPrompt` | The four grammar-quiz prompt templates |
+| 11 | `netlify/functions/grammar-quiz.js` — `buildRequest` | The five grammar-quiz prompt templates (and the `SYSTEM` line) |
 
 One related surface carries no marker but belongs to the same job: the Hangul character-class regexes used for script detection, covered below.
 
@@ -76,7 +76,7 @@ Several sites test "is this token in the target language" with a Hangul characte
 
 ## Grammar quizzes and the Grammar Index
 
-The Grammar Index itself is language-agnostic — free-text pattern names, explanations, examples — and needs no conversion beyond your own content. The **grammar-quiz prompt templates** are not: all five — `selection`, `drill`, `broad`, `assess` (the grader for translation answers), and `explain` (the mistake-explainer for selection results) — live server-side in `netlify/functions/grammar-quiz.js` under marker 11, and each explicitly frames translation into Korean and assessment of Korean output. (In the quiz config UI these surface as two modes, Translation — with drill and broad sub-modes, graded through `assess` — and Selection.) Rewrite them there, alongside the definition persona (they're the same kind of change) — the client only sends structured quiz config, so nothing client-side needs to change for the prompts themselves. Do check the quiz-config copy in `QuizzesPage.jsx` that says "Korean" in a few labels. The pipe-separated `compareTo` convention exists because commas occur inside Korean grammar titles — check whether your language has the same collision before simplifying it.
+The Grammar Index itself is language-agnostic — free-text pattern names, explanations, examples — and needs no conversion beyond your own content. The **grammar-quiz prompt templates** are not: all five — `selection`, `drill`, `broad`, `assess` (the grader for translation answers), and `explain` (the mistake-explainer for selection results) — live server-side in `netlify/functions/grammar-quiz.js` under marker 11 (in `buildRequest`, next to the JSON response schemas), and each explicitly frames translation into Korean and assessment of Korean output; so does the short `SYSTEM` line at the top of that file. The schemas themselves are language-neutral and need no change. (In the quiz config UI these surface as two modes, Translation — with drill and broad sub-modes, graded through `assess` — and Selection.) Rewrite them there, alongside the definition persona (they're the same kind of change) — the client only sends structured quiz config, so nothing client-side needs to change for the prompts themselves. Do check the quiz-config copy in `QuizzesPage.jsx` that says "Korean" in a few labels. The pipe-separated `compareTo` convention exists because commas occur inside Korean grammar titles — check whether your language has the same collision before simplifying it.
 
 ## The lemma map seed
 

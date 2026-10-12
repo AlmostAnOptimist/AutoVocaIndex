@@ -35,6 +35,7 @@ In the site's configuration (Site configuration → Environment variables), add:
 | Variable | Value |
 |---|---|
 | The six `VITE_FIREBASE_*` | Same values as your local `.env` |
+| `ALLOWED_UIDS` | **Required** — your User UID, same value as your local `.env` (setup step 5) |
 | `KRDICT_API_KEY` | If you set it up |
 | `ANTHROPIC_API_KEY` | If you set it up |
 | The five `GCP_*` | If you set up TTS (same one-line `private_key` rule) |
@@ -43,7 +44,9 @@ The demo variables from `.env.example` are not needed — leave them out entirel
 
 Here is why this comes before deploying: Vite **inlines** every `VITE_*` value into the JavaScript bundle *at build time*. A build that runs before the variables exist produces a bundle with an undefined Firebase config — and it deploys green. The site goes live, loads, and fails at boot with no useful error. If that's already happened to you, the fix is simply: add the variables, then **Deploys → Trigger deploy** to rebuild. The same rule applies forever after — changing a `VITE_*` variable never affects the live site until the next build.
 
-The function-only keys (`KRDICT_API_KEY`, `ANTHROPIC_API_KEY`, `GCP_*`) are read at request time rather than baked into the bundle, and they stay server-side — this is the whole reason the serverless functions exist. Netlify's secrets scanner would normally flag the `VITE_FIREBASE_*` values appearing in the built bundle; the shipped `netlify.toml` already lists them in `SECRETS_SCAN_OMIT_KEYS` because Firebase web config is public by design.
+`ALLOWED_UIDS` is the allowlist every function checks before doing anything; without it, every dictionary, AI and TTS call on the live site is refused with a 403. The functions also read `VITE_FIREBASE_PROJECT_ID` to verify sign-in tokens, so leave that variable available to functions (Netlify's default scope covers both builds and functions).
+
+The function-only keys (`ALLOWED_UIDS`, `KRDICT_API_KEY`, `ANTHROPIC_API_KEY`, `GCP_*`) are read at request time rather than baked into the bundle, and they stay server-side — this is the whole reason the serverless functions exist. Netlify's secrets scanner would normally flag the `VITE_FIREBASE_*` values appearing in the built bundle; the shipped `netlify.toml` already lists them in `SECRETS_SCAN_OMIT_KEYS` because Firebase web config is public by design.
 
 Now deploy (**Deploys → Trigger deploy**, or just push a commit).
 
@@ -59,7 +62,7 @@ Open the live site and walk the same smoke test as setup, because production has
 
 1. **Sign in** with Google (proves the config baked into the bundle and the authorized domain).
 2. **Add a task and reload** (proves a database read and write through the deployed rules).
-3. **Fetch a definition** (proves the functions deployed and can see their env vars — function variables live on Netlify now, not in your `.env`).
+3. **Fetch a definition** (proves the functions deployed and can see their env vars — function variables live on Netlify now, not in your `.env`). If it comes back "Definition not found.", open the site's function logs (Logs → Functions → `get-krdict-api`): a line saying `ALLOWED_UIDS is not set` or `uid not on ALLOWED_UIDS` means the allowlist variable is missing or has the wrong uid — fix it and trigger a deploy.
 
 If all three pass, the deployment is done.
 

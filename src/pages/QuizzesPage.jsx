@@ -9,13 +9,18 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH, frameBevel } from '../theme/buildStyles.js';
 import { playSound, playQuizCompleteSound } from '../utils/soundEngine.js';
 import { createCorrectionNote } from '../utils/createCorrectionNote.js';
+import { callGrammarQuizAPI, callGrammarQuizChunks, describeGrammarQuizError } from '../utils/grammarQuizUtils.js';
 import {
-  buildGrammarDrillPayload,
-  buildGrammarAssessmentPayload,
-  callGrammarQuizAPI,
-  parseDrillQuestions,
-  parseGrammarAssessment,
-} from '../utils/grammarQuizUtils.js';
+  buildGenerationRequest, validateGeneratedQuestions,
+  planGenerationChunks, mergeGeneratedChunks,
+  buildAssessmentRequest, planAssessmentChunks, mergeAssessmentChunks,
+  buildExplainRequest, alignExplanations,
+  buildSessionSnapshot, parseSessionSnapshot, snapshotProgress,
+  scoreTranslationQuiz, formatPoints,
+  scoreSelectionQuiz, buildSelectionCorrectionRows, grammarResultMode,
+  toSavedSelections, readSavedSelections,
+  summarizeQuizConcepts, cardIdsForConcepts,
+} from '../utils/grammarQuizEngine.js';
 import {
   computeVocaBaseCredit, computeClozeCredit, applyHintPenalty,
   getVocaHints, isTwoSynonymFront, normalizeFrontForMatching,
@@ -28,6 +33,7 @@ import { PaginationFooter } from '../components/PaginationFooter.jsx';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
 import { DEMO, DEMO_LIMIT_NOTE, demoCapReached } from '../demo/demoConfig.js';
 import { usePaginationKeys } from '../hooks/usePaginationKeys.js';
+import { GRAMMAR_MASTERY } from '../constants.js';
 import {
   GazetteMasthead, GoldRule, BylineRule, GazetteKicker, GazetteHeadline,
   GazetteStandfirst, DropCapLead, GazetteFig, GazetteBox, BoxRow, GazetteSplitFig,
@@ -220,7 +226,7 @@ function computeTotal(types, typeCounts) {
   return total;
 }
 
-function VocaQuizConfig({ open, decks, onStart, onBack, apiKey, C, S }) {
+function VocaQuizConfig({ open, decks, onStart, onBack, C, S }) {
   const [config, setConfig] = useState(() => loadConfig(VOCA_CONFIG_KEY, VOCA_DEFAULTS));
 
   const set = (key, val) => setConfig(prev => {
@@ -638,14 +644,14 @@ function CrowLoader({ size = 100 }) {
 }
 
 // Loading screen: bobbing crow + static label
-function HardModeLoading({ C }) {
+function HardModeLoading({ C, label = 'Preparing quiz…' }) {
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', alignItems: 'center',
       justifyContent: 'center', minHeight: '320px', gap: '20px',
     }}>
       <CrowLoader />
-      <div style={{ fontSize: '13px', color: C.textM }}>Preparing quiz…</div>
+      <div style={{ fontSize: '13px', color: C.textM }}>{label}</div>
     </div>
   );
 }
@@ -1856,9 +1862,6 @@ const handleOverride = async (qIdx) => {
 }
 
 // ─────────────────────────────────────────────────────────────
-// GRAMMAR QUIZ STUB
-// ─────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────
 // GRAMMAR QUIZ
 // ─────────────────────────────────────────────────────────────
 
@@ -1871,7 +1874,8 @@ const GRAMMAR_DEFAULTS = {
 };
 
 // ── Concept picker: searchable list with level filter ────────
-function ConceptPicker({ corpus, selectedIds, onChange, required, C, S }) {
+// single (G3): pick exactly one concept (Drill) — a tap replaces the choice.
+function ConceptPicker({ corpus, selectedIds, onChange, required, single = false, C, S }) {
   const [search,      setSearch]      = useState('');
   const [levelFilter, setLevelFilter] = useState('all');
 
@@ -1889,7 +1893,7 @@ function ConceptPicker({ corpus, selectedIds, onChange, required, C, S }) {
   const toggle = (id) => {
     onChange(selectedIds.includes(id)
       ? selectedIds.filter(x => x !== id)
-      : [...selectedIds, id]);
+      : single ? [id] : [...selectedIds, id]);
   };
 
   return (
@@ -1985,7 +1989,7 @@ function ConceptPicker({ corpus, selectedIds, onChange, required, C, S }) {
 }
 
 // ── Grammar Quiz Config ───────────────────────────────────────
-function GrammarQuizConfig({ open, onBack, onStart, corpus, apiKey, C, S }) {
+function GrammarQuizConfig({ open, onBack, onStart, corpus, C, S }) {
   const [config, setConfig] = useState(() => loadConfig(GRAMMAR_CONFIG_KEY, GRAMMAR_DEFAULTS));
   const set = (key, val) => setConfig(prev => {
     const next = { ...prev, [key]: val };
@@ -1996,11 +2000,10 @@ function GrammarQuizConfig({ open, onBack, onStart, corpus, apiKey, C, S }) {
   const isDrill       = config.transMode === 'drill';
   const isSelection   = config.mode === 'selection';
   const isTranslation = config.mode === 'translation';
-  const hasKey        = !!apiKey;
 
   // Drill requires at least 1 concept; Selection requires at least 2
   const minSelected = isSelection ? 2 : 1;
-  const canStart = hasKey && corpus.length > 0 &&
+  const canStart = corpus.length > 0 &&
     (!isDrill || config.selectedIds.length >= 1) &&
     (!isSelection || config.selectedIds.length >= 2);
 
@@ -2044,7 +2047,7 @@ function GrammarQuizConfig({ open, onBack, onStart, corpus, apiKey, C, S }) {
                : 'Focus concepts (optional — leave empty for free selection)'}
             </div>
             {corpus.length > 0
-              ? <ConceptPicker corpus={corpus} selectedIds={config.selectedIds} onChange={v => set('selectedIds', v)} C={C} S={S} />
+              ? <ConceptPicker corpus={corpus} selectedIds={config.selectedIds} onChange={v => set('selectedIds', v)} single={isDrill} C={C} S={S} />
               : <div style={{ fontSize: '12px', color: C.textM }}>Loading grammar index…</div>
             }
           </div>
@@ -2064,17 +2067,7 @@ function GrammarQuizConfig({ open, onBack, onStart, corpus, apiKey, C, S }) {
           )}
         </div>
 
-        {!hasKey && (
-          <div style={{
-            fontSize: '12px', color: C.danger,
-            background: `${C.danger}10`, border: `1px solid ${C.danger}30`,
-            borderRadius: '8px', padding: '10px 14px', marginBottom: '16px', lineHeight: 1.5,
-          }}>
-            An API key is required for grammar quizzes. Add one in Settings.
-          </div>
-        )}
-
-        {hasKey && isSelection && config.selectedIds.length < 2 && config.selectedIds.length > 0 && (
+        {isSelection && config.selectedIds.length < 2 && config.selectedIds.length > 0 && (
           <div style={{
             fontSize: '12px', color: C.textM,
             background: `${C.accent}0e`, border: `1px solid ${C.accent}30`,
@@ -2097,19 +2090,98 @@ function GrammarQuizConfig({ open, onBack, onStart, corpus, apiKey, C, S }) {
   );
 }
 
+// ── Grammar notice banner (G2) ────────────────────────────────
+// A short notice with up to two actions: failed requests (tone 'error') and
+// the device-only resume offer (tone 'info').
+function GrammarNotice({ tone = 'info', title, text, actions = [], C, S }) {
+  const color = tone === 'error' ? C.danger : C.accent;
+  return (
+    <div role={tone === 'error' ? 'alert' : 'status'} style={{
+      display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap',
+      background: `${color}10`, border: `1px solid ${color}30`, borderRadius: '10px',
+      padding: '12px 16px', marginBottom: '20px',
+    }}>
+      <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+        {title && <div style={{ fontSize: '13px', color: C.text, fontWeight: 600, marginBottom: text ? '2px' : 0 }}>{title}</div>}
+        {text && <div style={{ fontSize: '12px', color: C.textS, lineHeight: 1.5 }}>{text}</div>}
+      </div>
+      {actions.length > 0 && (
+        <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+          {actions.map(a => (
+            <button
+              key={a.label}
+              onClick={a.onClick}
+              style={{ ...(a.primary ? S.btnPrimary : S.btnGhost), padding: '7px 14px', fontSize: '12px' }}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Grammar session header (G2) ───────────────────────────────
+// Progress bar, counter and End. End asks first; ending discards the session,
+// including its device-only resume snapshot.
+function GrammarSessionHeader({ idx, total, isLast, onEnd, C, S }) {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <div style={{ marginBottom: '20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ flex: 1, height: '4px', background: `${C.accent}22`, borderRadius: '2px' }}>
+          <div style={{ height: '100%', width: `${((isLast ? total : idx) / total) * 100}%`, background: C.accent, borderRadius: '2px', transition: 'width 0.3s' }} />
+        </div>
+        <span style={{ fontFamily: SH.fm, fontSize: '11px', color: C.textM }}>{idx + 1} / {total}</span>
+        {onEnd && !confirming && (
+          <button
+            onClick={() => setConfirming(true)}
+            style={{ fontSize: '11px', color: C.textM, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+          >
+            End
+          </button>
+        )}
+      </div>
+      {confirming && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '12px',
+          padding: '10px 14px', borderRadius: '10px', background: `${C.danger}10`, border: `1px solid ${C.danger}30`,
+        }}>
+          <span style={{ flex: '1 1 200px', fontSize: '12px', color: C.textS, lineHeight: 1.5 }}>
+            End this quiz? Your answers so far won't be assessed or kept.
+          </span>
+          <button onClick={() => setConfirming(false)} style={{ ...S.btnGhost, padding: '6px 12px', fontSize: '12px' }}>Keep going</button>
+          <button onClick={onEnd} style={{ ...S.btnPrimary, padding: '6px 12px', fontSize: '12px' }}>End quiz</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Grammar Translation Session ───────────────────────────────
-function GrammarTranslationSession({ questions, config, onFinish, C, S }) {
-  const [idx,         setIdx]         = useState(0);
-  const [translations, setTranslations] = useState(() => questions.map(() => ''));
-  const [submitted,   setSubmitted]   = useState(false);
-  const [selectedId,  setSelectedId]  = useState(null); // chosen concept in Broad mode
+// initial: optional resume state { idx, translations, conceptChoices } (G2).
+// onProgress fires on every change so QuizzesPage can keep the device-only
+// snapshot current; onEnd discards the session.
+function GrammarTranslationSession({ questions, config, initial, onProgress, onEnd, onFinish, C, S }) {
+  const [idx,            setIdx]            = useState(() => initial?.idx || 0);
+  const [translations,   setTranslations]   = useState(() => initial?.translations || questions.map(() => ''));
+  // Chosen concept per question (Broad mode only)
+  const [conceptChoices, setConceptChoices] = useState(() => initial?.conceptChoices || questions.map(() => null));
+  const [submitted,      setSubmitted]      = useState(false);
+  const submittedRef = useRef(false); // double-submit guard (same race as the old VocaQuizSession double finish)
 
-  // Per-question concept selection tracking (Broad mode only)
-  const [conceptChoices, setConceptChoices] = useState(() => questions.map(() => null));
+  const q          = questions[idx];
+  const isBroad    = config?.transMode === 'broad';
+  const isLast     = idx === questions.length - 1;
+  const selectedId = conceptChoices[idx] || null;
 
-  const q = questions[idx];
-  const isBroad = config.transMode === 'broad';
-  const isLast  = idx === questions.length - 1;
+  // Keep the resume snapshot current. Only this session's own state matters
+  // here; onProgress is read fresh from props each time.
+  useEffect(() => {
+    onProgress?.({ idx, translations, conceptChoices });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, translations, conceptChoices]);
 
   const updateTranslation = (val) => {
     setTranslations(prev => prev.map((t, i) => i === idx ? val : t));
@@ -2117,35 +2189,20 @@ function GrammarTranslationSession({ questions, config, onFinish, C, S }) {
 
   const updateConcept = (id) => {
     setConceptChoices(prev => prev.map((c, i) => i === idx ? id : c));
-    setSelectedId(id);
-  };
-
-  const handleNext = () => {
-    setSelectedId(conceptChoices[idx + 1] || null);
-    setIdx(prev => prev + 1);
   };
 
   const handleSubmit = () => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
     setSubmitted(true);
     onFinish({ translations, conceptChoices });
   };
-
-  // Restore selected concept when navigating back/forward
-  useEffect(() => {
-    setSelectedId(conceptChoices[idx] || null);
-  }, [idx]);
 
   if (!q) return null;
 
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto' }} className="fade-up quiz-session">
-      {/* Progress */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
-        <div style={{ flex: 1, height: '4px', background: `${C.accent}22`, borderRadius: '2px' }}>
-          <div style={{ height: '100%', width: `${((isLast ? questions.length : idx) / questions.length) * 100}%`, background: C.accent, borderRadius: '2px', transition: 'width 0.3s' }} />
-        </div>
-        <span style={{ fontFamily: SH.fm, fontSize: '11px', color: C.textM }}>{idx + 1} / {questions.length}</span>
-      </div>
+      <GrammarSessionHeader idx={idx} total={questions.length} isLast={isLast} onEnd={onEnd} C={C} S={S} />
 
       {/* English sentence + context */}
       <div style={{
@@ -2202,7 +2259,7 @@ function GrammarTranslationSession({ questions, config, onFinish, C, S }) {
           placeholder="한국어로 번역하세요…"
           rows={3}
           style={{
-                      width: '100%', padding: '12px 14px', borderRadius: '10px', fontSize: isMobile ? '16px' : '14px',
+            width: '100%', padding: '12px 14px', borderRadius: '10px', fontSize: isMobile ? '16px' : '14px',
             border: `1.5px solid ${C.border}`, background: C.bg, color: C.text,
             fontFamily: SH.fk, resize: 'vertical', outline: 'none', boxSizing: 'border-box',
             lineHeight: 1.6,
@@ -2213,7 +2270,7 @@ function GrammarTranslationSession({ questions, config, onFinish, C, S }) {
       {/* Navigation */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <button
-          onClick={() => { setIdx(prev => prev - 1); setSelectedId(conceptChoices[idx - 1] || null); }}
+          onClick={() => setIdx(prev => Math.max(0, prev - 1))}
           disabled={idx === 0}
           style={{
             fontSize: '12px', color: idx === 0 ? C.textM : C.accent, background: 'none', border: 'none',
@@ -2232,13 +2289,70 @@ function GrammarTranslationSession({ questions, config, onFinish, C, S }) {
             Submit for assessment
           </button>
         ) : (
-          <button onClick={() => { quizSound('mouse_click'); handleNext(); }} style={{ ...S.btnPrimary, padding: '10px 24px' }}>
+          <button onClick={() => { quizSound('mouse_click'); setIdx(prev => prev + 1); }} style={{ ...S.btnPrimary, padding: '10px 24px' }}>
             Next
           </button>
         )}
       </div>
     </div>
   );
+}
+
+// ── Concepts in this quiz (G5) ────────────────────────────────
+// Each tested concept with its current Grammar Index mastery, a link to its
+// entry (mastery is changed there — never from the quiz, G-D6) and to its
+// Grammar Deck card, plus one "Practice missed concepts" session (G-D15).
+// links: { cards, masteryOf(id), onOpenEntry(id), onPracticeCards(cardIds) }
+// from QuizzesPage; the buttons hide when a callback isn't wired.
+function GrammarConceptLinks({ kind, questions, score, links, C, S }) {
+  const concepts = useMemo(() => summarizeQuizConcepts(kind, questions, score), [kind, questions, score]);
+  if (!links || !concepts.length) return null;
+  const missedCards = cardIdsForConcepts(concepts.filter(c => c.missed).map(c => c.id), links.cards).cardIds;
+  const label = { fontSize: '10px', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.textM };
+  const small = { padding: '5px 10px', fontSize: '11.5px' };
+  return (
+    <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '14px', padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+        <span style={label}>Concepts in this quiz</span>
+        {links.onPracticeCards && missedCards.length > 0 && (
+          <button style={{ ...S.btnPrimary, ...small }} onClick={() => links.onPracticeCards(missedCards)}>
+            Practice missed concepts ({missedCards.length})
+          </button>
+        )}
+      </div>
+      {concepts.map(c => {
+        const m = GRAMMAR_MASTERY[links.masteryOf?.(c.id)] || GRAMMAR_MASTERY.introduced;
+        const cardId = cardIdsForConcepts([c.id], links.cards).cardIds[0];
+        return (
+          <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '8px 10px', flexWrap: 'wrap', paddingTop: '8px', borderTop: `1px solid ${C.border}` }}>
+            <span style={{ fontFamily: SH.fk, fontSize: '13.5px', color: C.text, flex: '1 1 140px', minWidth: 0 }}>{c.term}</span>
+            <span style={{ fontSize: '11px', fontStyle: 'italic', color: c.missed ? C.danger : C.textM }}>{c.missed ? 'Missed' : 'All correct'}</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: C.textS }}>
+              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: m.color, border: `1px solid ${C.border}` }} />
+              {m.label}
+            </span>
+            {links.onOpenEntry && (
+              <button style={{ ...S.btnGhost, ...small }} onClick={() => links.onOpenEntry(c.id)}>Grammar Index</button>
+            )}
+            {links.onPracticeCards && (cardId
+              ? <button style={{ ...S.btnGhost, ...small }} onClick={() => links.onPracticeCards([cardId])}>Card</button>
+              : <span style={{ fontSize: '11px', color: C.textM }}>No card</span>)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// The same concept links inside a Report Card quiz record (G5), so they can
+// still be reached after leaving the results screen.
+function GrammarDetailConcepts({ detail, links, C, S }) {
+  const kind = detail?.mode === 'selection' ? 'selection' : 'translation';
+  const score = useMemo(() => {
+    if (kind === 'selection') return scoreSelectionQuiz(detail.questions, readSavedSelections(detail.selections));
+    return detail?.assessment ? scoreTranslationQuiz(detail.questions, detail.assessment, detail.conceptChoices) : null;
+  }, [detail, kind]);
+  return <GrammarConceptLinks kind={kind} questions={detail.questions} score={score} links={links} C={C} S={S} />;
 }
 
 // ── Grammar Translation Results ───────────────────────────────
@@ -2248,47 +2362,105 @@ const VERDICT_STYLE = {
   'X': { symbol: 'X', color: '#a03030' },
 };
 
-function GrammarTranslationResults({ questions, translations, assessment, onDone, C, S }) {
-  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
-  const pct = assessment
-    ? Math.round((assessment.filter(a => a.verdict === 'O').length / assessment.length) * 100)
-    : 0;
+// The concept line on a translation question (G3). Drill: the target concept.
+// Broad: the answer, plus what the learner picked when it was wrong or missing.
+// Shared by the results screen and the Report Card detail. chosenId is null
+// for "no pick" and undefined for "no record" (quizzes saved before G3).
+function GrammarConceptPick({ q, chosenId, C }) {
+  const answer = q?.correctConcept?.term || '—';
+  const label = { fontSize: '10px', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.textM };
+  const chip = (text, color, bg) => (
+    <span style={{ fontSize: '12px', color, fontFamily: SH.fk, background: bg, borderRadius: '6px', padding: '4px 10px' }}>{text}</span>
+  );
+  if (!Array.isArray(q?.choices) || !q.choices.length || chosenId === undefined) {
+    return <div style={{ alignSelf: 'flex-start' }}>{chip(answer, C.accent, C.accentSoft)}</div>;
+  }
+  const chosen = q.choices.find(c => c && c.id === chosenId) || null;
+  if (chosen && chosen.id === q.correctConceptId) {
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 10px' }}>
+        {chip(answer, C.accent, C.accentSoft)}
+        <span style={label}>Your pick · correct</span>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 10px' }}>
+      <span style={label}>Answer</span>
+      {chip(answer, C.accent, C.accentSoft)}
+      {chosen
+        ? <><span style={label}>You chose</span>{chip(chosen.term, C.danger, `${C.danger}12`)}</>
+        : <span style={label}>No concept chosen</span>}
+    </div>
+  );
+}
+
+// assessErrorCode: set when the assessment failed or never ran (G2); the
+// screen then offers Retry / Assess now instead of a score.
+// Scoring (G3): Drill = translation credit (O 1, △ 0.5, X 0); Broad = 0.5 for
+// the concept pick + 0.5 × translation credit. See scoreTranslationQuiz.
+function GrammarTranslationResults({ questions, translations, conceptChoices, assessment, assessErrorCode, onRetryAssess, links, onDone, C, S }) {
+  // Enter = Back to Quizzes, except while a Retry button is showing (G2), so
+  // pressing Enter on Retry doesn't also leave the screen.
+  useGlobalKey(e => { if (e.key === 'Enter') onDone(); }, { enabled: !!assessment });
+  const score = useMemo(
+    () => scoreTranslationQuiz(questions, assessment, conceptChoices),
+    [questions, assessment, conceptChoices]
+  );
 
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }} className="fade-up quiz-session">
       <div style={{ textAlign: 'center' }}>
-        <div style={{ fontFamily: SH.fm, fontSize: '38px', color: C.accent }}>{pct}%</div>
+        <div style={{ fontFamily: SH.fm, fontSize: '38px', color: C.accent }}>{assessment ? `${score.pct}%` : '—'}</div>
         <div style={{ fontSize: '12px', color: C.textM, marginTop: '4px' }}>
-          {assessment?.filter(a => a.verdict === 'O').length} / {assessment?.length} fully correct
+          {assessment
+            ? `${formatPoints(score.points)} / ${score.total} points · ${score.fullyCorrect} fully correct`
+            : 'Not assessed yet'}
         </div>
       </div>
 
+      {!assessment && assessErrorCode && onRetryAssess && (
+        <GrammarNotice
+          tone="error"
+          title={assessErrorCode === 'interrupted' ? 'Not assessed yet' : 'Assessment failed'}
+          text={assessErrorCode === 'interrupted'
+            ? 'This quiz was submitted but never assessed. Your translations are below.'
+            : `${describeGrammarQuizError(assessErrorCode)} Your translations are kept.`}
+          actions={[{ label: assessErrorCode === 'interrupted' ? 'Assess now' : 'Retry assessment', primary: true, onClick: onRetryAssess }]}
+          C={C} S={S}
+        />
+      )}
+
+      {/* Concept links (G5) — once there's a score to base "missed" on */}
+      {assessment && <GrammarConceptLinks kind="translation" questions={questions} score={score} links={links} C={C} S={S} />}
+
       {questions.map((q, i) => {
-        const a = assessment?.[i];
+        const a  = assessment?.[i];
         const vs = a ? VERDICT_STYLE[a.verdict] || VERDICT_STYLE['X'] : null;
+        const p  = score.perQuestion[i];
         return (
           <div key={i} style={{
             background: C.raised, border: `1px solid ${C.border}`, borderRadius: '14px',
             padding: '20px 22px', display: 'flex', flexDirection: 'column', gap: '12px',
           }}>
-            {/* Header: verdict + correct concept */}
+            {/* Header: sentence + verdict and points */}
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '15px', color: C.text, lineHeight: 1.5, marginBottom: '4px' }}>{q.english}</div>
                 {q.context && <div style={{ fontSize: '11px', color: C.textM, fontStyle: 'italic' }}>{q.context}</div>}
               </div>
-              {vs && (
-                <div style={{ fontFamily: SH.fm, fontSize: '28px', color: vs.color, flexShrink: 0, lineHeight: 1 }}>{vs.symbol}</div>
+              {(vs || (assessment && p)) && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', flexShrink: 0 }}>
+                  {vs && <div style={{ fontFamily: SH.fm, fontSize: '28px', color: vs.color, lineHeight: 1 }}>{vs.symbol}</div>}
+                  {assessment && p && (
+                    <div style={{ fontFamily: SH.fm, fontSize: '11px', color: C.textM }}>{formatPoints(p.points)} / 1</div>
+                  )}
+                </div>
               )}
             </div>
 
-            {/* Correct grammar concept revealed */}
-            <div style={{
-              fontSize: '12px', color: C.accent, fontFamily: SH.fk,
-              background: C.accentSoft, borderRadius: '6px', padding: '5px 10px', alignSelf: 'flex-start',
-            }}>
-              {q.correctConcept?.term || '—'}
-            </div>
+            {/* Concept: target (Drill) or answer vs. pick (Broad) */}
+            <GrammarConceptPick q={q} chosenId={conceptChoices?.[i]} C={C} />
 
             {/* Your translation */}
             <div>
@@ -2339,44 +2511,42 @@ function GrammarTranslationResults({ questions, translations, assessment, onDone
 }
 
 // ── Grammar Selection Session ─────────────────────────────────
-function GrammarSelectionSession({ questions, onFinish, C, S }) {
-  const [idx,         setIdx]         = useState(0);
-  const [selections,  setSelections]  = useState(() => questions.map(() => new Set()));
-  const [submitted,   setSubmitted]   = useState(false);
+// initial: optional resume state { idx, selections } (G2). Selections are
+// kept as arrays of sentence indexes so they can be saved as they are.
+function GrammarSelectionSession({ questions, initial, onProgress, onEnd, onFinish, C, S }) {
+  const [idx,        setIdx]        = useState(() => initial?.idx || 0);
+  const [selections, setSelections] = useState(() => initial?.selections || questions.map(() => []));
+  const [submitted,  setSubmitted]  = useState(false);
+  const submittedRef = useRef(false); // double-submit guard
 
   const q = questions[idx];
   const isLast = idx === questions.length - 1;
 
+  useEffect(() => {
+    onProgress?.({ idx, selections });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, selections]);
+
   const toggleSentence = (sentIdx) => {
-    if (submitted) return;
-    setSelections(prev => {
-      const next = prev.map((s, i) => {
-        if (i !== idx) return s;
-        const ns = new Set(s);
-        ns.has(sentIdx) ? ns.delete(sentIdx) : ns.add(sentIdx);
-        return ns;
-      });
-      return next;
-    });
+    if (submittedRef.current) return;
+    setSelections(prev => prev.map((s, i) => {
+      if (i !== idx) return s;
+      return s.includes(sentIdx) ? s.filter(x => x !== sentIdx) : [...s, sentIdx];
+    }));
   };
 
   const handleSubmit = () => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
     setSubmitted(true);
-    // Convert Sets to arrays for serialization
-    onFinish(selections.map(s => Array.from(s)));
+    onFinish(selections.map(s => [...s]));
   };
 
   if (!q) return null;
 
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto' }} className="fade-up quiz-session">
-      {/* Progress */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
-        <div style={{ flex: 1, height: '4px', background: `${C.accent}22`, borderRadius: '2px' }}>
-          <div style={{ height: '100%', width: `${((isLast ? questions.length : idx) / questions.length) * 100}%`, background: C.accent, borderRadius: '2px', transition: 'width 0.3s' }} />
-        </div>
-        <span style={{ fontFamily: SH.fm, fontSize: '11px', color: C.textM }}>{idx + 1} / {questions.length}</span>
-      </div>
+      <GrammarSessionHeader idx={idx} total={questions.length} isLast={isLast} onEnd={onEnd} C={C} S={S} />
 
       <div style={{ fontSize: '11px', color: C.textM, marginBottom: '14px', lineHeight: 1.5 }}>
         Select all grammatically and contextually correct sentences.
@@ -2384,7 +2554,7 @@ function GrammarSelectionSession({ questions, onFinish, C, S }) {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px' }}>
         {q.sentences.map((sent, si) => {
-          const isSelected = selections[idx].has(si);
+          const isSelected = selections[idx].includes(si);
           return (
             <button
               key={si}
@@ -2405,7 +2575,7 @@ function GrammarSelectionSession({ questions, onFinish, C, S }) {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <button
-          onClick={() => setIdx(prev => prev - 1)}
+          onClick={() => setIdx(prev => Math.max(0, prev - 1))}
           disabled={idx === 0}
           style={{
             fontSize: '12px', color: idx === 0 ? C.textM : C.accent,
@@ -2435,7 +2605,71 @@ function GrammarSelectionSession({ questions, onFinish, C, S }) {
 }
 
 // ── Grammar Selection Results ─────────────────────────────────
-function GrammarSelectionResults({ questions, userSelections, onDone, C, S }) {
+// Review list for a Selection quiz (G4): per question, whether it was fully
+// right, then each sentence with the concept it tested, what the learner did,
+// and — for incorrect sentences — the corrected form and why. Shared by the
+// results screen and the Report Card detail.
+function GrammarSelectionReview({ questions, selections, explanations = {}, C }) {
+  const score = useMemo(() => scoreSelectionQuiz(questions, selections), [questions, selections]);
+  const label = { fontSize: '10px', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.textM };
+  return (questions || []).map((q, qi) => {
+    const pq = score.perQuestion[qi];
+    return (
+      <div key={qi} style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '14px', padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={label}>Question {qi + 1}</span>
+          <span style={{ fontSize: '11px', fontWeight: 600, color: pq?.correct ? C.accent : C.danger }}>
+            {pq?.correct ? 'All right' : 'Not quite'}
+          </span>
+        </div>
+        {(q.sentences || []).map((s, si) => {
+          const st = pq?.sentences[si] || { selected: false, isRight: !s.correct };
+          let borderColor = C.border, bgColor = 'transparent', textColor = C.textM;
+          if (s.correct && st.selected)        { borderColor = C.warning; bgColor = `${C.warning}18`; textColor = C.warning; }
+          else if (s.correct && !st.selected)  { borderColor = C.danger;  bgColor = `${C.danger}12`;  textColor = C.danger;  }
+          else if (!s.correct && st.selected)  { borderColor = C.danger;  bgColor = `${C.danger}12`;  textColor = C.danger;  }
+          const note = s.correct
+            ? (st.selected ? 'Correct — you selected it' : 'Correct — you missed it')
+            : (st.selected ? 'Incorrect — you selected it' : 'Incorrect — you left it out');
+          const exp = explanations[`${qi}-${si}`];
+          return (
+            <div key={si} style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <div style={{
+                padding: '11px 16px', borderRadius: '10px', fontSize: '14px',
+                border: `1.5px solid ${borderColor}`, background: bgColor,
+                color: textColor, fontFamily: SH.fk, lineHeight: 1.6,
+              }}>
+                {s.text}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 10px', paddingLeft: '4px' }}>
+                {s.concept && (
+                  <span style={{ fontSize: '11px', color: C.accent, fontFamily: SH.fk, background: C.accentSoft, borderRadius: '6px', padding: '2px 8px' }}>{s.concept}</span>
+                )}
+                <span style={{ fontSize: '11px', fontStyle: 'italic', color: st.isRight ? C.textM : C.danger }}>{note}</span>
+              </div>
+              {!s.correct && (s.fix || s.reason) && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', paddingLeft: '4px' }}>
+                  {s.fix && (
+                    <div style={{ fontFamily: SH.fk, fontSize: '13px', color: C.text, lineHeight: 1.6, padding: '6px 10px', background: `${C.accent}0e`, borderRadius: '7px', borderLeft: `3px solid ${C.accent}` }}>
+                      {s.fix}
+                    </div>
+                  )}
+                  {s.reason && <div style={{ fontSize: '12px', color: C.textS, lineHeight: 1.5 }}>{s.reason}</div>}
+                </div>
+              )}
+              {exp && <div style={{ fontSize: '12.5px', color: C.textS, lineHeight: 1.6, paddingLeft: '4px' }}>{exp}</div>}
+            </div>
+          );
+        })}
+      </div>
+    );
+  });
+}
+
+// Scoring (G4): a question counts only when the selection matches the correct
+// sentences exactly. onExplanations(map) receives every explanation fetched so
+// far, keyed "question-sentence", so QuizzesPage can save them with the result.
+function GrammarSelectionResults({ questions, userSelections, onExplanations, links, onDone, C, S }) {
   const [showExplainModal, setShowExplainModal] = useState(false);
   const [toExplain,        setToExplain]        = useState(new Set()); // Set of "qi-si" keys
   const [explanations,     setExplanations]     = useState({});
@@ -2443,23 +2677,13 @@ function GrammarSelectionResults({ questions, userSelections, onDone, C, S }) {
   const [explainError,     setExplainError]     = useState(false);
   useGlobalKey(e => { if (e.key === 'Enter') onDone(); }, { enabled: !showExplainModal });
 
-  // Determine correct/incorrect per sentence per question
-  const results = questions.map((q, qi) => {
-    const userSet    = new Set(userSelections[qi] || []);
-    const correctSet = new Set(q.sentences.map((s, si) => s.correct ? si : null).filter(x => x !== null));
-    return q.sentences.map((s, si) => {
-      const userSelected   = userSet.has(si);
-      const shouldSelect   = s.correct;
-      const isRight = userSelected === shouldSelect;
-      return { si, text: s.text, concept: s.concept, correct: shouldSelect, userSelected, isRight };
-    });
-  });
+  const score = useMemo(() => scoreSelectionQuiz(questions, userSelections), [questions, userSelections]);
 
-  // Collect all mistakes for the explanation modal
-  const allMistakes = results.flatMap((qResults, qi) =>
-    qResults
-      .filter(r => !r.isRight)
-      .map(r => ({ key: `${qi}-${r.si}`, qi, si: r.si, text: r.text, concept: r.concept, correct: r.correct, userSelected: r.userSelected }))
+  // Every misjudged sentence, for the explanation modal
+  const allMistakes = questions.flatMap((q, qi) =>
+    (q.sentences || []).map((s, si) => ({ s, si, st: score.perQuestion[qi]?.sentences[si] }))
+      .filter(({ st }) => st && !st.isRight)
+      .map(({ s, si, st }) => ({ key: `${qi}-${si}`, qi, si, text: s.text, concept: s.concept, correct: s.correct, userSelected: st.selected }))
   );
 
   const toggleExplain = (key) => {
@@ -2482,15 +2706,15 @@ function GrammarSelectionResults({ questions, userSelections, onDone, C, S }) {
     setExplainError(false);
 
     try {
-      // Structured request — the server owns the explanation prompt template
-      // (mode 'explain'), same tier-1 pattern as the four quiz modes.
-      const parsed = await callGrammarQuizAPI({
-        mode:  'explain',
-        items: items.map(({ text, concept, errorType }) => ({ text, concept, errorType })),
-      });
-      const expMap = {};
-      items.forEach((m, i) => { expMap[m.key] = parsed.explanations?.[i] || ''; });
-      setExplanations(expMap);
+      // Structured request — the server owns the explanation prompt template.
+      // Explanations are matched by item number, never position (G1), and
+      // merged so an earlier round's explanations stay visible.
+      const parsed = await callGrammarQuizAPI(buildExplainRequest(items));
+      const texts  = alignExplanations(parsed, items.length);
+      const next   = { ...explanations };
+      items.forEach((m, i) => { if (texts[i]) next[m.key] = texts[i]; });
+      setExplanations(next);
+      onExplanations?.(next);
     } catch (e) {
       console.error('Selection explanation failed:', e);
       setExplainError(true);
@@ -2499,52 +2723,18 @@ function GrammarSelectionResults({ questions, userSelections, onDone, C, S }) {
     }
   };
 
-  const totalSentences = results.reduce((s, r) => s + r.length, 0);
-  const correctCount   = results.reduce((s, r) => s + r.filter(x => x.isRight).length, 0);
-  const pct            = Math.round((correctCount / totalSentences) * 100);
-
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }} className="fade-up quiz-session">
       <div style={{ textAlign: 'center' }}>
-        <div style={{ fontFamily: SH.fm, fontSize: '38px', color: C.accent }}>{pct}%</div>
+        <div style={{ fontFamily: SH.fm, fontSize: '38px', color: C.accent }}>{score.pct}%</div>
         <div style={{ fontSize: '12px', color: C.textM, marginTop: '4px' }}>
-          {correctCount} / {totalSentences} correct
+          {score.points} / {score.total} questions fully right
         </div>
       </div>
 
-      {/* Question results */}
-      {results.map((qResults, qi) => (
-        <div key={qi} style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '14px', padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          {qResults.map(r => {
-            let borderColor = C.border, bgColor = 'transparent', textColor = C.text;
-            if (r.correct && r.userSelected)  { borderColor = C.warning; bgColor = `${C.warning}18`; textColor = C.warning; }
-            else if (r.correct && !r.userSelected) { borderColor = C.danger;  bgColor = `${C.danger}12`;  textColor = C.danger;  }
-            else if (!r.correct && r.userSelected) { borderColor = C.danger;  bgColor = `${C.danger}12`;  textColor = C.danger;  }
-            else { textColor = C.textM; }
-            return (
-              <div key={r.si} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <div style={{
-                  padding: '11px 16px', borderRadius: '10px', fontSize: '14px',
-                  border: `1.5px solid ${borderColor}`, background: bgColor,
-                  color: textColor, fontFamily: SH.fk, lineHeight: 1.6,
-                }}>
-                  {r.text}
-                </div>
-                {r.correct && !r.userSelected && (
-                  <div style={{ fontSize: '11px', color: C.danger, paddingLeft: '4px', fontStyle: 'italic' }}>
-                    This sentence is acceptable — you did not select it.
-                  </div>
-                )}
-                {!r.correct && r.userSelected && (
-                  <div style={{ fontSize: '11px', color: C.danger, paddingLeft: '4px', fontStyle: 'italic' }}>
-                    This sentence is not correct for this grammar usage — it should not have been selected.
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      ))}
+      <GrammarConceptLinks kind="selection" questions={questions} score={score} links={links} C={C} S={S} />
+
+      <GrammarSelectionReview questions={questions} selections={userSelections} explanations={explanations} C={C} />
 
       {/* Explanation button */}
       {allMistakes.length > 0 && (
@@ -2677,26 +2867,28 @@ function buildQuizChartData(list) {
   const byDate = {};
   for (const r of list) {
     const key = r.date?.split('T')[0] || r.date;
-    if (!byDate[key]) byDate[key] = { voca: [], gram: [], cloze: [] };
+    if (!byDate[key]) byDate[key] = { voca: [], gram: [], gramSel: [], cloze: [] };
     if (r.type === 'voca')    byDate[key].voca.push(r.score);
-    if (r.type === 'grammar') byDate[key].gram.push(r.score);
+    // Grammar splits into Translation (gram) and Selection (gramSel) — G4
+    if (r.type === 'grammar') byDate[key][grammarResultMode(r) === 'selection' ? 'gramSel' : 'gram'].push(r.score);
     if (r.type === 'cloze')   byDate[key].cloze.push(r.score);
   }
  return Object.entries(byDate).sort(([a], [b]) => a.localeCompare(b)).map(([date, d]) => {
     const vocaScore  = d.voca.length  ? Math.round(d.voca.reduce((s, v)  => s + v, 0) / d.voca.length)  : null;
     const gramScore  = d.gram.length  ? Math.round(d.gram.reduce((s, v)  => s + v, 0) / d.gram.length)  : null;
+    const gramSelScore = d.gramSel.length ? Math.round(d.gramSel.reduce((s, v) => s + v, 0) / d.gramSel.length) : null;
     const clozeScore = d.cloze.length ? Math.round(d.cloze.reduce((s, v) => s + v, 0) / d.cloze.length) : null;
     // Combined cross-type trend — equal-weighted average of the three
     // per-type daily averages (a type with one result counts the same as a
     // type with ten); allCount below tracks raw volume instead, for the
     // combined line's variable thickness.
-    const typeAverages = [vocaScore, gramScore, clozeScore].filter(v => v !== null);
+    const typeAverages = [vocaScore, gramScore, gramSelScore, clozeScore].filter(v => v !== null);
     const allScore = typeAverages.length ? Math.round(typeAverages.reduce((s, v) => s + v, 0) / typeAverages.length) : null;
-    const allCount = d.voca.length + d.gram.length + d.cloze.length;
+    const allCount = d.voca.length + d.gram.length + d.gramSel.length + d.cloze.length;
     return {
       dateLabel: date.slice(5),
-      vocaScore, gramScore, clozeScore,
-      vocaAll: d.voca, gramAll: d.gram, clozeAll: d.cloze,
+      vocaScore, gramScore, gramSelScore, clozeScore,
+      vocaAll: d.voca, gramAll: d.gram, gramSelAll: d.gramSel, clozeAll: d.cloze,
       allScore, allCount,
     };
   });
@@ -2711,7 +2903,8 @@ function QuizResultRow({ r, last, padding, onClick, C }) {
   const isCloze = r.type === 'cloze';
   const typeColor = isVoca ? C.accent : isCloze ? (C.success || '#7a9e6e') : (C.accent2 || C.success);
   const typeBg    = isVoca ? C.accentSoft : isCloze ? `${C.success || '#7a9e6e'}18` : (C.accent2Soft || `${C.success}18`);
-  const typeLabel = isVoca ? 'Voca' : isCloze ? 'Cloze' : 'Grammar';
+  // Grammar results show which kind of grammar quiz they were (G4)
+  const typeLabel = isVoca ? 'Voca' : isCloze ? 'Cloze' : grammarResultMode(r) === 'selection' ? 'Selection' : 'Translation';
   const scoreColor = r.score >= 90 ? C.warning : r.score >= 70 ? C.accent : C.danger;
 
   const rowProps = onClick ? {
@@ -2940,11 +3133,35 @@ function MiniLineChart({ data, width = 560, height = 180, C }) {
                 fontSize="11" fill={C.danger || '#c97d3a'}
                 style={{ userSelect: 'none' }}>✦</text>
             ))}
+
+      {/* Grammar · Selection (G4) — hollow circles, dotted line, grammar colour */}
+      {data.map((d, i) => {
+        const scores = d.gramSelAll || (d.gramSelScore != null ? [d.gramSelScore] : []);
+        if (!scores.length) return null;
+        return clusterScores(scores).map((pt, k) => (
+          <circle
+            key={`gss-${i}-${k}`}
+            cx={(toX(i) + pt.xOffset).toFixed(1)}
+            cy={toY(pt.score).toFixed(1)}
+            r="3"
+            fill="none" stroke={gramColor} strokeWidth="1.2"
+            opacity={pt.opacity.toFixed(2)}
+          />
+        ));
+      })}
+      {buildPath(data.map(d => d.gramSelScore ?? null)) && (
+        <path d={buildPath(data.map(d => d.gramSelScore ?? null))}
+          fill="none" stroke={gramColor} strokeWidth="2"
+          strokeDasharray="1.5,3.5" strokeLinejoin="round" strokeLinecap="round" />
+      )}
+      {data.map((d, i) => d.gramSelScore != null && (
+        <circle key={`gsm-${i}`} cx={toX(i)} cy={toY(d.gramSelScore)} r="3.5" fill={C.bg} stroke={gramColor} strokeWidth="1.5" />
+      ))}
     </svg>
   );
 }
 
-function ReportCard({ results, C, S, dsh = 3 }) {
+function ReportCard({ results, links, C, S, dsh = 3 }) {
   const [range,          setRange]          = useState('30');
   const [selectedResult, setSelectedResult] = useState(null); // { result, detail }
   const [rawPage,        setRawPage]        = useState(0);
@@ -2991,10 +3208,13 @@ function ReportCard({ results, C, S, dsh = 3 }) {
 
   const chartData = useMemo(() => buildQuizChartData(filtered), [filtered]);
   const vocaR  = filtered.filter(r => r.type === 'voca');
-  const gramR  = filtered.filter(r => r.type === 'grammar');
+  // Grammar averages are kept per kind (G4): Translation and Selection score differently
+  const gramTR = filtered.filter(r => r.type === 'grammar' && grammarResultMode(r) === 'translation');
+  const gramSR = filtered.filter(r => r.type === 'grammar' && grammarResultMode(r) === 'selection');
   const clozeR = filtered.filter(r => r.type === 'cloze');
   const avgV   = vocaR.length  ? Math.round(vocaR.reduce((s, r) => s + r.score, 0) / vocaR.length)   : null;
-  const avgG   = gramR.length  ? Math.round(gramR.reduce((s, r) => s + r.score, 0) / gramR.length)   : null;
+  const avgGT  = gramTR.length ? Math.round(gramTR.reduce((s, r) => s + r.score, 0) / gramTR.length) : null;
+  const avgGS  = gramSR.length ? Math.round(gramSR.reduce((s, r) => s + r.score, 0) / gramSR.length) : null;
   const avgC   = clozeR.length ? Math.round(clozeR.reduce((s, r) => s + r.score, 0) / clozeR.length) : null;
   const rangeAvg   = filtered.length ? Math.round(filtered.reduce((s, r) => s + r.score, 0) / filtered.length) : null;
   const rangeLabel = range === 'all' ? 'All Time' : `${range}-Day`;
@@ -3043,14 +3263,20 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
         </div>
 
         {chartData.length >= 2 ? (
-          <GazetteFig caption={`${rangeLabel === 'All Time' ? 'All-time' : `Last ${range} days`} — Vocabulary, Cloze, and Grammar scores`}>
+          <GazetteFig caption={`${rangeLabel === 'All Time' ? 'All-time' : `Last ${range} days`} — Vocabulary, Cloze, and Grammar (Translation and Selection) scores`}>
             <MiniLineChart data={chartData} width={560} height={160} C={C} />
-            <div style={{ display: 'flex', gap: '16px', marginTop: '8px', justifyContent: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px', marginTop: '8px', justifyContent: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
                 <div style={{ width: '20px', height: '2px', background: C.accent }} /> Vocabulary
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
-                <div style={{ width: '20px', height: '0', borderTop: `2px dashed ${C.accent2 || C.success}` }} /> Grammar
+                <div style={{ width: '20px', height: '0', borderTop: `2px dashed ${C.accent2 || C.success}` }} /> Grammar · Translation
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
+                <svg width="20" height="8" aria-hidden="true">
+                  <line x1="1" y1="4" x2="19" y2="4" stroke={C.accent2 || C.success} strokeWidth="2" strokeDasharray="1.5,3.5" strokeLinecap="round" />
+                  <circle cx="10" cy="4" r="3" fill={C.bg} stroke={C.accent2 || C.success} strokeWidth="1.5" />
+                </svg> Grammar · Selection
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
                 <span style={{ color: C.danger || '#c97d3a', fontWeight: 700, letterSpacing: '1px' }}>— —</span> Cloze
@@ -3061,7 +3287,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
           <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '14px 0' }}>Not enough history in this range yet.</div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '12px', marginTop: '16px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginTop: '16px' }}>
           {avgV !== null && (
             <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '16px', textAlign: 'center' }}>
               <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.accent }}>{avgV}%</div>
@@ -3074,10 +3300,16 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
               <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>Avg cloze score</div>
             </div>
           )}
-          {avgG !== null && (
+          {avgGT !== null && (
             <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '16px', textAlign: 'center' }}>
-              <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.accent2 || C.success }}>{avgG}%</div>
-              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>Avg grammar score</div>
+              <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.accent2 || C.success }}>{avgGT}%</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>Avg grammar translation score</div>
+            </div>
+          )}
+          {avgGS !== null && (
+            <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '16px', textAlign: 'center' }}>
+              <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.accent2 || C.success }}>{avgGS}%</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>Avg grammar selection score</div>
             </div>
           )}
         </div>
@@ -3153,7 +3385,8 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
                   color: selectedResult.result.type === 'voca' ? C.accent : selectedResult.result.type === 'cloze' ? (C.danger || '#c0553a') : (C.accent2 || C.success),
                   background: selectedResult.result.type === 'voca' ? C.accentSoft : selectedResult.result.type === 'cloze' ? `${C.danger || '#c0553a'}18` : (C.accent2Soft || `${C.success}18`),
                   }}>
-                  {selectedResult.result.type === 'voca' ? 'Voca' : selectedResult.result.type === 'cloze' ? 'Cloze' : 'Grammar'}
+                  {selectedResult.result.type === 'voca' ? 'Voca' : selectedResult.result.type === 'cloze' ? 'Cloze'
+                    : grammarResultMode(selectedResult.result) === 'selection' ? 'Grammar · Selection' : 'Grammar · Translation'}
                 </span>
                 <span style={{ fontSize: '12px', color: C.textM }}>{selectedResult.result.date?.split('T')[0]}</span>
               </div>
@@ -3163,7 +3396,26 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
             </div>
 
             {/* Grammar result detail */}
-            {selectedResult.detail?.type === 'grammar' && selectedResult.detail.questions && (
+            {/* Concept links (G5) — the same links as the results screen */}
+            {selectedResult.detail?.type === 'grammar' && Array.isArray(selectedResult.detail.questions) && (
+              <div style={{ marginBottom: '16px' }}>
+                <GrammarDetailConcepts detail={selectedResult.detail} links={links} C={C} S={S} />
+              </div>
+            )}
+
+            {/* Selection quiz detail (G4) */}
+            {selectedResult.detail?.type === 'grammar' && selectedResult.detail.mode === 'selection' && Array.isArray(selectedResult.detail.questions) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <GrammarSelectionReview
+                  questions={selectedResult.detail.questions}
+                  selections={readSavedSelections(selectedResult.detail.selections)}
+                  explanations={selectedResult.detail.explanations || {}}
+                  C={C}
+                />
+              </div>
+            )}
+
+            {selectedResult.detail?.type === 'grammar' && selectedResult.detail.mode !== 'selection' && selectedResult.detail.questions && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 {selectedResult.detail.questions.map((q, i) => {
                   const a  = selectedResult.detail.assessment?.[i];
@@ -3178,9 +3430,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
                         {vs && <div style={{ fontFamily: SH.fm, fontSize: '22px', color: vs.color, flexShrink: 0 }}>{vs.symbol}</div>}
                       </div>
                       {q.correctConcept?.term && (
-                        <div style={{ fontSize: '12px', color: C.accent, fontFamily: SH.fk, background: C.accentSoft, borderRadius: '6px', padding: '4px 10px', alignSelf: 'flex-start' }}>
-                          {q.correctConcept.term}
-                        </div>
+                        <GrammarConceptPick q={q} chosenId={selectedResult.detail.conceptChoices?.[i]} C={C} />
                       )}
                       <div style={{ fontFamily: SH.fk, fontSize: '13.5px', color: C.text, lineHeight: 1.6 }}>
                         {selectedResult.detail.translations?.[i] || <span style={{ color: C.textM, fontStyle: 'italic' }}>No translation entered</span>}
@@ -3922,11 +4172,28 @@ function ClozeQuizResults({ questions, correct, total, onDone, C, S }) {
 // ─────────────────────────────────────────────────────────────
 // cards and decks come from App via shared useFlashcardData — no duplicate reads.
 // Only quiz_results is loaded here (quiz-specific, not shared with Flashcards).
+// One-line summary of an unfinished grammar session for the resume banner (G2).
+function describeGrammarResume(snap, now = Date.now()) {
+  const { answered, total } = snapshotProgress(snap);
+  const kind = snap.kind === 'selection' ? 'Selection'
+    : snap.config?.transMode === 'drill' ? 'Translation · Drill' : 'Translation · Broad';
+  const mins = Math.max(0, Math.round((now - Date.parse(snap.savedAt)) / 60000));
+  const ago = mins < 1 ? 'just now'
+    : mins < 60 ? `${mins} min ago`
+    : mins < 1440 ? `${Math.round(mins / 60)} h ago`
+    : `${Math.round(mins / 1440)} d ago`;
+  const progress = snap.phase === 'assessing' ? `all ${total} answers submitted` : `${answered} of ${total} answered`;
+  return `${kind} · ${progress} · saved ${ago}`;
+}
+
 const QR_PREFIX = 'avi_quiz_results_';
 function qrRead(key)      { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : null; } catch { return null; } }
 function qrWrite(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 
-export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: propCards, decks: propDecks, settings }) {
+// grammarEntries / onNavigateToGrammar / onPracticeGrammarCards (G5) come from
+// App: live mastery levels, open a Grammar Index entry, and start a Grammar
+// Deck study session with the given card ids.
+export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: propCards, decks: propDecks, settings, grammarEntries, onNavigateToGrammar, onPracticeGrammarCards }) {
   const { C, S } = useAppTheme();
   const uid = auth.currentUser?.uid;
   // Keep module-level ref current so every sub-component in this file reads
@@ -3958,6 +4225,10 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   const [gramConceptChoices, setGramConceptChoices] = useState(null);
   const [gramAssessment,   setGramAssessment]   = useState(null);
   const [gramSelections,   setGramSelections]   = useState(null);
+  const [gramError,        setGramError]        = useState(null); // { kind: 'generate' | 'assess', code } (G2)
+  const [gramResume,       setGramResume]       = useState(null); // unfinished session offered on home (G2)
+  const [gramInitial,      setGramInitial]      = useState(null); // resume state handed to a session (G2)
+  const [gramSelectionResultId, setGramSelectionResultId] = useState(null); // detail record for saving explanations (G4)
 
   // lemmaMaster — loaded once for related-form credit resolution
   const [lemmaMaster, setLemmaMaster] = useState([]);
@@ -3986,6 +4257,19 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   // Use props directly — these come from App's shared useFlashcardData
   const cards = propCards || [];
   const decks  = propDecks || [];
+
+  // Concept links on grammar results (G5): live mastery from the Grammar Index
+  // when App passes it, otherwise the level recorded in the quiz corpus.
+  const gramLinks = useMemo(() => {
+    const live = new Map((grammarEntries || []).map(e => [e.id, e.masteryLevel]));
+    const recorded = new Map(gramCorpus.map(e => [e.id, e.level]));
+    return {
+      cards,
+      masteryOf:       (id) => live.get(id) || recorded.get(id) || 'introduced',
+      onOpenEntry:     onNavigateToGrammar    || null,
+      onPracticeCards: onPracticeGrammarCards || null,
+    };
+  }, [grammarEntries, gramCorpus, cards, onNavigateToGrammar, onPracticeGrammarCards]);
 
   // Load only quiz_results from Firestore (serve cache immediately, refresh in background)
   useEffect(() => {
@@ -4079,100 +4363,113 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       }
     }, [uid]);
 
-  // ── Grammar quiz: call API to generate questions ──────────
-  const handleGrammarStart = useCallback(async (config) => {
-    const apiKey = settings?.anthropicApiKey;
-    if (!apiKey) return;
+  // ── Grammar quiz: device-only resume snapshot (G2, G-D7) ──
+  // One unfinished session per user, saved on this device only. Written on
+  // every answer, kept through a failed assessment, cleared when results are
+  // saved, when the quiz is ended, or when a new quiz starts.
+  const gramSnapKey = uid ? `avi_grammar_session_v1_${uid}` : null;
 
+  const saveGramSnapshot = useCallback((s) => {
+    if (gramSnapKey) qrWrite(gramSnapKey, buildSessionSnapshot(s));
+  }, [gramSnapKey]);
+
+  const clearGramSnapshot = useCallback(() => {
+    if (gramSnapKey) { try { localStorage.removeItem(gramSnapKey); } catch {} }
+    setGramResume(null);
+  }, [gramSnapKey]);
+
+  // Offer an unfinished session whenever the home screen shows.
+  useEffect(() => {
+    if (view !== 'home' || !gramSnapKey) return;
+    setGramResume(parseSessionSnapshot(qrRead(gramSnapKey)));
+  }, [view, gramSnapKey]);
+
+  const handleTranslationProgress = useCallback(({ idx, translations, conceptChoices }) => {
+    saveGramSnapshot({ kind: 'translation', phase: 'answering', config: gramConfig, questions: gramQuestions, idx, translations, conceptChoices });
+  }, [saveGramSnapshot, gramConfig, gramQuestions]);
+
+  const handleSelectionProgress = useCallback(({ idx, selections }) => {
+    saveGramSnapshot({ kind: 'selection', phase: 'answering', config: gramConfig, questions: gramQuestions, idx, selections });
+  }, [saveGramSnapshot, gramConfig, gramQuestions]);
+
+  const handleGrammarEnd = useCallback(() => {
+    clearGramSnapshot();
+    setGramInitial(null);
+    setView('home');
+  }, [clearGramSnapshot]);
+
+  // ── Grammar quiz: call API to generate questions ──────────
+  // Request building and response validation live in grammarQuizEngine.js:
+  // short concept refs, a compact corpus, and every question checked against
+  // the corpus (G1). Quizzes over 10 questions go out as parallel batches that
+  // are validated one by one, then merged and de-duplicated (G2).
+  const handleGrammarStart = useCallback(async (config) => {
     setGramConfig(config);
     setGramAssessment(null);
     setGramTranslations(null);
     setGramConceptChoices(null);
     setGramSelections(null);
-    setView('grammar_loading');
+    setGramError(null);
+    setGramInitial(null);
+    clearGramSnapshot(); // a new quiz replaces any unfinished one
 
-    const isSelection   = config.mode === 'selection';
-    const isDrill       = !isSelection && config.transMode === 'drill';
-    const isBroad       = !isSelection && !isDrill;
-
-    // Build concept subset for the prompt
-    const candidateConcepts = config.selectedIds.length > 0
-      ? gramCorpus.filter(e => config.selectedIds.includes(e.id))
-      : gramCorpus;
-
-    const corpusText = gramCorpus.map(e =>
-      `ID:${e.id} | ${e.term} | Level:${e.level}${e.compareTo ? ` | Compare:${e.compareTo}` : ''}${e.explanation ? ` | Explanation:${e.explanation}` : ''}`
-    ).join('\n');
-
-    const candidateText = candidateConcepts.map(e => `ID:${e.id} | ${e.term}`).join('\n');
-
-    let payload = null;
-
-    if (isSelection) {
-      payload = { mode: 'selection', corpusText, candidateText, length: config.length };
-    } else if (isDrill) {
-      const concept = candidateConcepts[0];
-      payload = buildGrammarDrillPayload(concept, config.length, corpusText);
-    } else {
-      // Broad mode
-      payload = {
-        mode:        'broad',
-        corpusText,
-        candidateText,
-        length:      config.length,
-        choiceCount: config.choiceCount,
-        restrict:    config.selectedIds.length > 0,
-      };
+    const request = buildGenerationRequest(config, gramCorpus);
+    if (request.error) {
+      console.error('Grammar quiz request not built:', request.error);
+      setGramError({ kind: 'generate', code: 'invalid_request' });
+      return;
     }
+
+    setView('grammar_loading');
+    try {
+      const settled = await callGrammarQuizChunks(planGenerationChunks(request));
+      const ok = settled.filter(s => s.status === 'fulfilled');
+      if (!ok.length) throw settled[0].reason;
+      if (ok.length < settled.length) {
+        console.warn(`Grammar quiz: ${settled.length - ok.length} of ${settled.length} batches failed`, settled.find(s => s.status === 'rejected')?.reason);
+      }
+      const merged = mergeGeneratedChunks(ok.map(s => validateGeneratedQuestions(request, s.value, { config })));
+      if (merged.dropped || merged.duplicates) {
+        console.warn(`Grammar quiz: dropped ${merged.dropped} malformed and ${merged.duplicates} duplicate question(s)`);
+      }
+      if (!merged.questions.length) throw Object.assign(new Error('No usable questions returned'), { code: 'no_questions' });
+      setGramQuestions(merged.questions);
+      setView(request.mode === 'selection' ? 'grammar_selection' : 'grammar_translation');
+    } catch (e) {
+      console.error('Grammar quiz generation failed:', e?.code || '', e);
+      setGramError({ kind: 'generate', code: e?.code || 'server' });
+      setView('home');
+    }
+  }, [gramCorpus, clearGramSnapshot]);
+
+  // ── Translation: assess the answers ────────────────────────
+  // Sent in batches of up to 10 items (G2). Any failed batch fails the whole
+  // assessment so it can be retried as one. The snapshot stays in phase
+  // 'assessing' until results are saved, so neither a failure nor closing the
+  // app loses the translations.
+  const runGrammarAssessment = useCallback(async (translations, conceptChoices) => {
+    setGramError(null);
+    setView('grammar_assessing');
+
+    const uid = auth.currentUser?.uid;
 
     try {
-      const parsed = await callGrammarQuizAPI(payload);
-
-      const corpusById = Object.fromEntries(gramCorpus.map(e => [e.id, e]));
-
-      // Enrich questions with concept objects
-      const enriched = parsed.questions.map(q => {
-        if (isSelection) return q;
-        if (isDrill) return { ...q, correctConcept: corpusById[q.correctConceptId] || null, choices: null };
-        // Broad mode — attach concept objects and shuffle choices
-        const correctConcept = corpusById[q.correctConceptId] || null;
-        const choices = shuffleArray([
-          correctConcept,
-          ...(q.distractorIds || []).map(id => corpusById[id]).filter(Boolean),
-        ]).slice(0, config.choiceCount);
-        return { ...q, correctConcept, choices };
-      });
-
-      setGramQuestions(enriched);
-      setView(isSelection ? 'grammar_selection' : 'grammar_translation');
-    } catch (e) {
-      console.error('Grammar quiz generation failed:', e);
-      setView('grammar_config');
-    }
-  }, [gramCorpus, settings]);
-
-  // ── Translation: receive answers, call API for assessment ──
-  const handleGrammarTranslationFinish = useCallback(async ({ translations, conceptChoices }) => {
-    setGramTranslations(translations);
-    setGramConceptChoices(conceptChoices);
-    setView('grammar_loading');
-
-    const uid    = auth.currentUser?.uid;
-    const isDrill = gramConfig?.transMode === 'drill';
-
-    const payload = buildGrammarAssessmentPayload(gramQuestions, translations);
-
-        try {
-                    const parsed = await callGrammarQuizAPI(payload);
-
-          setGramAssessment(parseGrammarAssessment(parsed));
+      const n = gramQuestions.length;
+      const settled = await callGrammarQuizChunks(planAssessmentChunks(buildAssessmentRequest(gramQuestions, translations, conceptChoices)));
+      const failed = settled.find(s => s.status === 'rejected');
+      if (failed) throw failed.reason;
+      // Matched by item number, never position: one entry per question, null
+      // where the assessor skipped or garbled an item.
+      const assessment = mergeAssessmentChunks(settled.map(s => s.value), n);
+      if (assessment.every(a => a === null)) throw Object.assign(new Error('No usable assessments returned'), { code: 'bad_json' });
+      setGramAssessment(assessment);
 
       // Create correction note once we have the full assessment
       if (uid) {
         const rows = gramQuestions.map((q, i) => ({
           topic:     q.correctConcept?.term || 'quiz',
           original:  translations[i] || '',
-          corrected: parsed.assessment?.[i]?.corrected || '',
+          corrected: assessment[i]?.corrected || '',
         }));
         const dateStr = toDateStr(getLogicalToday(dsh));
         await createCorrectionNote({
@@ -4183,20 +4480,17 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         });
       }
 
-      // Save score to quiz_results, tagged with concept metadata for headlines
-      const oCount = parsed.assessment?.filter(a => a.verdict === 'O').length || 0;
-      const concepts = [...new Set(gramQuestions.map(q => q.correctConcept?.term).filter(Boolean))];
-      const missedConcepts = [...new Set(
-        gramQuestions
-          .filter((q, i) => parsed.assessment?.[i]?.verdict !== 'O')
-          .map(q => q.correctConcept?.term)
-          .filter(Boolean)
-      )];
-      const { id: resultId } = await saveResult('grammar', oCount, gramQuestions.length, {
+      // Save score to quiz_results, tagged with concept metadata for headlines.
+      // G3: points, not O-count — Drill = translation credit (O 1, △ 0.5,
+      // X 0); Broad = 0.5 for the pick + 0.5 × translation credit. A concept
+      // counts as missed when any of its questions fell short of full credit.
+      const score = scoreTranslationQuiz(gramQuestions, assessment, conceptChoices);
+      const { id: resultId } = await saveResult('grammar', score.points, score.total, {
         mode: 'translation',
         transMode: gramConfig?.transMode || null,
-        concepts,
-        missedConcepts,
+        concepts: score.concepts,
+        missedConcepts: score.missedConcepts,
+        scoring: 'g3',
       });
 
       // Full per-question detail, kept separately so it's only fetched on demand
@@ -4206,45 +4500,116 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
             type:        'grammar',
             questions:   gramQuestions,
             translations,
-            assessment:  parsed.assessment,
+            conceptChoices: (conceptChoices || []).map(c => c || null),
+            assessment,
           });
         } catch (e) {
           console.error('QuizzesPage: detail save failed', e);
         }
       }
 
+      clearGramSnapshot();
       setView('grammar_translation_results');
     } catch (e) {
-      console.error('Grammar assessment failed:', e);
-      // Still show results with whatever assessment we have
+      console.error('Grammar assessment failed:', e?.code || '', e);
+      setGramAssessment(null);
+      setGramError({ kind: 'assess', code: e?.code || 'server' });
       setView('grammar_translation_results');
     }
-  }, [gramQuestions, gramConfig, saveResult]);
+  }, [gramQuestions, gramConfig, saveResult, dsh, clearGramSnapshot]);
 
-  // ── Selection: receive answers, show results client-side ──
+  const handleGrammarTranslationFinish = useCallback(({ translations, conceptChoices }) => {
+    setGramTranslations(translations);
+    setGramConceptChoices(conceptChoices);
+    setGramInitial(null);
+    saveGramSnapshot({
+      kind: 'translation', phase: 'assessing', config: gramConfig, questions: gramQuestions,
+      idx: Math.max(0, gramQuestions.length - 1), translations, conceptChoices,
+    });
+    runGrammarAssessment(translations, conceptChoices);
+  }, [saveGramSnapshot, gramConfig, gramQuestions, runGrammarAssessment]);
+
+  // ── Selection: receive answers, score, save (G4) ──────────
+  // Per-question scoring: a question counts only when the selection matches
+  // the correct sentences exactly. Selected incorrect sentences go into a
+  // correction note with their fixes, and the full quiz is kept as a detail
+  // record so the Report Card can show it.
   const handleGrammarSelectionFinish = useCallback(async (selections) => {
     setGramSelections(selections);
-    let correct = 0, totalSentences = 0;
-    const concepts = new Set(), missedConcepts = new Set();
-    gramQuestions.forEach((q, qi) => {
-      const userSet = new Set(selections[qi] || []);
-      (q.sentences || []).forEach((s, si) => {
-        totalSentences++;
-        const isRight = userSet.has(si) === s.correct;
-        if (isRight) correct++;
-        if (s.concept) {
-          concepts.add(s.concept);
-          if (!isRight) missedConcepts.add(s.concept);
-        }
+    setGramInitial(null);
+    setGramSelectionResultId(null);
+    clearGramSnapshot();
+    const uid = auth.currentUser?.uid;
+    const score = scoreSelectionQuiz(gramQuestions, selections);
+    const rows = buildSelectionCorrectionRows(gramQuestions, selections);
+    if (uid && rows.length) {
+      const dateStr = toDateStr(getLogicalToday(dsh));
+      await createCorrectionNote({
+        uid,
+        title:       `Grammar Selection Quiz — ${dateStr}`,
+        rows,
+        sourceLabel: 'Grammar Quiz',
       });
-    });
-    await saveResult('grammar', correct, totalSentences, {
+    }
+    const { id: resultId } = await saveResult('grammar', score.points, score.total, {
       mode: 'selection',
-      concepts: [...concepts],
-      missedConcepts: [...missedConcepts],
+      concepts: score.concepts,
+      missedConcepts: score.missedConcepts,
+      scoring: 'g4',
     });
+    if (resultId && uid) {
+      try {
+        await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', resultId), {
+          type:         'grammar',
+          mode:         'selection',
+          questions:    gramQuestions,
+          selections:   toSavedSelections(selections),
+          explanations: {},
+        });
+        setGramSelectionResultId(resultId);
+      } catch (e) {
+        console.error('QuizzesPage: selection detail save failed', e);
+      }
+    }
     setView('grammar_selection_results');
-  }, [saveResult, gramQuestions]);
+  }, [saveResult, gramQuestions, clearGramSnapshot, dsh]);
+
+  // Explanations fetched on the Selection results screen are saved into the
+  // quiz's detail record, so the Report Card shows them too (G4).
+  const handleSelectionExplanations = useCallback(async (explanations) => {
+    const uid = auth.currentUser?.uid;
+    if (!uid || !gramSelectionResultId) return;
+    try {
+      await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', gramSelectionResultId), { explanations }, { merge: true });
+    } catch (e) {
+      console.error('QuizzesPage: explanation save failed', e);
+    }
+  }, [gramSelectionResultId]);
+
+  // ── Resume an unfinished session from this device (G2) ─────
+  const handleGrammarResume = useCallback(() => {
+    const snap = gramResume;
+    if (!snap) return;
+    setGramError(null);
+    setGramConfig(snap.config);
+    setGramQuestions(snap.questions);
+    setGramAssessment(null);
+    setGramSelections(null);
+    if (snap.kind === 'selection') {
+      setGramInitial({ idx: snap.idx, selections: snap.selections });
+      setView('grammar_selection');
+    } else if (snap.phase === 'assessing') {
+      // Submitted but never assessed: open the results screen with Assess now.
+      setGramTranslations(snap.translations);
+      setGramConceptChoices(snap.conceptChoices);
+      setGramInitial(null);
+      setGramError({ kind: 'assess', code: 'interrupted' });
+      setView('grammar_translation_results');
+    } else {
+      setGramInitial({ idx: snap.idx, translations: snap.translations, conceptChoices: snap.conceptChoices });
+      setView('grammar_translation');
+    }
+  }, [gramResume]);
 
   // ── handleVocaStart ────────────────────────────────────────
   const handleVocaStart = useCallback((config, vocaDecks) => {
@@ -4484,11 +4849,17 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   if (view === 'grammar_loading') {
     return <HardModeLoading C={C} />;
   }
+  if (view === 'grammar_assessing') {
+    return <HardModeLoading C={C} label="Preparing feedback…" />;
+  }
   if (view === 'grammar_translation') {
     return (
       <GrammarTranslationSession
         questions={gramQuestions}
         config={gramConfig}
+        initial={gramInitial}
+        onProgress={handleTranslationProgress}
+        onEnd={handleGrammarEnd}
         onFinish={handleGrammarTranslationFinish}
         C={C} S={S}
       />
@@ -4499,7 +4870,11 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       <GrammarTranslationResults
         questions={gramQuestions}
         translations={gramTranslations || []}
+        conceptChoices={gramConceptChoices}
         assessment={gramAssessment}
+        assessErrorCode={gramError?.kind === 'assess' ? gramError.code : null}
+        onRetryAssess={() => runGrammarAssessment(gramTranslations || [], gramConceptChoices || [])}
+        links={gramLinks}
         onDone={() => setView('home')}
         C={C} S={S}
       />
@@ -4509,6 +4884,9 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     return (
       <GrammarSelectionSession
         questions={gramQuestions}
+        initial={gramInitial}
+        onProgress={handleSelectionProgress}
+        onEnd={handleGrammarEnd}
         onFinish={handleGrammarSelectionFinish}
         C={C} S={S}
       />
@@ -4519,6 +4897,8 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       <GrammarSelectionResults
         questions={gramQuestions}
         userSelections={gramSelections || []}
+        onExplanations={handleSelectionExplanations}
+        links={gramLinks}
         onDone={() => setView('home')}
         C={C} S={S}
       />
@@ -4534,7 +4914,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         }}>
           ← Back
         </button>
-                <ReportCard results={results} C={C} S={S} dsh={dsh} />
+                <ReportCard results={results} links={gramLinks} C={C} S={S} dsh={dsh} />
       </div>
     );
   }
@@ -4573,6 +4953,32 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   }
  return (
     <div className="fade-up quiz-session" style={isMobile ? { paddingTop: '24px' } : undefined}>
+      {/* Grammar quiz notices (G2): a failed generation, and an unfinished
+          session saved on this device */}
+      {gramError?.kind === 'generate' && (
+        <GrammarNotice
+          tone="error"
+          title="Couldn't create the grammar quiz"
+          text={describeGrammarQuizError(gramError.code)}
+          actions={[
+            ...(gramConfig ? [{ label: 'Try again', primary: true, onClick: () => handleGrammarStart(gramConfig) }] : []),
+            { label: 'Dismiss', onClick: () => setGramError(null) },
+          ]}
+          C={C} S={S}
+        />
+      )}
+      {gramResume && (
+        <GrammarNotice
+          tone="info"
+          title={gramResume.phase === 'assessing' ? 'Grammar quiz waiting for feedback' : 'Unfinished grammar quiz'}
+          text={describeGrammarResume(gramResume)}
+          actions={[
+            { label: gramResume.phase === 'assessing' ? 'Open' : 'Resume', primary: true, onClick: handleGrammarResume },
+            { label: 'Discard', onClick: clearGramSnapshot },
+          ]}
+          C={C} S={S}
+        />
+      )}
       <div className="quiz-home-grid" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '32px', alignItems: 'center', marginBottom: '40px' }}>
         {!isMobile && (
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
@@ -4673,12 +5079,18 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         ) : homeChartData.length >= 2 ? (
           <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '16px' }}>
             <MiniLineChart data={homeChartData} width={560} height={160} C={C} />
-            <div style={{ display: 'flex', gap: '16px', marginTop: '8px', justifyContent: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px', marginTop: '8px', justifyContent: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
                 <div style={{ width: '20px', height: '2px', background: C.accent }} /> Vocabulary
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
-                <div style={{ width: '20px', height: '0', borderTop: `2px dashed ${C.accent2 || C.success}` }} /> Grammar
+                <div style={{ width: '20px', height: '0', borderTop: `2px dashed ${C.accent2 || C.success}` }} /> Grammar · Translation
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
+                <svg width="20" height="8" aria-hidden="true">
+                  <line x1="1" y1="4" x2="19" y2="4" stroke={C.accent2 || C.success} strokeWidth="2" strokeDasharray="1.5,3.5" strokeLinecap="round" />
+                  <circle cx="10" cy="4" r="3" fill={C.bg} stroke={C.accent2 || C.success} strokeWidth="1.5" />
+                </svg> Grammar · Selection
               </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: C.textM }}>
                     <span style={{ color: C.danger || '#c97d3a', fontWeight: 700, letterSpacing: '1px' }}>— —</span> Cloze
@@ -4713,7 +5125,6 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         onBack={() => setConfigModal(null)}
         onStart={(config) => { setConfigModal(null); handleGrammarStart(config); }}
         corpus={gramCorpus}
-        apiKey={settings?.anthropicApiKey}
         C={C} S={S}
       />
     </div>

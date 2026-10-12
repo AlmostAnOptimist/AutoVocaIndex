@@ -13,6 +13,7 @@ import { doc, getDoc, setDoc, writeBatch } from 'firebase/firestore';
 import { toDateStr, computeStreak } from './dateUtils.js';
 import { db } from '../firebase.js';
 import { DEMO } from '../demo/demoConfig.js';
+import { apiFetch } from './apiFetch.js';
 
 // ── UUID ─────────────────────────────────────────────────────
 export function uuid() {
@@ -1002,7 +1003,7 @@ function parseKrDictApiXml(xml, lang, queriedLemma) {
 async function fetchKrDictEn(lemma) {
   if (!lemma) return '';
   try {
-    const resp = await fetch('/api/get-krdict-api', {
+    const resp = await apiFetch('/api/get-krdict-api', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lemma, lang: 'eng' }),
@@ -1020,7 +1021,7 @@ async function fetchKrDictEn(lemma) {
 async function fetchKrDictKo(lemma) {
   if (!lemma) return '';
   try {
-    const resp = await fetch('/api/get-krdict-api', {
+    const resp = await apiFetch('/api/get-krdict-api', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lemma, lang: 'kor' }),
@@ -1049,7 +1050,7 @@ async function fetchClaudeDefinition(lemma, apiRateLimit = 5) {
   if (!lemma || lemma.length > 80) return '';
   if (!apiRateLimitOk(apiRateLimit)) return '__RATE_LIMITED__';
   try {
-    const resp = await fetch('/api/get-definition', {
+    const resp = await apiFetch('/api/get-definition', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lemma }),

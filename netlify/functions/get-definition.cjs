@@ -1,4 +1,8 @@
 const Anthropic = require("@anthropic-ai/sdk");
+const { verifyUser } = require("../lib/verifyUser.cjs");
+
+// Longest lemma accepted (S-D5). The client already stops at 80 characters.
+const MAX_LEMMA_CHARS = 200;
 
 exports.handler = async function (event) {
   if (event.httpMethod !== "POST") {
@@ -15,11 +19,24 @@ exports.handler = async function (event) {
     };
   }
 
+  // Only signed-in users on ALLOWED_UIDS may spend the API key.
+  const caller = await verifyUser(event.headers?.authorization || event.headers?.Authorization);
+  if (!caller.ok) {
+    return {
+      statusCode: caller.status,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: caller.error }),
+    };
+  }
+
   try {
     const { lemma } = JSON.parse(event.body);
 
-    if (!lemma) {
+    if (!lemma || typeof lemma !== "string") {
       return { statusCode: 400, body: JSON.stringify({ error: "Missing lemma" }) };
+    }
+    if (lemma.length > MAX_LEMMA_CHARS) {
+      return { statusCode: 400, body: JSON.stringify({ error: "Lemma too long" }) };
     }
 
     const client = new Anthropic({

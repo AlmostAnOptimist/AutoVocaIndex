@@ -679,8 +679,7 @@ updateCards={updateCards} updateDecks={updateDecks} onSourceCascadeComplete={onS
 triggerAddSource={clTriggerAddSource} triggerAddQuestion={clTriggerAddQuestion}
 triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection} />}
 {page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} />}
-{page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} />}
-
+{page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} />}
 {page === 'avi' && (
   <AVIPage
     cards={cards}

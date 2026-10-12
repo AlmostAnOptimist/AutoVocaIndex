@@ -16,7 +16,7 @@ If you'd rather watch first, or the demo has reached its limit, a captioned [vid
 
 ## Setup at a glance
 
-Create a Firebase project, copy `.env.example` to `.env` and fill in the six `VITE_FIREBASE_*` values, deploy the shipped Firestore rules with the Firebase CLI, run `npm install`, then develop under `netlify dev`. Optional integrations (KRDict dictionary lookups, AI definitions and grammar quizzes, Google Cloud text-to-speech) each need one additional key, documented in `.env.example`. A seed for the global lemma map ships in `seed/` with an import script — note the `updatedAt` preservation warning in the script header before running it.
+Create a Firebase project, copy `.env.example` to `.env` and fill in the six `VITE_FIREBASE_*` values, deploy the shipped Firestore rules with the Firebase CLI, run `npm install`, then develop under `netlify dev`. After your first sign-in, put your Firebase User UID in `ALLOWED_UIDS` (locally and on Netlify) — every serverless function refuses requests until it's set. Optional integrations (KRDict dictionary lookups, AI definitions and grammar quizzes, Google Cloud text-to-speech) each need one additional key, documented in `.env.example`. A seed for the global lemma map ships in `seed/` with an import script — note the `updatedAt` preservation warning in the script header before running it.
 
 The full walkthrough is the [setup guide](docs/04-setup.md), and the [deployment guide](docs/05-deployment.md) takes the result to a live site.
 

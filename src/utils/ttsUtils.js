@@ -5,6 +5,7 @@
 
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
+import { apiFetch } from './apiFetch.js';
 
 // ── Session cache ─────────────────────────────────────────────
 // Avoids calling the function twice for the same text within a session.
@@ -14,7 +15,7 @@ async function fetchAudioUrl(text) {
   const key = text.trim();
   if (urlCache.has(key)) return urlCache.get(key);
 
-  const res = await fetch('/api/generate-tts', {
+  const res = await apiFetch('/api/generate-tts', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify({ text: key }),
