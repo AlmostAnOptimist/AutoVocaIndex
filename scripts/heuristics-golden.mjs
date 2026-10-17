@@ -153,7 +153,34 @@ const CANDIDATE_CASES = {
     ['가자고', '가다'], ['가라고', '가다'], ['먹으라고', '먹다'],
     ['가냐고', '가다'], ['먹느냐고', '먹다'],
   ],
+  'Stage D — past + polite endings': [
+    ['먹었어요', '먹다'], ['읽었어요', '읽다'], ['좋았어요', '좋다'],
+    ['앉았어요', '앉다'], ['재미있었어요', '재미있다'], ['들었어요', '듣다'],
+    ['걸었어요', '걷다'], ['나았어요', '낫다'], ['됐어요', '되다'],
+    ['예뻤어요', '예쁘다'], ['바빴어요', '바쁘다'], ['썼어요', '쓰다'],
+    ['보냈어요', '보내다'], ['지냈어요', '지내다'], ['도왔어요', '돕다'],
+    ['쉬웠어요', '쉽다'], ['놨어요', '놓다'], ['갔어요', '가다'],
+    ['봤어요', '보다'], ['했어요', '하다'], ['갔었어요', '가다'],
+    ['먹었었어요', '먹다'], ['먹었네요', '먹다'], ['먹었죠', '먹다'],
+    ['먹었지요', '먹다'], ['먹었는데요', '먹다'], ['먹었거든요', '먹다'],
+    ['먹었잖아요', '먹다'], ['먹었을까요', '먹다'], ['먹었나요', '먹다'],
+    ['먹었대요', '먹다'], ['간대요', '가다'], ['먹었다고요', '먹다'],
+    ['친구였어요', '친구'], ['학생이었어요', '학생'],
+  ],
 };
+
+// Stage D — the heuristic primary is what gets saved when no candidate
+// validates, so unambiguous past forms must land on the headword itself
+// (the old table rule de-contracted 먹었다 to 먹어다).
+const PRIMARY_CASES = [
+  ['먹었어요', '먹다'], ['읽었어요', '읽다'], ['좋았어요', '좋다'],
+  ['앉았어요', '앉다'], ['재미있었어요', '재미있다'], ['있었어요', '있다'],
+  ['됐어요', '되다'], ['갔었어요', '가다'], ['먹었었어요', '먹다'],
+  ['먹었죠', '먹다'], ['먹었지요', '먹다'], ['먹었는데요', '먹다'],
+  ['먹었거든요', '먹다'], ['먹었잖아요', '먹다'], ['먹었을까요', '먹다'],
+  ['갔어요', '가다'], ['했어요', '하다'], ['먹었습니다', '먹다'],
+  ['먹었다', '먹다'], ['몰랐어요', '모르다'],
+];
 
 // Words the suffix table must never touch: primary result stays identity.
 // (Bare nouns like 이야기 that a naive strip WOULD touch are protected at
@@ -202,6 +229,17 @@ for (const [group, cases] of Object.entries(CANDIDATE_CASES)) {
   const n = cases.length;
   console.log(`${misses.length === 0 ? 'PASS' : 'FAIL'}  ${group}  (${n - misses.length}/${n})`);
   for (const [s, e, c] of misses) console.log(`      ${s} → expected ${e}, got [${c.join(', ')}]`);
+}
+
+{
+  const misses = [];
+  for (const [surface, expected] of PRIMARY_CASES) {
+    total++;
+    const primary = extractLemmaFromText(surface);
+    if (primary !== expected) { failures++; misses.push([surface, expected, primary]); }
+  }
+  console.log(`${misses.length === 0 ? 'PASS' : 'FAIL'}  Stage D — heuristic primary  (${PRIMARY_CASES.length - misses.length}/${PRIMARY_CASES.length})`);
+  for (const [s, e, p] of misses) console.log(`      ${s} → expected ${e}, primary ${p}`);
 }
 
 {
