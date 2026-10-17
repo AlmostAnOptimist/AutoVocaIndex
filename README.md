@@ -2,7 +2,7 @@
 
 A self-hosted Korean study environment: sentence mining and vocabulary intake with automatic lemma resolution, a lemma search that understands inflected forms, FSRS-scheduled flashcards, vocabulary, cloze, Echo (fold-over) and grammar quizzes, a grammar index, a content library, and language-study task and appointment planning — all wrapped in a newsprint Gazette interface. Built for Korean, and [convertible to another language](docs/08-converting-to-another-language.md).
 
-*Version 1.1 — October 2026 (first published July 2026).*
+*Version 1.2 — October 2026 (first published July 2026).*
 
 ## Maintenance posture
 
