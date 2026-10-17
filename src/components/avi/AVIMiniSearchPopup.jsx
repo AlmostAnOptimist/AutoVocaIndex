@@ -1,222 +1,97 @@
 // src/components/avi/AVIMiniSearchPopup.jsx
 // Compact modal similarity search — shared by LemmaMasterPage and WordInputPage.
-// Uses the same resolution and scoring logic as AVISearchPage.
+// AS2: runs on the same engine and hook as the Search tab (useLemmaSearch),
+// so results, "Did you mean", the hidden group and English paging match.
+// AS3: clicking a result's lemma re-centers the popup on it, with Back.
+// AS4: initialLemmaID anchors on an exact entry (Lemma Master pills and
+// buttons pass it); onOpenInSearch adds an "Open in Search tab" link.
 // Opens pre-populated with initialQuery and auto-runs the search on mount.
+// AS5b: a Korean search with no match offers "Look up definition" and, when
+// the host passes `staging` (its source context and card plumbing), "Add to
+// Word Input"; a staged word re-centers the popup on its lemma.
 
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
-import { SH } from '../../theme/buildStyles.js';
-import { Def1Display } from './Def1Display.jsx';
 import {
-  normalizeLemma, hangulToJamo, editDistance,
-  tokenizeEnglish, DEFAULT_STOPWORDS, detectMode,
-  applyRelationPin, applyRelationConnect,
-} from '../../utils/aviUtils.js';
+  useLemmaSearch, SUGGESTION_KIND_LABEL, rowTag, statusLabel,
+} from '../../hooks/useLemmaSearch.js';
+import { SH } from '../../theme/buildStyles.js';
+import { Icons } from '../Icons.jsx';
+import { applyRelationPin, applyRelationConnect } from '../../utils/aviUtils.js';
+import { AVINoMatchActions } from './AVIAddToWordInput.jsx';
 
-export function AVIMiniSearchPopup({ initialQuery, data, updateData, onClose, showAVIToast }) {
+const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
+
+export function AVIMiniSearchPopup({ initialQuery, initialLemmaID, data, updateData, onClose, onOpenInSearch, showAVIToast, staging }) {
   const { C, S } = useAppTheme();
+  const search = useLemmaSearch(data);
+  const { mode, status, anchor, related, english, run, searchById, back } = search;
 
-  const [query,        setQuery]        = useState(initialQuery || '');
-  const [resolved,     setResolved]     = useState(null);
-  const [nearOptions,  setNearOptions]  = useState([]);
-  const [results,      setResults]      = useState([]);
-  const [status,       setStatus]       = useState('');
-  const [basket,       setBasket]       = useState([]);
-  const [relType,      setRelType]      = useState('Form');
-  const [connected,    setConnected]    = useState(false);
+  const [query,      setQuery]      = useState(initialQuery || '');
+  const [basket,     setBasket]     = useState([]);
+  const [relType,    setRelType]    = useState('Form');
+  const [connected,  setConnected]  = useState(false);
+  const [hiddenOpen, setHiddenOpen] = useState(false);
+  const [pivotTo,    setPivotTo]    = useState(null);   // AS5b: staged lemma, anchored once indexed
+  const [stagedNote, setStagedNote] = useState(null);
 
-  // Auto-run on mount
+  // A new anchor replaces the previous basket center; picks stay (AS-D12).
+  const setCenter = useCallback((ref) => {
+    if (!ref) return;
+    setBasket(prev => [
+      { lemmaID: ref.lemmaID, lemma: ref.lemma, isCenter: true },
+      ...prev.filter(b => !b.isCenter && b.lemmaID !== ref.lemmaID),
+    ]);
+  }, []);
+
+  const runSearch = useCallback(async (q = query) => {
+    const raw = String(q || '').trim();
+    if (!raw) return;
+    setQuery(raw);
+    setHiddenOpen(false);
+    setStagedNote(null);
+    setCenter(await run(raw));
+  }, [query, run, setCenter]);
+
+  // A "Did you mean" pick, a clicked result (pivot), or Back.
+  const anchorOn = (ref) => {
+    if (!ref) return;
+    setQuery(ref.lemma);
+    setHiddenOpen(false);
+    setStagedNote(n => (n && n.lemmaID === ref.lemmaID ? n : null));
+    setCenter(ref);
+  };
+  const pickLemma = (lemmaID) => anchorOn(searchById(lemmaID));
+  const goBack    = () => anchorOn(back());
+
+  // A newly created lemma reaches the index on the next render.
   useEffect(() => {
-    if (initialQuery) runSearch(initialQuery);
+    if (pivotTo && search.index.byId.has(pivotTo)) {
+      setPivotTo(null);
+      pickLemma(pivotTo);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pivotTo, search.index]);
+  const onStaged = ({ lemmaID, row, isNewLemma, dest }) => {
+    setStagedNote({ lemmaID, surface: row.input, dest, isNewLemma });
+    if (lemmaID) setPivotTo(lemmaID);
+  };
+
+  // Auto-run on mount: anchor on the exact entry when an ID is given (falls
+  // back to a text search if that entry no longer exists).
+  useEffect(() => {
+    const ref = initialLemmaID ? searchById(initialLemmaID) : null;
+    if (ref) anchorOn(ref);
+    else if (initialQuery) runSearch(initialQuery);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function sortResults(list) {
-    return [...list].sort((a, b) => {
-      if ((a.pinForm || a.pinMeaning) && !(b.pinForm || b.pinMeaning)) return -1;
-      if (!(a.pinForm || a.pinMeaning) && (b.pinForm || b.pinMeaning)) return 1;
-      if (a.hide && !b.hide) return 1;
-      if (!a.hide && b.hide) return -1;
-      return 0;
-    });
-  }
-
-  const runSearch = useCallback((q = query) => {
-    const raw = (q || '').trim();
-    if (!raw) return;
-    setQuery(raw);
-    setStatus('');
-    setResults([]);
-    setResolved(null);
-    setNearOptions([]);
-
-    const mode = detectMode(raw);
-
-    if (mode === 'Korean') {
-      const normQ = normalizeLemma(raw);
-      let resolvedEntry = null;
-      let stat = '';
-
-      // 1. Verbatim match — raw input exactly matches a lemma
-      resolvedEntry = data.lemmaMaster.find(l => l.lemma === raw);
-      if (resolvedEntry) stat = 'Exact';
-
-      // 2. Normalized exact match
-      if (!resolvedEntry) {
-        resolvedEntry = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normQ);
-        if (resolvedEntry) stat = 'Exact';
-      }
-
-      // Collect other matches — always, regardless of resolution above.
-      const otherMatches = [];
-      const seen = new Set(resolvedEntry ? [resolvedEntry.lemmaID] : []);
-
-      const addOther = (entry) => {
-        if (!seen.has(entry.lemmaID)) { seen.add(entry.lemmaID); otherMatches.push(entry); }
-      };
-
-      // Prefix candidates
-      const prefixMatches = data.lemmaMaster
-        .filter(l => normalizeLemma(l.lemma).startsWith(normQ))
-        .sort((a, b) => a.lemma.length - b.lemma.length);
-      if (!resolvedEntry && prefixMatches.length > 0) {
-        resolvedEntry = prefixMatches[0];
-        stat = 'Prefix';
-        seen.add(resolvedEntry.lemmaID);
-        prefixMatches.slice(1).forEach(addOther);
-      } else {
-        prefixMatches.forEach(addOther);
-      }
-
-      // Contains candidates
-      const containsMatches = data.lemmaMaster
-        .filter(l => normalizeLemma(l.lemma).includes(normQ))
-        .sort((a, b) => a.lemma.length - b.lemma.length);
-      if (!resolvedEntry && containsMatches.length > 0) {
-        resolvedEntry = containsMatches[0];
-        stat = 'Contains';
-        seen.add(resolvedEntry.lemmaID);
-        containsMatches.slice(1).forEach(addOther);
-      } else {
-        containsMatches.forEach(addOther);
-      }
-
-      // Jamo near-match (threshold scales with length)
-      const maxDist = normQ.length <= 2 ? 1 : normQ.length <= 4 ? 2 : 3;
-      const jamoQ = hangulToJamo(normQ);
-      const nearMatches = data.lemmaMaster
-        .map(l => ({ l, d: editDistance(jamoQ, hangulToJamo(normalizeLemma(l.lemma)), maxDist) }))
-        .filter(x => x.d <= maxDist)
-        .sort((a, b) => a.d - b.d);
-      if (!resolvedEntry && nearMatches.length > 0) {
-        resolvedEntry = nearMatches[0].l;
-        stat = `Near (d=${nearMatches[0].d})`;
-        seen.add(resolvedEntry.lemmaID);
-        nearMatches.slice(1).forEach(x => addOther(x.l));
-      } else {
-        nearMatches.forEach(x => addOther(x.l));
-      }
-
-      setNearOptions(otherMatches.slice(0, 6));
-
-      if (!resolvedEntry) { setStatus('No match'); return; }
-      setStatus(stat);
-      setResolved({
-        resolvedLemma: resolvedEntry.lemma,
-        def1: resolvedEntry.def1,
-        def2: resolvedEntry.def2,
-        lemmaID: resolvedEntry.lemmaID,
-      });
-
-      // Auto-add to basket as center
-      setBasket(prev => {
-        if (prev.some(b => b.lemmaID === resolvedEntry.lemmaID)) return prev;
-        return [{ lemmaID: resolvedEntry.lemmaID, lemma: resolvedEntry.lemma, isCenter: true }, ...prev];
-      });
-
-      // Score related lemmas
-      const resolvedDefTokens = tokenizeEnglish(
-        (resolvedEntry.def1 || '') + ' ' + (resolvedEntry.def2 || ''),
-        DEFAULT_STOPWORDS
-      );
-
-      const scored = data.lemmaMaster
-        .filter(l => l.lemmaID !== resolvedEntry.lemmaID)
-        .map(l => {
-          const normL   = normalizeLemma(l.lemma);
-          const jamoL   = hangulToJamo(normL);
-          const dist    = editDistance(jamoQ, jamoL, 8);
-          const forceInclude = normL.startsWith(normQ) || normL.includes(normQ) ||
-            normQ.startsWith(normL) || (normL.length > 1 && normQ.includes(normL));
-          const sharedKorean = [...normQ].filter(ch => normL.includes(ch) && /[가-힣]/.test(ch)).length;
-          const lemmaDefTokens = tokenizeEnglish((l.def1 || '') + ' ' + (l.def2 || ''), DEFAULT_STOPWORDS);
-          const defOverlap = resolvedDefTokens.filter(t => lemmaDefTokens.includes(t)).length;
-
-          let score = 0;
-          if (forceInclude)                        score += 12;
-          score += sharedKorean * 2;
-          score += defOverlap * 3;
-          if (dist <= 2)                           score += (3 - dist);
-
-          const relFormIds    = (resolvedEntry.relatedForm    || '').split(',').map(s => s.trim()).filter(Boolean);
-          const relMeaningIds = (resolvedEntry.relatedMeaning || '').split(',').map(s => s.trim()).filter(Boolean);
-          const hiddenIds     = (resolvedEntry.hiddenRelated  || '').split(',').map(s => s.trim()).filter(Boolean);
-          const pinForm    = relFormIds.includes(l.lemmaID);
-          const pinMeaning = relMeaningIds.includes(l.lemmaID);
-          const hide       = hiddenIds.includes(l.lemmaID);
-
-          let tag = '';
-          if (forceInclude)     tag = 'contains';
-          else if (dist <= 2)   tag = 'near';
-          else if (defOverlap)  tag = 'meaning';
-          else if (sharedKorean >= 2) tag = 'shared';
-          if (pinForm)    tag = 'form';
-          if (pinMeaning) tag = 'meaning';
-
-          return { ...l, score, pinForm, pinMeaning, hide, tag };
-        })
-        .filter(l => l.score >= 2 || l.pinForm || l.pinMeaning || l.hide);
-
-      // Pinned connections are never capped — only the discovery pool is.
-      const pinned = scored.filter(l => l.pinForm || l.pinMeaning);
-      const rest = scored
-        .filter(l => !(l.pinForm || l.pinMeaning))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 30);
-
-      setResults(sortResults([...pinned, ...rest]));
-
-    } else {
-      // English
-      const qTokens = tokenizeEnglish(raw, DEFAULT_STOPWORDS);
-      if (!qTokens.length) { setStatus('No match'); return; }
-      const scored = data.lemmaMaster.map(l => {
-        const defTokens = tokenizeEnglish((l.def1 || '') + ' ' + (l.def2 || ''), DEFAULT_STOPWORDS);
-        const shared = qTokens.filter(t => defTokens.includes(t)).length;
-        if (!shared) return null;
-        return { ...l, score: shared, pinForm: false, pinMeaning: false, hide: false, tag: 'en' };
-      }).filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 20);
-      if (!scored.length) { setStatus('No match'); return; }
-      setStatus(`${scored.length} matches`);
-      setResults(scored);
-    }
-  }, [query, data]);
-
   // ── Pin / hide (bidirectional) ───────────────────────────────
+  // Rows are derived from the live Lemma Master; they re-sort on the next render.
   const handlePin = (lemmaID, type, val) => {
-    if (!resolved?.lemmaID) return;
-    updateData(prev => applyRelationPin(prev, resolved.lemmaID, lemmaID, type, val, showAVIToast));
-    setResults(prev => sortResults(prev.map(r =>
-      r.lemmaID !== lemmaID ? r : {
-        ...r,
-        pinForm:    type === 'pinForm'    ? val : r.pinForm,
-        pinMeaning: type === 'pinMeaning' ? val : r.pinMeaning,
-        hide:       type === 'hide'       ? val
-                  : ((type === 'pinForm' || type === 'pinMeaning') && val) ? false
-                  : r.hide,
-      }
-    )));
+    if (!anchor?.lemmaID) return;
+    updateData(prev => applyRelationPin(prev, anchor.lemmaID, lemmaID, type, val, showAVIToast));
   };
 
   // ── Basket ───────────────────────────────────────────────────
@@ -235,6 +110,16 @@ export function AVIMiniSearchPopup({ initialQuery, data, updateData, onClose, sh
     setTimeout(() => { setConnected(false); setBasket([]); }, 2500);
   };
 
+  // ── Derived view ─────────────────────────────────────────────
+  const canPin        = mode === 'ko' && !!anchor && !!related?.anchor;
+  const pinnedRows    = canPin ? related.pinned     : [];
+  const candidateRows = canPin ? related.candidates : [];
+  const hiddenRows    = canPin ? related.hidden     : [];
+  const englishRows   = mode === 'en' && english ? english.results : [];
+  const mainRows      = mode === 'en' ? englishRows : [...pinnedRows, ...candidateRows];
+  const awaitingPick  = mode === 'ko' && !anchor && (status === 'pending' || status === 'none');
+  const columns       = ['Lemma', 'Def 2', 'Tag', ...(canPin ? ['Pin Form', 'Pin Meaning', 'Hide'] : []), '+ Basket'];
+
   const thS = {
     padding: '5px 8px', fontSize: '10px', fontWeight: 700,
     letterSpacing: '0.07em', textTransform: 'uppercase', color: C.textM,
@@ -244,6 +129,30 @@ export function AVIMiniSearchPopup({ initialQuery, data, updateData, onClose, sh
   const tdS = {
     padding: '5px 8px', fontSize: '12px', color: C.text,
     borderBottom: `1px solid ${C.border}`, verticalAlign: 'top',
+  };
+
+  const renderRow = (r) => {
+    const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
+    const def2 = r.ref?.def2 || '';
+    return (
+      <tr key={r.lemmaID} style={{ background: r.hide ? `${C.textM}10` : (r.pinForm || r.pinMeaning) ? `${C.accent}06` : 'transparent', opacity: r.hide ? 0.6 : 1 }}>
+        <td style={tdS}>
+          <button onClick={() => pickLemma(r.lemmaID)} title={`Search ${r.lemma}`} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left', fontFamily: SH.fk, color: C.accent, fontWeight: 600, fontSize: 'inherit' }}>{r.lemma}</button>
+        </td>
+        <td style={{ ...tdS, maxWidth: '160px', color: def2 ? C.text : C.textM }}>{def2 || '—'}</td>
+        <td style={tdS}><span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 5px', color: C.textM, fontFamily: SH.fm }}>{rowTag(r) || '—'}</span></td>
+        {canPin && (<>
+        <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinForm}    onChange={e => handlePin(r.lemmaID, 'pinForm',    e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
+        <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinMeaning} onChange={e => handlePin(r.lemmaID, 'pinMeaning', e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
+        <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.hide}       onChange={e => handlePin(r.lemmaID, 'hide',       e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
+        </>)}
+        <td style={{ ...tdS, textAlign: 'center' }}>
+          <button onClick={() => toggleBasket(r.lemmaID, r.lemma)} style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '4px', padding: '1px 8px', fontSize: '11px', cursor: 'pointer', fontWeight: 600 }}>
+            {inBasket ? '✓' : '+'}
+          </button>
+        </td>
+      </tr>
+    );
   };
 
   return createPortal(
@@ -257,76 +166,132 @@ export function AVIMiniSearchPopup({ initialQuery, data, updateData, onClose, sh
       >
         {/* Search bar */}
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexShrink: 0 }}>
-          {resolved && (
+          {search.canBack && (
+            <button onClick={goBack} title="Back" style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer' }}>
+              {Icons.chevronLeft}
+            </button>
+          )}
+          {mode && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-              <span style={{ fontFamily: SH.fk, fontSize: '15px', fontWeight: 700, color: C.accent }}>{resolved.resolvedLemma}</span>
-              <span style={{ fontSize: '10px', background: C.raised, border: `1px solid ${C.border}`, borderRadius: '4px', padding: '1px 6px', color: C.textM, fontFamily: SH.fm }}>{status}</span>
-              {nearOptions.length > 0 && (
-                <select
-                  style={{ fontSize: '12px', fontFamily: SH.fk, background: C.bg, border: `1px solid ${C.border}`, borderRadius: '6px', padding: '3px 6px', color: C.text, outline: 'none', cursor: 'pointer' }}
-                  value=""
-                  onChange={e => { if (e.target.value) runSearch(e.target.value); }}
-                >
-                  <option value="" disabled>Other matches</option>
-                  {nearOptions.map(opt => <option key={opt.lemmaID} value={opt.lemma}>{opt.lemma}</option>)}
-                </select>
-              )}
+              {mode === 'ko' && anchor && <span style={{ fontFamily: SH.fk, fontSize: '15px', fontWeight: 700, color: C.accent }}>{anchor.lemma}</span>}
+              <span style={{ fontSize: '10px', background: C.raised, border: `1px solid ${C.border}`, borderRadius: '4px', padding: '1px 6px', color: C.textM, fontFamily: SH.fm }}>{statusLabel(search)}</span>
             </div>
           )}
           <input
-            style={{ flex: 1, padding: '7px 10px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: '13px', fontFamily: SH.fk, outline: 'none' }}
+            style={{ flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: isMobile ? '16px' : '13px', fontFamily: SH.fk, outline: 'none' }}
             value={query}
             onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && runSearch()}
+            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && runSearch()}
             placeholder="Korean or English…"
           />
-          : <button onClick={connectBasket} style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: '6px', padding: '3px 12px', fontSize: '12px', fontWeight: 700, cursor: 'pointer', marginLeft: '4px' }}>Connect All</button>
+          <button onClick={() => runSearch()} style={{ ...S.btnPrimary, ...S.btnMetallic, padding: '7px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 600, flexShrink: 0 }}>Search</button>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.textM, fontSize: '18px', cursor: 'pointer', lineHeight: 1, padding: '0 2px' }}>✕</button>
         </div>
 
+        {/* Open the current search in the full Search tab (AS-D24) */}
+        {onOpenInSearch && mode && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '-6px', marginBottom: '8px', flexShrink: 0 }}>
+            <button
+              onClick={() => onOpenInSearch(mode === 'ko' && anchor ? anchor.lemma : search.query)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', color: C.accent, cursor: 'pointer', fontSize: '12px', padding: 0 }}
+            >
+              Open in Search tab {Icons.chevronRight}
+            </button>
+          </div>
+        )}
+
+        {/* Did you mean (AS-D11) */}
+        {awaitingPick && (
+          <div style={{ marginBottom: '10px', flexShrink: 0, fontSize: '12px', color: C.text }}>
+            <div style={{ marginBottom: search.suggestions.length ? '6px' : 0 }}>
+              No exact match for <span style={{ fontFamily: SH.fk, fontWeight: 700 }}>{search.query}</span>.
+              {status === 'pending' && <span style={{ color: C.textM }}> Checking the dictionary…</span>}
+              {search.suggestions.length > 0 && ' Did you mean:'}
+              {status === 'none' && search.suggestions.length === 0 && <span style={{ color: C.textM }}> Nothing similar in your Lemma Master.</span>}
+            </div>
+            {search.suggestions.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {search.suggestions.map(s => (
+                  <button key={s.lemmaID} onClick={() => pickLemma(s.lemmaID)} style={{ display: 'inline-flex', alignItems: 'baseline', gap: '6px', padding: '4px 9px', borderRadius: '14px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer' }}>
+                    <span style={{ fontFamily: SH.fk, fontSize: '12px', fontWeight: 600, color: C.accent }}>{s.lemma}</span>
+                    <span style={{ fontSize: '10px', color: C.textM }}>{SUGGESTION_KIND_LABEL[s.kind]}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* AS5b (AS-D27): once the dictionary check has come back empty */}
+            {status === 'none' && (
+              <AVINoMatchActions
+                key={search.query}
+                query={search.query}
+                data={data}
+                updateData={updateData}
+                staging={staging}
+                showAVIToast={showAVIToast}
+                onStaged={onStaged}
+                onPickLemma={pickLemma}
+                compact
+              />
+            )}
+          </div>
+        )}
+
+        {mode === 'ko' && anchor && stagedNote && stagedNote.lemmaID === anchor.lemmaID && (
+          <div style={{ marginBottom: '8px', flexShrink: 0, padding: '6px 10px', borderRadius: '8px', border: `1px solid ${C.success}`, background: `${C.success}12`, fontSize: '12px', color: C.text }}>
+            Added <span style={{ fontFamily: SH.fk, fontWeight: 700 }}>{stagedNote.surface}</span> to Word Input · {stagedNote.dest}.
+            {stagedNote.isNewLemma && <span style={{ color: C.textM }}> New Lemma Master entry.</span>}
+          </div>
+        )}
+
         {/* Resolved def */}
-        {resolved && (resolved.def2 || resolved.def1) && (
+        {mode === 'ko' && anchor && (anchor.def2 || anchor.def1) && (
           <div style={{ marginBottom: '10px', flexShrink: 0, fontSize: '12px' }}>
-            {resolved.def2 && <div style={{ color: C.text, marginBottom: '2px' }}><span style={{ color: C.textM, fontSize: '11px', marginRight: '6px' }}>Def2:</span>{resolved.def2}</div>}
-            {resolved.def1 && <div style={{ color: C.textM }}><span style={{ fontSize: '11px', marginRight: '6px' }}>Def1:</span>{resolved.def1.split('\n')[0]}</div>}
+            {anchor.def2 && <div style={{ color: C.text, marginBottom: '2px' }}><span style={{ color: C.textM, fontSize: '11px', marginRight: '6px' }}>Def2:</span>{anchor.def2}</div>}
+            {anchor.def1 && <div style={{ color: C.textM }}><span style={{ fontSize: '11px', marginRight: '6px' }}>Def1:</span>{anchor.def1.split('\n')[0]}</div>}
           </div>
         )}
 
         {/* Results table */}
         <div style={{ flex: 1, overflowY: 'auto', border: `1px solid ${C.border}`, borderRadius: '8px' }}>
-          {status === 'No match' && (
-            <div style={{ padding: '20px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>No related lemmas found.</div>
+          {((canPin && mainRows.length === 0 && hiddenRows.length === 0) || (mode === 'en' && english && english.total === 0)) && (
+            <div style={{ padding: '20px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
+              {mode === 'en' ? 'No matches in your definitions.' : 'No related lemmas found.'}
+            </div>
           )}
-          {results.length > 0 && (
+          {mainRows.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
               <thead>
                 <tr>
-                  {['Lemma', 'Def 2', 'Tag', 'Pin Form', 'Pin Meaning', 'Hide', '+ Basket'].map(h => (
+                  {columns.map(h => (
                     <th key={h} style={thS}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {results.map(r => {
-                  const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
-                  return (
-                    <tr key={r.lemmaID} style={{ background: r.hide ? `${C.textM}10` : (r.pinForm || r.pinMeaning) ? `${C.accent}06` : 'transparent', opacity: r.hide ? 0.6 : 1 }}>
-                      <td style={tdS}><span style={{ fontFamily: SH.fk, color: C.accent, fontWeight: 600 }}>{r.lemma}</span></td>
-                      <td style={{ ...tdS, maxWidth: '160px', color: C.textM }}>{r.def2 || '—'}</td>
-                      <td style={tdS}><span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 5px', color: C.textM, fontFamily: SH.fm }}>{r.tag || '—'}</span></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinForm}    onChange={e => handlePin(r.lemmaID, 'pinForm',    e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinMeaning} onChange={e => handlePin(r.lemmaID, 'pinMeaning', e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.hide}       onChange={e => handlePin(r.lemmaID, 'hide',       e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}>
-                        <button onClick={() => toggleBasket(r.lemmaID, r.lemma)} style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '4px', padding: '1px 8px', fontSize: '11px', cursor: 'pointer', fontWeight: 600 }}>
-                          {inBasket ? '✓' : '+'}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {mainRows.map(renderRow)}
               </tbody>
             </table>
+          )}
+          {mode === 'en' && english && englishRows.length < english.total && (
+            <div style={{ textAlign: 'center', padding: '10px' }}>
+              <button onClick={search.showMore} style={{ padding: '5px 14px', borderRadius: '6px', background: C.raised, border: `1px solid ${C.border}`, color: C.text, cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                Show more ({english.total - englishRows.length} more)
+              </button>
+            </div>
+          )}
+          {canPin && hiddenRows.length > 0 && (
+            <div style={{ padding: '8px' }}>
+              <button onClick={() => setHiddenOpen(v => !v)} style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: '6px', color: C.textM, cursor: 'pointer', fontSize: '11px', padding: '3px 10px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Hidden</span>
+                <span style={{ background: C.raised, borderRadius: '10px', padding: '1px 6px', fontFamily: SH.fm }}>{hiddenRows.length}</span>
+                <span style={{ fontSize: '10px' }}>{hiddenOpen ? '▲' : '▼'}</span>
+              </button>
+              {hiddenOpen && (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', marginTop: '6px' }}>
+                  <tbody>{hiddenRows.map(renderRow)}</tbody>
+                </table>
+              )}
+            </div>
           )}
         </div>
 
@@ -337,7 +302,7 @@ export function AVIMiniSearchPopup({ initialQuery, data, updateData, onClose, sh
             {basket.map(b => (
               <span key={b.lemmaID} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: C.accentSoft, border: `1px solid ${C.accent}44`, borderRadius: '12px', padding: '2px 8px', fontSize: '12px', color: C.accent, fontFamily: SH.fk }}>
                 {b.lemma}
-                {!b.isCenter && <button onClick={() => toggleBasket(b.lemmaID, b.lemma)} style={{ background: 'none', border: 'none', color: C.accent, cursor: 'pointer', fontSize: '11px', lineHeight: 1, padding: '0 1px' }}>✕</button>}
+                <button onClick={() => toggleBasket(b.lemmaID, b.lemma)} title="Remove from basket" style={{ background: 'none', border: 'none', color: C.accent, cursor: 'pointer', fontSize: '11px', lineHeight: 1, padding: '0 1px' }}>✕</button>
               </span>
             ))}
             <div style={{ display: 'flex', gap: '4px', marginLeft: 'auto' }}>

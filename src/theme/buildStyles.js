@@ -127,6 +127,7 @@ export function buildGlobalStyles(C) {
   @media (max-width: 700px), (hover: none) and (pointer: coarse) and (orientation: portrait) {
     .sidebar { display: none !important; }
     .mobile-nav { display: flex !important; }
+    body.echo-active .mobile-nav { display: none !important; } /* Echo Quiz rounds (E3) */
     .content-pad { padding: 16px !important; padding-bottom: 80px !important; }
     .today-grid { grid-template-columns: 1fr !important; }
     .stats-col { display: flex !important; flex-direction: column !important; gap: 14px !important; }

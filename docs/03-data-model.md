@@ -17,7 +17,7 @@ All Firestore access is client-side through the Firebase SDK. The four Netlify f
 | Pattern | Where |
 |---|---|
 | App-generated `uid()` (`Date.now().toString(36)` + random suffix, from `dateUtils.js`) | `tasks`, `appointments`, `wordInputs`, `sentenceInputs`, `lemmaMaster` |
-| Firestore auto-IDs (`addDoc` / `doc(collection(...))`) | `content_sources`, `content_sections`, `decks`, `flashcards`, `quiz_results`, `notes` |
+| Firestore auto-IDs (`addDoc` / `doc(collection(...))`) | `content_sources`, `content_sections`, `decks`, `flashcards`, `quiz_results`, `echo_sessions`, `notes` |
 | Deterministic / fixed IDs | `settings/main`, `settings/reviewStats`, `grammar_entries/grammar_{n}`, `reviewLog/{YYYY-MM-DD}`, `dailyplan/{YYYY-MM-DD}`, `decks/deck_grammar`, `grammar_corpus/index`, `globalLemmaMap/{derived key}` |
 
 For the app-generated group, the ID value is also stored as a field on the document (`uid` on AVI input rows, `lemmaID` on lemma entries, `id` on appointments) and the sync layer keys diffs on that field.
@@ -41,6 +41,7 @@ users/{uid}/
   wordInputs/{row.uid}             sentenceInputs/{row.uid}
   lemmaMaster/{lemmaID}            decks/{auto | deck_grammar}
   flashcards/{auto}                quiz_results/{auto}
+  echo_sessions/{auto}
   grammar_entries/{grammar_n}      grammar_corpus/index
   notes/{auto}                     reviewLog/{YYYY-MM-DD}
   dailyplan/{YYYY-MM-DD}           meta/grammar_cleanup
@@ -189,6 +190,7 @@ One row per resolved lemma — the record behind the Lemma Master page and the f
 | `cleanedLemma` | string | `normalizeLemma(lemma)` — the normalized join key used everywhere lemmas are matched |
 | `def1`, `def2` | string | Reference and targeted definitions; editing here cascades to linked rows and cards |
 | `relatedForm`, `relatedMeaning`, `hiddenRelated` | string | Related-word annotations |
+| `echoAlternates` | string[] | Answers saved as correct from the Echo Quiz ("Save as alternate"). Written alone with `arrayUnion` / `arrayRemove`, hidden on the Lemma Master page, and unioned when two entries are merged. An array, not a comma string, because English alternates can contain commas. Absent until the first save |
 | `lastUpdated` | string | ISO timestamp |
 | `autoAddedBy` | string | Provenance of auto-created entries (`'pick'` from the sentence picker, `'import'` from Import); absent on manually created entries |
 | `originUID` | string | `uid()` at creation |
@@ -254,6 +256,10 @@ Firestore auto-ID. Three card types share one collection, discriminated by `type
 One document per completed quiz session. `{ type, score (0–100, one decimal), correct, total, date (ISO), meta }` — `meta` is quiz-type-specific and is JSON-cleaned before writing (the `undefined`-stripping backstop). Loaded with `orderBy('date', 'asc')` and cached in localStorage per user (`avi_quiz_results_{uid}`) for instant paint.
 
 Grammar results carry `meta.mode` (`'selection'`, otherwise Translation; older untagged results count as Translation) and `meta.scoring` (`'g3'` for point-scored Translation, `'g4'` for per-question Selection). Translation scores are points, so `correct` can be fractional (0.5 per concept pick plus 0.5 per translation in Broad mode; △ earns half). The per-question record for a result lives in `users/{uid}/quiz_result_details/{resultId}` — for grammar, the questions, answers, assessments, concept picks, and for Selection the picks as `[{ picked: [...] }]` (Firestore can't nest an array directly inside an array) plus explanations merged in as they're fetched. An unfinished grammar session is kept on the device only (`avi_grammar_session_v1_{uid}` in localStorage, ignored after 14 days), never in Firestore.
+
+## users/{uid}/echo_sessions/{sessionId}
+
+One document per finished Echo Quiz session (Echo two-way or Dictation), kept apart from `quiz_results` so the score charts and averages are untouched. `{ v, kind ('echo' | 'dictation'), startedAt, finishedAt, endReason, config, itemCount, roundsPlayed, firstTry { en2ko, ko2en, ear: { correct, total } }, missedCount, overrideCount, unresolved [lemmaID], pair, items [{ lemmaID, lemma, misses, overrides, nearAccepted, hintsUsed, firstTry, resolved }] }`, built by `echoEngine.buildSummary` and JSON-cleaned before writing. Saved once per session (a session ended before any round finished writes nothing). Cached per user in localStorage (`avi_echo_sessions_{uid}`) and read by the Quizzes report and the Word Record. An unfinished session is kept on the device only (`avi_echo_session_{uid}`, ignored after 14 days); Echo setup options are saved under `avi_quiz_echo_config`.
 
 ## users/{uid}/grammar_entries/{grammar_n}
 

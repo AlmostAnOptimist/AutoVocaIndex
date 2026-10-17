@@ -2,10 +2,11 @@
 // AVI Lemma Master tab.
 // LemmaCard: blur-to-save fields, related pills, search popup trigger, def1 refetch, delete.
 // handleCardSave: full cascade for lemma/def1/def2 changes to wordInputs, sentenceInputs, flashcards.
-// MiniSearchPopup: modal similarity search, opened from related pills or the magnifying glass button.
+// AVIMiniSearchPopup (shared component): similarity search, opened from related pills or the magnifying glass button.
+// AS4: the filter runs on lemmaSearchEngine.js (tiered literal matching, "Did you mean"
+// fallback), plus No def2 / No source chips; filter text and chips are lifted into AVIPage.
 
 import { useState, useCallback, useMemo, useEffect, useRef, memo } from 'react';
-import { createPortal } from 'react-dom';
 import { doc, writeBatch, collection } from 'firebase/firestore';
 import { db, auth } from '../../firebase.js';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
@@ -13,11 +14,14 @@ import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
   uuid, normalizeLemma, fetchDefinition,
-  hangulToJamo, editDistance, stripKoreanAffixes,
-  tokenizeEnglish, DEFAULT_STOPWORDS, detectMode,
-  applyRelationPin, applyRelationConnect, syncNuanceSource,
-  updateLinkedCards,
+  stripKoreanAffixes, syncNuanceSource,
+  updateLinkedCards, resolveLemmaWithDictionary,
 } from '../../utils/aviUtils.js';
+import {
+  buildLemmaIndex, buildSurfaceMap, filterLemmaMaster,
+  suggestLemmas, resolveKorean, findByLemmaText,
+} from '../../utils/lemmaSearchEngine.js';
+import { SUGGESTION_KIND_LABEL } from '../../hooks/useLemmaSearch.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { LemmaAutocompleteInput, LemmaMergeModal } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
@@ -35,227 +39,8 @@ const LM_PAGE_SIZE = isMobile ? 20 : 100;
 // updateLinkedCards now lives in aviUtils.js (shared with Word Input) and
 // supports per-card updates via buildUpdates(card).
 
-// ── MiniSearchPopup ──────────────────────────────────────────
-// Compact similarity search modal. Opened from:
-//   - Clicking a related lemma pill in LemmaCard
-//   - Clicking the magnifying glass button on a LemmaCard or WordRow
-function MiniSearchPopup({ initialQuery, data, updateData, onClose, C, S, showAVIToast }) {
-  const [query,       setQuery]       = useState(initialQuery || '');
-  const [resolved,    setResolved]    = useState(null);
-  const [wordResults, setWordResults] = useState([]);
-  const [status,      setStatus]      = useState('');
-  const [basket,      setBasket]      = useState([]);
-  const [relType,     setRelType]     = useState('Form');
-
-  // Run search on mount if initialQuery provided
-  useEffect(() => {
-    if (initialQuery) runSearch(initialQuery);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function sortResults(results) {
-    return [...results].sort((a, b) => {
-      if (a.pinForm || a.pinMeaning) return -1;
-      if (b.pinForm || b.pinMeaning) return 1;
-      if (a.hide && !b.hide) return 1;
-      if (!a.hide && b.hide) return -1;
-      return 0;
-    });
-  }
-
-  function runSearch(q = query) {
-    const raw = (q || '').trim();
-    if (!raw) return;
-    setQuery(raw);
-    setStatus('');
-    setWordResults([]);
-    setResolved(null);
-
-    const mode = detectMode(raw);
-    let resolvedEntry = null;
-
-    if (mode === 'Korean') {
-      const normQ = normalizeLemma(raw);
-      resolvedEntry =
-        data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normQ) ||
-        data.lemmaMaster.find(l => l.lemma.startsWith(raw)) ||
-        data.lemmaMaster.find(l => l.lemma.includes(raw));
-
-      if (!resolvedEntry) { setStatus('No match'); return; }
-      setResolved({ resolvedLemma: resolvedEntry.lemma, def1: resolvedEntry.def1, def2: resolvedEntry.def2, lemmaID: resolvedEntry.lemmaID });
-      setStatus('Exact');
-
-      // Build results: other lemmas with similar jamo or shared Korean chars
-      const jamoQ  = hangulToJamo(normQ);
-      const results = data.lemmaMaster
-        .filter(l => l.lemmaID !== resolvedEntry.lemmaID)
-        .map(l => {
-          const normL = normalizeLemma(l.lemma);
-          const jamoL = hangulToJamo(normL);
-          const dist  = editDistance(jamoQ, jamoL, 4);
-          const sharedChars = [...normQ].filter(ch => normL.includes(ch) && /[가-힣]/.test(ch)).length;
-          const score = sharedChars * 2 - dist;
-          const pinForm    = (resolvedEntry.relatedForm    || '').split(',').map(s => s.trim()).includes(l.lemmaID);
-          const pinMeaning = (resolvedEntry.relatedMeaning || '').split(',').map(s => s.trim()).includes(l.lemmaID);
-          const hide       = (resolvedEntry.hiddenRelated  || '').split(',').map(s => s.trim()).includes(l.lemmaID);
-          return { ...l, score, dist, pinForm, pinMeaning, hide, tag: dist <= 2 ? 'near' : sharedChars > 0 ? 'shared' : '' };
-        })
-        .filter(l => l.score > 0 || l.pinForm || l.pinMeaning);
-
-      // Pinned connections are never capped — only the discovery pool is.
-      const pinned = results.filter(l => l.pinForm || l.pinMeaning);
-      const rest = results
-        .filter(l => !(l.pinForm || l.pinMeaning))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 30);
-
-      setWordResults(sortResults([...pinned, ...rest]));
-    } else {
-      // English search: tokenize query and match against def1/def2
-      const qTokens = tokenizeEnglish(raw, DEFAULT_STOPWORDS);
-      if (!qTokens.length) { setStatus('No match'); return; }
-
-      resolvedEntry = null;
-      const results = data.lemmaMaster.map(l => {
-        const defTokens = tokenizeEnglish((l.def1 || '') + ' ' + (l.def2 || ''), DEFAULT_STOPWORDS);
-        const shared = qTokens.filter(t => defTokens.includes(t)).length;
-        if (!shared) return null;
-        return { ...l, score: shared, pinForm: false, pinMeaning: false, hide: false, tag: '' };
-      }).filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 20);
-
-      if (!results.length) { setStatus('No match'); return; }
-      setStatus('English match');
-      setWordResults(results);
-    }
-
-    // Auto-add resolved lemma to basket as center
-    if (resolvedEntry) {
-      setBasket(prev => {
-        if (prev.some(b => b.lemmaID === resolvedEntry.lemmaID)) return prev;
-        return [{ lemmaID: resolvedEntry.lemmaID, lemma: resolvedEntry.lemma, isCenter: true }, ...prev];
-      });
-    }
-  }
-
-  const handlePinToggle = (lemmaID, type, val) => {
-    if (!resolved?.lemmaID) return;
-    updateData(prev => applyRelationPin(prev, resolved.lemmaID, lemmaID, type, val, showAVIToast));
-    setWordResults(prev => sortResults(prev.map(r =>
-      r.lemmaID !== lemmaID ? r : {
-        ...r,
-        pinForm:    type === 'pinForm'    ? val : r.pinForm,
-        pinMeaning: type === 'pinMeaning' ? val : r.pinMeaning,
-        hide:       type === 'hide'       ? val : r.hide,
-      }
-    )));
-  };
-
-  const toggleBasket = (lemmaID, lemma) => {
-    setBasket(prev => prev.find(b => b.lemmaID === lemmaID)
-      ? prev.filter(b => b.lemmaID !== lemmaID)
-      : [...prev, { lemmaID, lemma }]
-    );
-  };
-
-  const connectBasket = () => {
-    const items = basket.filter(b => b.lemmaID);
-    if (items.length < 2) return;
-    updateData(prev => applyRelationConnect(prev, items.map(b => b.lemmaID), relType, showAVIToast));
-    setBasket([]);
-  };
-
-  const thS = { padding: '5px 8px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.textM, borderBottom: `1px solid ${C.border}`, textAlign: 'left', whiteSpace: 'nowrap' };
-  const tdS = { padding: '5px 8px', fontSize: '12px', color: C.text, borderBottom: `1px solid ${C.border}`, verticalAlign: 'top' };
-
-  return createPortal(
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 800, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '20px', width: 'min(94vw, 720px)', maxHeight: '85vh', overflowY: 'auto', boxShadow: '0 8px 40px rgba(0,0,0,0.5)' }} onClick={e => e.stopPropagation()}>
-
-        {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
-          <input
-            style={{ flex: 1, padding: '6px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: '13px', fontFamily: SH.fk, outline: 'none' }}
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && runSearch()}
-            placeholder="Korean word or English meaning…"
-          />
-          <button onClick={() => runSearch()} style={{ ...S.btnPrimary, ...S.btnMetallic, padding: '6px 14px', borderRadius: '6px', fontSize: '13px', fontWeight: 600 }}>Search</button>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.textM, fontSize: '18px', cursor: 'pointer', lineHeight: 1, padding: '0 4px' }}>✕</button>
-        </div>
-
-        {/* Resolved lemma */}
-        {resolved && (
-          <div style={{ marginBottom: '12px', padding: '8px 12px', background: C.raised, borderRadius: '8px', border: `1px solid ${C.border}` }}>
-            <span style={{ fontFamily: SH.fk, fontSize: '16px', fontWeight: 700, color: C.accent }}>{resolved.resolvedLemma}</span>
-            {resolved.def2 && <div style={{ fontSize: '12px', color: C.text, marginTop: '3px' }}>{resolved.def2}</div>}
-            {resolved.def1 && !resolved.def2 && <div style={{ fontSize: '12px', color: C.textM, marginTop: '3px' }}>{resolved.def1.split('\n')[0]}</div>}
-          </div>
-        )}
-
-        {/* Results */}
-        {wordResults.length > 0 && (
-          <div style={{ overflowX: 'auto', border: `1px solid ${C.border}`, borderRadius: '8px', marginBottom: '12px' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-              <thead>
-                <tr>
-                  {['Lemma', 'Def 2', 'Tag', 'Pin Form', 'Pin Meaning', 'Hide', '+ Basket'].map(h => (
-                    <th key={h} style={thS}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {wordResults.map(r => {
-                  const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
-                  return (
-                    <tr key={r.lemmaID} style={{ background: r.hide ? `${C.textM}10` : r.pinForm || r.pinMeaning ? `${C.accent}08` : 'transparent', opacity: r.hide ? 0.5 : 1 }}>
-                      <td style={tdS}><span style={{ fontFamily: SH.fk, color: C.accent }}>{r.lemma}</span></td>
-                      <td style={{ ...tdS, maxWidth: '160px', color: C.textM }}>{r.def2 || r.def1?.split('\n')[0] || '—'}</td>
-                      <td style={tdS}><span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 5px', color: C.textM, fontFamily: SH.fm }}>{r.tag || '—'}</span></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinForm} onChange={e => handlePinToggle(r.lemmaID, 'pinForm', e.target.checked)} style={{ accentColor: C.accent }} /></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinMeaning} onChange={e => handlePinToggle(r.lemmaID, 'pinMeaning', e.target.checked)} style={{ accentColor: C.accent }} /></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}><input type="checkbox" checked={!!r.hide} onChange={e => handlePinToggle(r.lemmaID, 'hide', e.target.checked)} style={{ accentColor: C.accent }} /></td>
-                      <td style={{ ...tdS, textAlign: 'center' }}>
-                        <button onClick={() => toggleBasket(r.lemmaID, r.lemma)} style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '4px', padding: '1px 8px', fontSize: '11px', cursor: 'pointer', fontWeight: 600 }}>
-                          {inBasket ? '✓' : '+'}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {status === 'No match' && <div style={{ color: C.textM, fontSize: '13px', marginBottom: '12px' }}>No related lemmas found.</div>}
-
-        {/* Basket */}
-        {basket.length >= 2 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '10px 12px', background: C.raised, borderRadius: '8px', border: `1px solid ${C.border}` }}>
-            <span style={{ fontSize: '12px', fontWeight: 600, color: C.text, flexShrink: 0 }}>Connect:</span>
-            {basket.map(b => (
-              <span key={b.lemmaID} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: C.accentSoft, border: `1px solid ${C.accent}44`, borderRadius: '12px', padding: '2px 8px', fontSize: '12px', color: C.accent, fontFamily: SH.fk }}>
-                {b.lemma}
-                {!b.isCenter && <button onClick={() => toggleBasket(b.lemmaID, b.lemma)} style={{ background: 'none', border: 'none', color: C.accent, cursor: 'pointer', fontSize: '11px', lineHeight: 1, padding: '0 1px' }}>✕</button>}
-              </span>
-            ))}
-            <div style={{ display: 'flex', gap: '4px', marginLeft: 'auto' }}>
-              {['Form', 'Meaning', 'Both'].map(t => (
-                <button key={t} onClick={() => setRelType(t)} style={{ background: relType === t ? C.accent : C.surface, color: relType === t ? '#fff' : C.text, border: `1px solid ${relType === t ? C.accent : C.border}`, borderRadius: '5px', padding: '2px 8px', fontSize: '11px', fontWeight: 600, cursor: 'pointer' }}>{t}</button>
-              ))}
-              <button onClick={connectBasket} style={{ ...S.btnPrimary, ...S.btnMetallic, borderRadius: '6px', padding: '4px 12px', fontSize: '12px', fontWeight: 700, marginLeft: '4px' }}>Connect All</button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body
-  );
-}
-
 // ── LemmaCard ────────────────────────────────────────────────
-const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fetching, onSave, onRefetchDef1, onDelete, onLemmaClick, wordInputs, sentenceInputs, onMerge, editingLemmaID, setEditingLemmaID, C }) {
+const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fetching, onSave, onRefetchDef1, onDelete, onLemmaClick, wordInputs, sentenceInputs, onMerge, editingLemmaID, setEditingLemmaID, C, S }) {
   const [lemmaVal,    setLemmaVal]    = useState(l.lemma || '');
   const [def1Val,     setDef1Val]     = useState(l.def1  || '');
   const [def2Val,     setDef2Val]     = useState(l.def2  || '');
@@ -291,14 +76,15 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
   const relatedPills = (idStr, label) => {
     const ids = (idStr || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!ids.length) return null;
-    const names = ids.map(id => lemmaMaster.find(x => x.lemmaID === id)?.lemma).filter(Boolean);
-    if (!names.length) return null;
+    // Pills carry the lemma's ID, so the popup anchors on exactly this entry (AS-D24).
+    const linked = ids.map(id => ({ id, name: lemmaMaster.find(x => x.lemmaID === id)?.lemma })).filter(x => x.name);
+    if (!linked.length) return null;
     return (
       <div style={{ marginTop: '4px' }}>
         <div style={{ fontSize: '9px', color: C.textM, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: '3px' }}>{label}</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-          {names.map((name, i) => (
-            <span key={i} onClick={() => onLemmaClick && onLemmaClick(name)} style={{ fontSize: '11px', color: C.tL, cursor: 'pointer', background: `${C.tL}18`, borderRadius: '3px', padding: '1px 6px', fontFamily: SH.fk }}>
+          {linked.map(({ id, name }) => (
+            <span key={id} onClick={e => { e.stopPropagation(); if (onLemmaClick) onLemmaClick(name, id); }} style={{ fontSize: '11px', color: C.tL, cursor: 'pointer', background: `${C.tL}18`, borderRadius: '3px', padding: '1px 6px', fontFamily: SH.fk }}>
               {name}
             </span>
           ))}
@@ -437,7 +223,7 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
               </button>
               <button
                 style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 8px', borderRadius: '6px', fontSize: '11px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, cursor: 'pointer' }}
-                onClick={() => onLemmaClick && onLemmaClick(l.lemma)}
+                onClick={() => onLemmaClick && onLemmaClick(l.lemma, l.lemmaID)}
                 title={`Search similarity for "${l.lemma}"`}
               >
                 <MagnifyIcon size={11} /> Search
@@ -541,7 +327,7 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
           </button>
           <button
             style={{ padding: '4px 8px', borderRadius: '6px', fontSize: '11px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}
-            onClick={() => onLemmaClick && onLemmaClick(l.lemma)}
+            onClick={() => onLemmaClick && onLemmaClick(l.lemma, l.lemmaID)}
             title={`Search similarity for "${l.lemma}"`}
           >
             <MagnifyIcon size={11} /> Search
@@ -581,13 +367,32 @@ export function AVILemmaMasterPage({
   data, updateData, showAVIToast,
   cards, updateCards,
   lmPage, setLmPage,
+  lmFilter, setLmFilter, lmChips, setLmChips,
+  goToSearch,
+  // AS5b: source context and card plumbing for the popup's "Add to Word Input"
+  currentSource, currentSection, aviSources, aviSections, decks, updateDecks, dsh,
 }) {
   const { C, S } = useAppTheme();
   const uid = auth.currentUser?.uid;
 
-  const [filter,      setFilter]      = useState('');
+  // Filter text and maintenance chips live in AVIPage (AS-D24) so they stay
+  // paired with lmPage across tab switches; local state is only a fallback.
+  const [localFilter, setLocalFilter] = useState('');
+  const [localChips,  setLocalChips]  = useState({ noDef2: false, noSource: false });
+  const filterText    = lmFilter    ?? localFilter;
+  const setFilterText = setLmFilter ?? setLocalFilter;
+  const chips         = lmChips     ?? localChips;
+  const setChips      = setLmChips  ?? setLocalChips;
+  // The list follows the typed text after a short pause (AS-D22).
+  const [filter, setFilter] = useState(filterText);
+  useEffect(() => {
+    const t = setTimeout(() => setFilter(filterText), 150);
+    return () => clearTimeout(t);
+  }, [filterText]);
+  const setFilterNow = (v) => { setFilterText(v); setFilter(v); };
+
   const [fetching,    setFetching]    = useState(null);
-  const [lemmaPopup,  setLemmaPopup]  = useState(null); // lemma string to open popup for
+  const [lemmaPopup,  setLemmaPopup]  = useState(null); // { query, id } to open the popup on
   const [editingLemmaID, setEditingLemmaID] = useState(null); // mobile only — which card (if any) is in edit mode
   const scrollRef = useRef(null);
 
@@ -613,37 +418,72 @@ export function AVILemmaMasterPage({
     return result;
   }, [data.wordInputs, data.sentenceInputs]);
 
-  // ── Filtered + sorted list ───────────────────────────────────
+  // ── Filtered + sorted list (AS-D22, AS-D26) ──────────────────
+  // Literal matching in tiers (Korean: exact → starts with → contains →
+  // definition text; English: def2 → def1), the user's sort order within each
+  // tier, then the No def2 / No source chips.
+  const index   = useMemo(() => buildLemmaIndex(data.lemmaMaster), [data.lemmaMaster]);
+  const literal = useMemo(() => filterLemmaMaster(index, filter), [index, filter]);
   const filtered = useMemo(() => {
-    let list = data.lemmaMaster.filter(l => {
-      if (!filter) return true;
-      const f = filter.toLowerCase();
-      return (l.lemma || '').includes(filter) ||
-             (l.def1  || '').toLowerCase().includes(f) ||
-             (l.def2  || '').toLowerCase().includes(f);
-    });
-
-    // Sort: lemma matches first, then def matches; within each tier, apply lemmaSortOrder
-    const inLemma = list.filter(l => (l.lemma || '').includes(filter));
-    const inDef   = list.filter(l =>
-      !(l.lemma || '').includes(filter) && (
-        (l.def1 || '').toLowerCase().includes(filter.toLowerCase()) ||
-        (l.def2 || '').toLowerCase().includes(filter.toLowerCase())
-      )
-    );
-
     const applyOrder = (arr) => {
       if (sortOrder === 'alpha') {
         return [...arr].sort((a, b) => (a.lemma || '').localeCompare(b.lemma || '', 'ko'));
       }
       return [...arr].sort((a, b) => (b.lastUpdated || '').localeCompare(a.lastUpdated || ''));
     };
+    const keep = (l) =>
+      (!chips.noDef2   || !String(l.def2 || '').trim()) &&
+      (!chips.noSource || !(lemmaSourcesMap[normalizeLemma(l.lemma) || ''] || []).length);
+    // No filter text: every entry, exactly as stored (not just indexable ones).
+    const tiers = literal.mode === 'all' ? [data.lemmaMaster] : literal.tiers.map(t => t.map(e => e.ref));
+    return tiers.flatMap(t => applyOrder(t.filter(keep)));
+  }, [literal, data.lemmaMaster, chips, lemmaSourcesMap, sortOrder]);
+  const isFiltering = !!filter || chips.noDef2 || chips.noSource;
 
-    // When no filter, just apply sort order to everything
-    if (!filter) return applyOrder(list);
-
-    return [...applyOrder(inLemma), ...applyOrder(inDef)];
-  }, [data.lemmaMaster, filter, sortOrder]);
+  // ── "Did you mean" fallback (AS-D23) ─────────────────────────
+  // Only when Korean text matches nothing literally. Surface forms and the
+  // engine's suggestions are instant; the global lemma map reads Firestore,
+  // so it waits for a longer pause and remembers each answer.
+  const surfaceMap = useMemo(
+    () => buildSurfaceMap(data.wordInputs, data.sentenceInputs),
+    [data.wordInputs, data.sentenceInputs]
+  );
+  const localHeadwords = useMemo(() => {
+    const set = new Set();
+    for (const l of data.lemmaMaster) { if (l.lemma) set.add(l.lemma); if (l.cleanedLemma) set.add(l.cleanedLemma); }
+    return set;
+  }, [data.lemmaMaster]);
+  const needsFuzzy = literal.mode === 'ko' && literal.total === 0;
+  const [dictHit, setDictHit] = useState(null);   // { query, lemmaID, lemma } | null
+  const dictCache = useRef(new Map());
+  useEffect(() => {
+    if (!needsFuzzy) return undefined;
+    const q = filter;
+    if (dictCache.current.has(q)) { setDictHit(dictCache.current.get(q)); return undefined; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      let hit = null;
+      try {
+        const lemma = await resolveLemmaWithDictionary(q, { localHeadwords });
+        const e = lemma ? findByLemmaText(index, lemma) : null;
+        hit = e ? { query: q, lemmaID: e.id, lemma: e.lemma } : null;
+      } catch { hit = null; }
+      dictCache.current.set(q, hit);
+      if (!cancelled) setDictHit(hit);
+    }, 600);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [needsFuzzy, filter, index, localHeadwords]);
+  const fuzzy = useMemo(() => {
+    if (!needsFuzzy) return [];
+    const out = [];
+    const seen = new Set();
+    const push = (lemmaID, lemma, label) => { if (!seen.has(lemmaID)) { seen.add(lemmaID); out.push({ lemmaID, lemma, label }); } };
+    const r = resolveKorean(index, filter, { surfaceMap });
+    if (r.entry) push(r.entry.id, r.entry.lemma, 'from your input');
+    if (dictHit && dictHit.query === filter) push(dictHit.lemmaID, dictHit.lemma, 'dictionary form');
+    for (const s of suggestLemmas(index, filter, { limit: 8 })) push(s.lemmaID, s.lemma, SUGGESTION_KIND_LABEL[s.kind]);
+    return out.slice(0, 8);
+  }, [needsFuzzy, index, filter, surfaceMap, dictHit]);
 
   const totalPages   = Math.ceil(filtered.length / LM_PAGE_SIZE);
   const page         = Math.min(lmPage, Math.max(0, totalPages - 1));
@@ -661,8 +501,17 @@ export function AVILemmaMasterPage({
     enabled: !lemmaPopup && !editingLemmaID,
   });
 
-  // Reset to page 0 when filter or sort changes
-  useEffect(() => { setLmPage(0); }, [filter, sortOrder, setLmPage]);
+  // Reset to page 0 when the filter or sort actually changes — not on mount.
+  // lmPage is lifted into AVIPage so the position survives tab switches; a
+  // mount-time reset threw that away every time the tab opened.
+  const prevFilterSortRef = useRef({ filter, sortOrder, noDef2: chips.noDef2, noSource: chips.noSource });
+  useEffect(() => {
+    const prev = prevFilterSortRef.current;
+    if (prev.filter === filter && prev.sortOrder === sortOrder &&
+        prev.noDef2 === chips.noDef2 && prev.noSource === chips.noSource) return;
+    prevFilterSortRef.current = { filter, sortOrder, noDef2: chips.noDef2, noSource: chips.noSource };
+    setLmPage(0);
+  }, [filter, sortOrder, chips.noDef2, chips.noSource, setLmPage]);
 
   // ── handleCardSave ───────────────────────────────────────────
   const handleCardSave = useCallback(async (lemmaID, field, value) => {
@@ -803,16 +652,25 @@ export function AVILemmaMasterPage({
         return [...s].join(',');
       };
 
+      // Saved Echo alternates (X1, E-D18): the union of both entries'.
+      // The field is only written when there is something to keep.
+      const altsOf = (e) => (Array.isArray(e?.echoAlternates) ? e.echoAlternates : []);
+
       const mergedLemmaMaster = prev.lemmaMaster
         .filter(l => l.lemmaID !== editedLemmaID)
-        .map(l => l.lemmaID !== survivingLemmaID ? l : {
-          ...l,
-          def2:           survivingDef2,
-          relatedForm:    mergeField(l.relatedForm,    edited.relatedForm),
-          relatedMeaning: mergeField(l.relatedMeaning, edited.relatedMeaning),
-          hiddenRelated:  mergeField(l.hiddenRelated,  edited.hiddenRelated),
-          lastUpdated:    now,
-          autoAddedBy:    'manual',
+        .map(l => {
+          if (l.lemmaID !== survivingLemmaID) return l;
+          const alternates = [...new Set([...altsOf(l), ...altsOf(edited)])];
+          return {
+            ...l,
+            def2:           survivingDef2,
+            relatedForm:    mergeField(l.relatedForm,    edited.relatedForm),
+            relatedMeaning: mergeField(l.relatedMeaning, edited.relatedMeaning),
+            hiddenRelated:  mergeField(l.hiddenRelated,  edited.hiddenRelated),
+            ...(alternates.length ? { echoAlternates: alternates } : {}),
+            lastUpdated:    now,
+            autoAddedBy:    'manual',
+          };
         });
 
       const mergedWordInputs = prev.wordInputs.map(w => {
@@ -1003,12 +861,24 @@ export function AVILemmaMasterPage({
       const out = [...new Set(ids.map(id => idRemap[id] || id))].filter(id => id !== entry.lemmaID);
       return out.join(',');
     };
-    const remappedKept = kept.map(l => ({
-      ...l,
-      relatedForm:    remapField(l, 'relatedForm'),
-      relatedMeaning: remapField(l, 'relatedMeaning'),
-      hiddenRelated:  remapField(l, 'hiddenRelated'),
-    }));
+    // Saved Echo alternates (X1, E-D18): a kept entry keeps its own plus those
+    // of every duplicate folded into it.
+    const altsOf = (e) => (Array.isArray(e?.echoAlternates) ? e.echoAlternates : []);
+    const foldedAlts = {};
+    for (const l of data.lemmaMaster) {
+      const to = idRemap[l.lemmaID];
+      if (to && altsOf(l).length) foldedAlts[to] = [...(foldedAlts[to] || []), ...altsOf(l)];
+    }
+    const remappedKept = kept.map(l => {
+      const alternates = [...new Set([...altsOf(l), ...(foldedAlts[l.lemmaID] || [])])];
+      return {
+        ...l,
+        relatedForm:    remapField(l, 'relatedForm'),
+        relatedMeaning: remapField(l, 'relatedMeaning'),
+        hiddenRelated:  remapField(l, 'hiddenRelated'),
+        ...(alternates.length ? { echoAlternates: alternates } : {}),
+      };
+    });
     updateData(prev => ({ ...prev, lemmaMaster: remappedKept }));
 
     // Repoint cards linked to removed entries at the surviving lemmaID.
@@ -1038,12 +908,28 @@ export function AVILemmaMasterPage({
 
       {/* Toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', flexShrink: 0, flexWrap: 'wrap' }}>
-        <input
-          style={{ flex: 1, minWidth: '160px', padding: '6px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: '13px', outline: 'none' }}
-          placeholder="Filter lemmas…"
-          value={filter}
-          onChange={e => setFilter(e.target.value)}
-        />
+        <div style={{ position: 'relative', flex: 1, minWidth: '160px', display: 'flex' }}>
+          <input
+            style={{ flex: 1, minWidth: 0, padding: '6px 28px 6px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: isMobile ? '16px' : '13px', outline: 'none' }}
+            placeholder="Filter lemmas…"
+            value={filterText}
+            onChange={e => setFilterText(e.target.value)}
+          />
+          {filterText && (
+            <button onClick={() => setFilterNow('')} title="Clear filter" style={{ position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '13px', padding: '2px 6px', lineHeight: 1 }}>✕</button>
+          )}
+        </div>
+        {/* Maintenance chips (AS-D26) — combine with each other and the text */}
+        {[['noDef2', 'No def2'], ['noSource', 'No source']].map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setChips(prev => ({ ...prev, [key]: !prev[key] }))}
+            title={key === 'noDef2' ? 'Only entries without a Definition 2' : 'Only entries no Word Input or Sentence Input row uses'}
+            style={{ padding: '5px 10px', borderRadius: '6px', fontSize: '12px', fontWeight: 600, border: `1px solid ${chips[key] ? C.accent : C.border}`, background: chips[key] ? C.accentSoft : 'transparent', color: chips[key] ? C.accent : C.textM, cursor: 'pointer', whiteSpace: 'nowrap' }}
+          >
+            {label}
+          </button>
+        ))}
         <select
           style={{ padding: '6px 8px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, fontSize: '12px', outline: 'none', cursor: 'pointer' }}
           value={sortOrder}
@@ -1059,7 +945,7 @@ export function AVILemmaMasterPage({
           {Icons.refresh} Dedupe
         </button>
         <span style={{ fontSize: '11px', color: C.textM, fontFamily: SH.fm, flexShrink: 0 }}>
-          {data.lemmaMaster.length} entries
+          {isFiltering ? `${filtered.length} of ${data.lemmaMaster.length}` : `${data.lemmaMaster.length} entries`}
         </span>
       </div>
 
@@ -1074,8 +960,28 @@ export function AVILemmaMasterPage({
 
       {/* Scrollable card list */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', paddingRight: '2px' }}>
-        {filtered.length === 0 && (
-          <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>No lemmas found.</div>
+        {filtered.length === 0 && !needsFuzzy && (
+          <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
+            {literal.total > 0 ? 'No lemmas match these filters.' : 'No lemmas found.'}
+          </div>
+        )}
+        {needsFuzzy && (
+          <div style={{ padding: '14px', border: `1px solid ${C.border}`, borderRadius: '10px', background: C.surface, marginBottom: '8px' }}>
+            <div style={{ fontSize: '13px', color: C.text, marginBottom: fuzzy.length ? '8px' : 0 }}>
+              No lemma matches <span style={{ fontFamily: SH.fk, fontWeight: 700 }}>{filter}</span>.
+              {fuzzy.length > 0 ? ' Did you mean:' : <span style={{ color: C.textM }}> Nothing similar in your Lemma Master.</span>}
+            </div>
+            {fuzzy.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {fuzzy.map(s => (
+                  <button key={s.lemmaID} onClick={() => setFilterNow(s.lemma)} style={{ display: 'inline-flex', alignItems: 'baseline', gap: '6px', padding: '5px 10px', borderRadius: '16px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer' }}>
+                    <span style={{ fontFamily: SH.fk, fontSize: '13px', fontWeight: 600, color: C.accent }}>{s.lemma}</span>
+                    <span style={{ fontSize: '10px', color: C.textM }}>{s.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         {filteredPage.map(l => (
           <LemmaCard
@@ -1087,13 +993,14 @@ export function AVILemmaMasterPage({
                       onSave={handleCardSave}
                       onRefetchDef1={refetchDef1}
                       onDelete={deleteLemma}
-                      onLemmaClick={(term) => setLemmaPopup(term)}
+                      onLemmaClick={(term, id) => setLemmaPopup({ query: term, id })}
                       wordInputs={data.wordInputs}
                       sentenceInputs={data.sentenceInputs}
                       onMerge={handleMerge}
                       editingLemmaID={editingLemmaID}
                       setEditingLemmaID={setEditingLemmaID}
                       C={C}
+                      S={S}
                     />
         ))}
       </div>
@@ -1110,16 +1017,17 @@ export function AVILemmaMasterPage({
         C={C}
       />
 
-      {/* MiniSearchPopup */}
+      {/* Similarity search popup (shared with Word Input) */}
       {lemmaPopup && (
-        <MiniSearchPopup
-          initialQuery={lemmaPopup}
+        <AVIMiniSearchPopup
+          initialQuery={lemmaPopup.query}
+          initialLemmaID={lemmaPopup.id}
           data={data}
           updateData={updateData}
           onClose={() => setLemmaPopup(null)}
-          C={C}
-          S={S}
+          onOpenInSearch={goToSearch ? (q) => { setLemmaPopup(null); goToSearch(q); } : undefined}
           showAVIToast={showAVIToast}
+          staging={{ currentSource, currentSection, aviSources, aviSections, cards, decks, updateCards, updateDecks, dsh }}
         />
       )}
     </div>

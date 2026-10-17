@@ -9,13 +9,12 @@ import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
-  uuid, normalizeLemma, cleanStagingText, extractLemmaFromText,
-  resolveLemmaWithDictionary, writeGlobalLemma, fetchDefinition,
-  fetchDefinitionWithFallback, getSourceSections,
-  updateLinkedCards,
+  extractLemmaFromText, writeGlobalLemma, fetchDefinition,
+  getSourceSections, updateLinkedCards,
 } from '../../utils/aviUtils.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { autoCreateWordCard } from '../../utils/cardFactory.js';
+import { stageWordInput } from '../../utils/wordStaging.js';
 import { DEMO } from '../../demo/demoConfig.js';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
 import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
@@ -216,6 +215,8 @@ export function AVIWordInputPage({
     scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
 
   // ── Stage a new word ────────────────────────────────────────
+  // The pipeline itself lives in utils/wordStaging.js (AS5a), shared with the
+  // Search tab's "Add to Word Input" dialog. This page keeps the UI around it.
   const handleStageWord = async () => {
     if (DEMO) return; // demo: intake flows through the Sentence Input picker (D5)
     const raw = stagingText.trim();
@@ -224,20 +225,22 @@ export function AVIWordInputPage({
 
     setProcessing(true);
     try {
-      const cleaned = cleanStagingText(raw, data.aviSettings.noiseBlocks || []);
-      if (!cleaned) return;
+      const result = await stageWordInput({
+        surface: raw,
+        source:  currentSource,
+        section: currentSection,
+        data, updateData,
+        cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+        showAVIToast,
+        onStaged: () => {
+          setStagingText('');
+          setWordPage(0);
+        },
+      });
 
-      // Duplicate staging guard: the same surface in the same section of the
-      // same source doesn't need a second row — jump to and highlight the
-      // existing one instead. (Non-Hangul surfaces match case-insensitively,
-      // consistent with the Import engine.)
-      const surfKey  = (s) => /[가-힣]/.test(s) ? s : String(s).toLowerCase();
-      const exactDup = data.wordInputs.find(w =>
-        surfKey(w.input || '') === surfKey(cleaned) &&
-        w.source === currentSource &&
-        String(w.section ?? '') === String(currentSection ?? '')
-      );
-      if (exactDup) {
+      // Duplicate staging guard: jump to and highlight the existing row.
+      if (result.status === 'duplicate') {
+        const exactDup = result.row;
         const sorted = [...data.wordInputs].sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
         const idx = sorted.findIndex(w => w.uid === exactDup.uid);
         if (idx >= 0) setWordPage(Math.floor(idx / WI_PAGE_SIZE));
@@ -245,146 +248,6 @@ export function AVIWordInputPage({
         window.setTimeout(() => setHighlightUid(null), 2600);
         showAVIToast('Already staged in this section — showing the existing row.');
         setStagingText('');
-        return;
-      }
-
-      // 1. Check local word inputs for prior mapping of same surface form
-      let lemmaText = null;
-      const localMatch = data.wordInputs.find(w => w.input === cleaned && w.lemma);
-      if (localMatch) lemmaText = localMatch.lemma;
-
-      // 2+3. Trust-gated global lemma map, then heuristic candidates
-      // (including irregular recoveries) validated as dictionary
-      // headwords, then the sync heuristic.
-      if (!lemmaText) {
-        const localHeadwords = new Set();
-        for (const l of (data.lemmaMaster || [])) {
-          if (l.lemma) localHeadwords.add(l.lemma);
-          if (l.cleanedLemma) localHeadwords.add(l.cleanedLemma);
-        }
-        lemmaText = await resolveLemmaWithDictionary(cleaned, { localHeadwords }) || cleaned;
-      }
-
-      let normLemma = normalizeLemma(lemmaText);
-      let existingLemmaEntry = data.lemmaMaster.find(
-        l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
-             normalizeLemma(l.lemma) === normLemma
-      );
-
-      let def1 = '', def2 = '';
-      if (existingLemmaEntry) {
-        def1 = existingLemmaEntry.def1 || '';
-        def2 = existingLemmaEntry.def2 || '';
-      } else if (lemmaText && lemmaText.length <= 120) {
-        // Tier 2: a dictionary miss on a machine-resolved lemma retries the
-        // surface's next candidates; a hit adopts that lemma. Skipped when a
-        // prior local mapping supplied the lemma. Adoption recomputes the
-        // lemmaMaster link so an already-studied lemma is linked, not duplicated.
-        const fb = await fetchDefinitionWithFallback(localMatch ? '' : cleaned, lemmaText, data.aviSettings);
-        if (fb.def1 === '__RATE_LIMITED__') {
-          showAVIToast('API rate limit reached — switch to KRDict mode in Settings.');
-          def1 = '';
-        } else {
-          if (fb.lemma !== lemmaText) {
-            lemmaText = fb.lemma;
-            normLemma = normalizeLemma(lemmaText);
-            existingLemmaEntry = data.lemmaMaster.find(
-              l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
-                   normalizeLemma(l.lemma) === normLemma
-            );
-          }
-          if (existingLemmaEntry) {
-            def1 = existingLemmaEntry.def1 || fb.def1;
-            def2 = existingLemmaEntry.def2 || '';
-          } else {
-            def1 = fb.def1;
-          }
-        }
-      }
-
-      const newUid = uuid();
-      const newEntry = {
-        uid:              newUid,
-        ts:               new Date().toISOString(),
-        input:            cleaned,
-        source:           currentSource,
-        section:          currentSection,
-        lemma:            lemmaText,
-        def1,
-        def2,
-        uploaded:         false,
-        skipUpload:       false,
-        lastUncheckReason: '',
-        lastUncheckDate:   '',
-      };
-
-      // Update lemmaMaster if no existing entry
-      if (!existingLemmaEntry) {
-        const newLemma = {
-          lemma:       lemmaText,
-          def1,
-          def2:        '',
-          relatedForm:    '',
-          relatedMeaning: '',
-          hiddenRelated:  '',
-          lastUpdated:  new Date().toISOString(),
-          autoAddedBy:  'auto:staging',
-          cleanedLemma: normLemma,
-          originUID:    newUid,
-          lemmaID:      uuid(),
-        };
-        updateData(prev => ({
-          ...prev,
-          wordInputs:  [newEntry, ...prev.wordInputs],
-          lemmaMaster: [...prev.lemmaMaster, newLemma],
-        }));
-      } else {
-        updateData(prev => ({
-          ...prev,
-          wordInputs: [newEntry, ...prev.wordInputs],
-        }));
-      }
-
-      setStagingText('');
-      setWordPage(0);
-
-      // Auto-create flashcard if def2 is present — unless the deck for this
-      // source already holds a card for the lemma (same source, different
-      // section: the row is wanted for section counts, a duplicate card is not).
-      const targetDeck = decks.find(d => d.name === currentSource);
-      const cardExistsInDeck = !!targetDeck && (cards || []).some(c =>
-        c.type !== 'grammar' && c.lemma &&
-        normalizeLemma(c.lemma) === normLemma &&
-        (c.deckIds || []).includes(targetDeck.id)
-      );
-      if (def2 && !newEntry.skipUpload && cardExistsInDeck) {
-        updateData(prev => ({
-          ...prev,
-          wordInputs: prev.wordInputs.map(w =>
-            w.uid === newUid ? { ...w, uploaded: true } : w
-          ),
-        }));
-      } else if (def2 && !newEntry.skipUpload) {
-        try {
-          await autoCreateWordCard({
-            entry:        newEntry,
-            lemmaMaster:  data.lemmaMaster,
-            decks,
-            uid,
-            updateCards,
-            updateDecks,
-            aviSources,
-            dsh,
-          });
-          updateData(prev => ({
-            ...prev,
-            wordInputs: prev.wordInputs.map(w =>
-              w.uid === newUid ? { ...w, uploaded: true } : w
-            ),
-          }));
-        } catch (e) {
-          console.error('Word Input: card creation failed', e);
-        }
       }
     } catch (e) {
       console.error('Word Input: stage failed', e);
@@ -638,7 +501,9 @@ export function AVIWordInputPage({
           data={data}
           updateData={updateData}
           onClose={() => setSearchPopup(null)}
+          onOpenInSearch={goToSearch ? (q) => { setSearchPopup(null); goToSearch(q); } : undefined}
           showAVIToast={showAVIToast}
+          staging={{ currentSource, currentSection, aviSources, aviSections, cards, decks, updateCards, updateDecks, dsh }}
         />
       )}
     </>

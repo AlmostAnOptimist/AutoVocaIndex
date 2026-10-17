@@ -735,7 +735,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 }
 
 // ── Deck card ─────────────────────────────────────────────────
-function DeckCard({ deck, totalCount, dueCount, newCount, masteryBreakdown, lastStudied, onClick, onSelectCards, onTogglePause, onToggleReverse, C, S }) {
+function DeckCard({ deck, totalCount, dueCount, newCount, masteryBreakdown, lastStudied, onClick, onSelectCards, onTogglePause, onToggleReverse, onEcho, C, S }) {
   const type   = deckType(deck);
   const accent = deckAccent(type, C);
   const isSentenceDeck = type === 'sentence';
@@ -804,7 +804,7 @@ function DeckCard({ deck, totalCount, dueCount, newCount, masteryBreakdown, last
         </button>
       )}
 
-      {type === 'word' && (onTogglePause || onToggleReverse) && (
+      {type === 'word' && (onTogglePause || onToggleReverse || onEcho) && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px' }}>
           {onTogglePause && (
             <button
@@ -822,6 +822,16 @@ function DeckCard({ deck, totalCount, dueCount, newCount, masteryBreakdown, last
               style={{ padding: '4px 5px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '5px', cursor: 'pointer', transition: 'all 0.15s', border: `1px solid ${deck.reversed ? C.accent : C.border}`, background: deck.reversed ? C.accentSoft : 'transparent', color: deck.reversed ? C.accent : C.textM, flexShrink: 0 }}
             >
               {Icons.flipH}
+            </button>
+          )}
+          {onEcho && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onEcho(deck); }}
+              title="Echo Quiz with this deck's words"
+              aria-label={`Echo Quiz with ${deck.name}`}
+              style={{ padding: '3px 8px', fontSize: '11px', borderRadius: '5px', cursor: 'pointer', transition: 'all 0.15s', border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, flexShrink: 0, lineHeight: 1.3 }}
+            >
+              Echo
             </button>
           )}
           {lastStudied && (
@@ -923,7 +933,8 @@ function DeckManager({ decks, onDelete, onClose, C, S }) {
 }
 
 // ── Main page ─────────────────────────────────────────────────
-export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {} }) {
+// onEchoDeck(deckId) (X3): opens the Echo setup on the Quizzes page with that deck chosen.
+export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {}, onEchoDeck = null }) {
   const { C, S } = useAppTheme();
   const [session,           setSession]           = useState(null);
   const [managing,          setManaging]          = useState(false);
@@ -1652,6 +1663,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
                 onClick={() => cardsLoaded ? startSession(deck.id) : null}
                 onSelectCards={deck.id === 'deck_grammar' ? () => setShowGrammarPicker(true) : null}
                 onTogglePause={handleTogglePause}
+                onEcho={onEchoDeck ? (d) => onEchoDeck(d.id) : null}
                 onToggleReverse={handleToggleReverse}
                 C={C} S={S}
               />
@@ -1753,6 +1765,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
                 lastStudied={deck.lastStudied ? formatLastStudied(deck.lastStudied, dsh ?? 3) : null}
                 onClick={() => cardsLoaded ? startSession(deck.id) : null}
                 onTogglePause={handleTogglePause}
+                onEcho={onEchoDeck ? (d) => onEchoDeck(d.id) : null}
                 onToggleReverse={handleToggleReverse}
                 C={C} S={S}
               />

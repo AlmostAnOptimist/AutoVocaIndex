@@ -160,6 +160,11 @@ function _scoreSingle(normUser, front) {
     ...extraVariants.flatMap(ev => expandSlashVariants(
       normalizeFrontForMatching(ev).canonical
     )),
+    // The full form typed without the parentheses: '주먹을 날리다' for
+    // '(주먹을) 날리다', '책을 읽다' for '책(을) 읽다'. The rules above strip
+    // those parentheticals (re-normalizing the extra variant strips it
+    // again), so the full form was only getting half credit.
+    front.replace(/[()]/g, ''),
     // Also accept the raw front with parens if user typed it exactly
     front.replace(/\s+/g, ''),
   ];

@@ -214,8 +214,8 @@ function decontractPastSyllable(ch) {
   if (!d || d[2] !== 20) return null; // needs ㅆ batchim
   // Only contraction-capable vowels de-contract; lexical ㅆ stems (있다,
   // 재미있다, 맛있다) must never lose their batchim.
-  if (![0, 1, 4, 6, 9, 14].includes(d[1])) return null;
-  const map = { 1: 0, 9: 8, 14: 13, 6: 20 }; // ㅐ→ㅏ, ㅘ→ㅗ, ㅝ→ㅜ, ㅕ→ㅣ
+  if (![0, 1, 4, 6, 9, 10, 14].includes(d[1])) return null;
+  const map = { 1: 0, 9: 8, 10: 11, 14: 13, 6: 20 }; // ㅐ→ㅏ, ㅘ→ㅗ, ㅙ→ㅚ, ㅝ→ㅜ, ㅕ→ㅣ
   const v = map[d[1]] !== undefined ? map[d[1]] : d[1];
   return composeSyllable(d[0], v, 0);
 }
@@ -223,8 +223,19 @@ function hangulCount(s) {
   const m = String(s || '').match(/[가-힣]/g);
   return m ? m.length : 0;
 }
+// Stage D: a bare 었/았 syllable (ㅇ + ㅓ/ㅏ + ㅆ) is the past marker on a
+// consonant stem (먹었다, 읽었다, 좋았다) or the past-perfect 었 (갔었다,
+// 먹었었다). It carries no stem sound, so it is dropped whole — repeatedly,
+// for the doubled past — instead of de-contracting to a bogus 먹어다.
+function isBarePastSyllable(ch) {
+  const d = ch ? decomposeSyllable(ch) : null;
+  return !!d && d[0] === 11 && (d[1] === 0 || d[1] === 4) && d[2] === 20;
+}
 function decontractIfPast(cand) {
   if (!cand.endsWith('다') || cand.length < 2) return cand;
+  while (cand.length >= 3 && isBarePastSyllable(cand[cand.length - 2]) && /[가-힣]/.test(cand[cand.length - 3])) {
+    cand = cand.slice(0, -2) + '다';
+  }
   const dc = decontractPastSyllable(cand[cand.length - 2]);
   if (!dc) return cand;
   let out = cand.slice(0, -2) + dc + '다';
@@ -428,7 +439,7 @@ export function extractLemmaCandidates(surface) {
   // (f) Copula peeling for nouns: 황새예요→황새, 학생입니다→학생,
   //     고양이야→고양이. All matches push (no break) — the shorter strips
   //     are junk that fails validation harmlessly.
-  for (const cop of ['입니다', '이에요', '이었다', '예요', '였다', '이야', '야']) {
+  for (const cop of ['입니다', '이었어요', '이에요', '이었다', '이었어', '였어요', '예요', '였다', '였어', '이야', '야']) {
     if (t2.endsWith(cop) && hangulCount(t2.slice(0, -cop.length)) >= 1) {
       push(t2.slice(0, -cop.length));
     }
@@ -436,8 +447,11 @@ export function extractLemmaCandidates(surface) {
   // (g) Fused-ㅆ past recovery, with an optional trailing 어/아 peeled first:
   //     갔다→가다, 봤어→보다, 됐다→되다, 먹었어→먹다. ㅐ is ambiguous
   //     (했→하다, 냈→내다) — offer both.
-  {
-    let base = t2.endsWith('다') ? t2.slice(0, -1) : t2;
+  //     Stage D: also runs on the 요-peeled surface (됐어요→되다,
+  //     보냈어요→보내다), and a fused ㅓ/ㅏ past also offers the 으-dropped
+  //     stem (예뻤어요→예쁘다, 바빴어요→바쁘다, 썼어요→쓰다).
+  for (const src of (t2.endsWith('요') && t2.length >= 2 ? [t2, t2.slice(0, -1)] : [t2])) {
+    let base = src.endsWith('다') ? src.slice(0, -1) : src;
     const dEnd = base.length >= 2 ? decomposeSyllable(base[base.length - 1]) : null;
     if (dEnd && dEnd[0] === 11 && (dEnd[1] === 0 || dEnd[1] === 4) && dEnd[2] === 0) {
       base = base.slice(0, -1);
@@ -453,6 +467,9 @@ export function extractLemmaCandidates(surface) {
       // offer the stem without it (먹었어→먹다).
       if (dS[0] === 11 && (dS[1] === 0 || dS[1] === 4) && base.length >= 2) {
         push(base.slice(0, -1) + '다');
+      }
+      if (dS[0] !== 11 && (dS[1] === 0 || dS[1] === 4)) {
+        push(base.slice(0, -1) + composeSyllable(dS[0], 18, 0) + '다');
       }
     }
   }
@@ -539,7 +556,8 @@ export function extractLemmaCandidates(surface) {
   // 가냐고→가다/먹다). The table's blind 라고/이라고 strips still supply
   // the noun-quote reading (사과라고→사과) as the primary.
   {
-    const dago = t2.endsWith('다고') ? t2.slice(0, -2) : null;
+    const q = t2.endsWith('요') && t2.length >= 3 ? t2.slice(0, -1) : t2;
+    const dago = q.endsWith('다고') ? q.slice(0, -2) : null;
     if (dago && hangulCount(dago) >= 1) {
       push(dago + '다');
       const dQ = decomposeSyllable(dago[dago.length - 1]);
@@ -547,12 +565,66 @@ export function extractLemmaCandidates(surface) {
       if (dago.endsWith('는') || dago.endsWith('은')) push(dago.slice(0, -1) + '다');
     }
     for (const suf of ['으라고', '라고', '으냐고', '느냐고', '냐고', '자고']) {
-      if (t2.endsWith(suf)) {
-        const st = t2.slice(0, -suf.length);
+      if (q.endsWith(suf)) {
+        const st = q.slice(0, -suf.length);
         if (hangulCount(st) >= 1) push(st + '다');
         break;
       }
     }
+    // Stage D: contracted quotative 대(요) = 다고 해(요) (먹었대요→먹다,
+    // 간대요→가다). 기대요-type nouns yield junk that fails validation.
+    if (q.endsWith('대') && hangulCount(q) >= 2) {
+      const st = q.slice(0, -1);
+      push(st + '다');
+      const dQ = decomposeSyllable(st[st.length - 1]);
+      if (dQ && dQ[2] === 4) push(st.slice(0, -1) + composeSyllable(dQ[0], dQ[1], 0) + '다');
+      if (st.endsWith('는') || st.endsWith('은')) push(st.slice(0, -1) + '다');
+    }
+  }
+  // Stage D — past-marker peel. Any candidate still carrying a past marker
+  // (먹었다 from 먹었네요/먹었나요, 들었다, 예뻤다) also offers its
+  // dictionary form, ranked directly after the primary: the GLM tier only
+  // checks the first few candidates, and the peeled form is the likeliest
+  // reading of a past-tense surface. Irregular companions ride along as
+  // validated-only alternatives: ㄹ→ㄷ after a dropped 었 (들었다→듣다),
+  // ㅅ restored on an open stem (나았다→낫다), 으-dropping after a fused
+  // ㅓ/ㅏ (예뻤다→예쁘다).
+  {
+    const extra = [];
+    const add = (c) => { if (c && /[가-힣]/.test(c) && !out.includes(c) && !extra.includes(c)) extra.push(c); };
+    // Seed with the surface cut just after its last ㅆ syllable (들었어요→
+    // 들었다, 먹었는데요→먹었다): the primary may already be peeled, which
+    // would hide the irregular companions.
+    const seeds = [...out];
+    for (let i = t2.length - 1; i >= 1; i--) {
+      const dI = decomposeSyllable(t2[i]);
+      if (dI && dI[2] === 20) { seeds.push(t2.slice(0, i + 1) + '다'); break; }
+    }
+    for (const c of seeds) {
+      if (!c.endsWith('다') || c.length < 2) continue;
+      const d = decomposeSyllable(c[c.length - 2]);
+      if (!d || d[2] !== 20) continue;
+      const peeled = decontractIfPast(c);
+      if (peeled === c) continue;
+      add(peeled);
+      const dP = peeled.length >= 2 ? decomposeSyllable(peeled[peeled.length - 2]) : null;
+      if (!dP) continue;
+      const head = peeled.slice(0, -2);
+      if (isBarePastSyllable(c[c.length - 2])) {
+        if (dP[2] === 8) add(head + composeSyllable(dP[0], dP[1], 7) + '다');
+        if (dP[2] === 0) add(head + composeSyllable(dP[0], dP[1], 19) + '다');
+      } else if ((d[1] === 0 || d[1] === 4) && d[0] !== 11 && dP[2] === 0) {
+        add(head + composeSyllable(dP[0], 18, 0) + '다');
+      } else if (d[1] === 9 && d[0] !== 11 && dP[2] === 0) {
+        // ㅎ dropped before a fused 와: 놨다→놓다.
+        add(head + composeSyllable(dP[0], dP[1], 27) + '다');
+      } else if (d[0] === 11 && (d[1] === 9 || d[1] === 14) && c.length >= 3) {
+        // ㅂ-irregular 왔/웠 on an open stem: 도왔다→돕다, 쉬웠다→쉽다.
+        const dB = decomposeSyllable(c[c.length - 3]);
+        if (dB && dB[2] === 0) add(c.slice(0, -3) + composeSyllable(dB[0], dB[1], 17) + '다');
+      }
+    }
+    if (extra.length) out.splice(1, 0, ...extra);
   }
   return out;
 }

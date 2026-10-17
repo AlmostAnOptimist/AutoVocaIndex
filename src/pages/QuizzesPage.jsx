@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   collection, getDocs, addDoc, updateDoc, setDoc, query, orderBy, getDoc, doc as fsDoc,
+  arrayUnion, arrayRemove,
 } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
@@ -16,7 +17,7 @@ import {
   buildAssessmentRequest, planAssessmentChunks, mergeAssessmentChunks,
   buildExplainRequest, alignExplanations,
   buildSessionSnapshot, parseSessionSnapshot, snapshotProgress,
-  scoreTranslationQuiz, formatPoints,
+  scoreTranslationQuiz, formatPoints, overrideOptions, overrideAssessment,
   scoreSelectionQuiz, buildSelectionCorrectionRows, grammarResultMode,
   toSavedSelections, readSavedSelections,
   summarizeQuizConcepts, cardIdsForConcepts,
@@ -27,7 +28,26 @@ import {
   formatScore, computeRelatedCredit, findClozeTokenIndex,
 } from '../utils/jamoUtils.js';
 import { toDateStr, getLogicalToday } from '../utils/dateUtils.js';
-import { getQuizLeadStory } from '../utils/headlineEngine.js';
+import { isNewCard } from '../utils/fsrs.js';
+import { normalizeLemma, getSourceSections, resolveLemmaWithDictionary } from '../utils/aviUtils.js';
+import {
+  ECHO_DEFAULTS, ECHO_CAP, ECHO_PLAYS_MAX, DIRS, buildItem, selectItems, canAdd, collides,
+  def1ShortGloss, splitSenses, computeHints, createSession, currentRows,
+  gradeRound, resolveRow, roundBlockers, commitRound, endSession, checkCorrection, buildSummary, isResumable,
+  alternateText, alternateBlocker, withAlternates, buildWordRecord,
+} from '../utils/echoEngine.js';
+import {
+  ECHO_SOURCE_IDS, indexEntries, sourceEntries, librarySourcesWithWords,
+  librarySectionsWithWords, vocabDecks,
+} from '../utils/echoSources.js';
+import {
+  buildLemmaIndex, buildSurfaceMap, filterLemmaMaster, resolveKorean,
+  findByLemmaText, suggestLemmas, searchEnglish,
+} from '../utils/lemmaSearchEngine.js';
+import { SUGGESTION_KIND_LABEL } from '../hooks/useLemmaSearch.js';
+import { getQuizStateReport } from '../utils/quizStateEngine.js';
+import { wordAudioUrl, playAudioUrl } from '../utils/ttsUtils.js';
+import { Icons } from '../components/Icons.jsx';
 import { crowSrc as CrowImg, decoBlockStyle } from '../utils/decoAssets.js';
 import { PaginationFooter } from '../components/PaginationFooter.jsx';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
@@ -451,14 +471,1126 @@ function VocaQuizConfig({ open, decks, onStart, onBack, C, S }) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// ECHO QUIZ SETUP (Stage E2 of the Echo Quiz decisions)
+// ─────────────────────────────────────────────────────────────
+// Pick where the words come from, adjust the list (× drops a word and the
+// next one fills in; search adds your own), and set the round options. The
+// list is built by echoEngine.selectItems, which also keeps at most one
+// look-alike pair (E-D10). Settings persist on this device; the list doesn't.
+const ECHO_CONFIG_KEY = 'avi_quiz_echo_config';
+const ECHO_CONFIG_DEFAULTS = {
+  ...ECHO_DEFAULTS,
+  source:     'due',     // 'due' | 'recent' | 'trouble' | 'library' | 'deck' | 'manual'
+  deckIds:    [],        // deck source; empty = all vocab decks
+  libSource:  '',        // library source title
+  libSection: '',        // '' = all sections
+  checkMode:  'column',  // 'column' (whole column, then check) | 'row' (E-D8)
+  correction: true,      // retype misses before the round closes (E-D9)
+};
+const ECHO_SIZE_MIN = 2;
+const ECHO_REPEAT_GAP_MS = 700;   // pause between repeated Dictation plays
+const ECHO_SIZE_MAX = 30;
+const ECHO_SOURCE_LABELS = {
+  due: 'Due today', recent: 'Recent words', trouble: 'Trouble words',
+  library: 'Content Library', deck: 'Deck', manual: 'My picks',
+};
+
+// Two linked rings: marks the one look-alike pair in a list.
+const EchoPairIcon = ({ color }) => (
+  <svg width="16" height="12" viewBox="0 0 16 12" fill="none" stroke={color} strokeWidth="1.6" aria-label="Look-alike pair">
+    <circle cx="5.5" cy="6" r="4" /><circle cx="10.5" cy="6" r="4" />
+  </svg>
+);
+
+function EchoSwitch({ on, onClick, C }) {
+  return (
+    <button onClick={onClick} role="switch" aria-checked={on} style={{
+      width: '44px', height: '24px', borderRadius: '12px', border: 'none', cursor: 'pointer', flexShrink: 0,
+      background: on ? C.accent : C.border, position: 'relative', transition: 'background 0.2s',
+    }}>
+      <div style={{ position: 'absolute', top: '3px', left: on ? '23px' : '3px', width: '18px', height: '18px', borderRadius: '50%', background: '#fff', transition: 'left 0.2s' }} />
+    </button>
+  );
+}
+
+// Small seeded generator so a shuffled source (Library, Deck) keeps the same
+// order while the setup is open, and reshuffles when the source changes.
+function echoRng(seed) {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+}
+
+// Mounted only while open, so every opening starts a fresh list. `seed`
+// (picked when the tile is tapped) varies the Library / Deck shuffle.
+// `preset` (X2/X3) opens it preloaded: { source, added?, deckIds? }. A preset
+// is for this opening only: your saved source and decks stay as they were
+// unless you pick a source yourself.
+function EchoQuizConfig({ seed, preset = null, onBack, onStart, cards, decks, wordInputs, lemmaMaster, aviSources, aviSections, dsh, C, S }) {
+  const [config, setConfig] = useState(() => {
+    // Demo: no text-to-speech (D9), so the audio drills stay off.
+    const saved = { ...loadConfig(ECHO_CONFIG_KEY, ECHO_CONFIG_DEFAULTS), ...(DEMO ? { kind: 'echo', koPrompt: 'text' } : {}) };
+    if (!preset?.source) return saved;
+    return { ...saved, source: preset.source, ...(Array.isArray(preset.deckIds) ? { deckIds: preset.deckIds } : {}) };
+  });
+  const storedRef = useRef(preset?.source ? loadConfig(ECHO_CONFIG_KEY, ECHO_CONFIG_DEFAULTS) : null);
+  const [added,    setAdded]    = useState(() => (Array.isArray(preset?.added) ? preset.added : []));  // lemmaIDs picked by search, in order
+  const [excluded, setExcluded] = useState([]);         // lemmaIDs dropped with ×
+  const [query,    setQuery]    = useState('');
+  const [notice,   setNotice]   = useState(null);       // why a search pick couldn't be added
+  const [reshuffle, setReshuffle] = useState(0);        // bumped when the source changes
+
+  const set = (patch) => setConfig(prev => {
+    const next = { ...prev, ...patch };
+    if (patch.source !== undefined) storedRef.current = null;   // a source you picked is yours to keep
+    const kept = storedRef.current;
+    saveConfig(ECHO_CONFIG_KEY, kept ? { ...next, source: kept.source, deckIds: kept.deckIds } : next);
+    return next;
+  });
+  // A new source starts a fresh list; your own picks stay.
+  const setSource = (patch) => { set(patch); setExcluded([]); setReshuffle(n => n + 1); };
+
+  const index = useMemo(() => indexEntries(lemmaMaster, normalizeLemma), [lemmaMaster]);
+  // Items are built on demand (only the current source's words and search hits).
+  const itemOf = useCallback((entry) => (entry ? buildItem(entry, index.byId) : null), [index]);
+
+  const baseCtx = useMemo(() => ({
+    cards, decks, wordInputs, normalize: normalizeLemma, dsh, index,
+  }), [cards, decks, wordInputs, dsh, index]);
+
+  const counts = useMemo(() => ({
+    due:     sourceEntries('due', baseCtx).filter(e => itemOf(e)).length,
+    trouble: sourceEntries('trouble', baseCtx).filter(e => itemOf(e)).length,
+  }), [baseCtx, itemOf]);
+
+  const candidates = useMemo(() => {
+    const ctx = { ...baseCtx, deckIds: config.deckIds, sourceTitle: config.libSource, section: config.libSection, rand: echoRng(seed + reshuffle * 7919) };
+    const skip = new Set(excluded);
+    return sourceEntries(config.source, ctx).filter(e => !skip.has(e.lemmaID)).map(itemOf).filter(Boolean);
+  }, [baseCtx, config.source, config.deckIds, config.libSource, config.libSection, seed, reshuffle, excluded, itemOf]);
+
+  const addedItems = useMemo(() => added.map(id => itemOf(index.byId.get(id))).filter(Boolean), [added, index, itemOf]);
+  const manual = config.source === 'manual';
+  const target = manual ? addedItems.length : Math.max(config.size, addedItems.length);
+  const selection = useMemo(
+    () => selectItems([...addedItems, ...candidates], target),
+    [addedItems, candidates, target]
+  );
+  const items = selection.items;
+  const pairIds = selection.pair || [];
+  const short = !manual && items.length < config.size;
+
+  // Content Library pickers: sources with word rows; that source's sections.
+  const libSources = useMemo(() => librarySourcesWithWords(wordInputs), [wordInputs]);
+  const libSections = useMemo(() => {
+    if (!config.libSource) return [];
+    const ordered = getSourceSections(aviSources || [], aviSections || [], config.libSource).map(s => s.content || '');
+    return librarySectionsWithWords(wordInputs, config.libSource, ordered);
+  }, [wordInputs, aviSources, aviSections, config.libSource]);
+  const deckChoices = useMemo(() => vocabDecks(decks), [decks]);
+
+  // Search to add your own words, with the AVI search engine (lemmaSearchEngine.js):
+  // the same rules as the Lemma Master filter and its "Did you mean" fallback.
+  // The index is built only once you start typing.
+  const ECHO_SEARCH_LIMIT = 6;
+  const typed = query.trim();
+  const searching = typed !== '';
+  const searchIndex = useMemo(() => (searching ? buildLemmaIndex(lemmaMaster) : null), [lemmaMaster, searching]);
+  const surfaceMap  = useMemo(() => (searching ? buildSurfaceMap(wordInputs || []) : null), [wordInputs, searching]);
+  const literal = useMemo(() => {
+    if (!searchIndex || !typed) return { mode: 'all', hits: [] };
+    const f = filterLemmaMaster(searchIndex, typed);
+    if (f.mode === 'ko') {
+      // Tiers: exact, starts with, contains, definition text. Shorter lemmas first in each.
+      const byLength = (a, b) => a.lemma.length - b.lemma.length || a.lemma.localeCompare(b.lemma, 'ko');
+      return { mode: 'ko', hits: f.tiers.flatMap(t => [...t].sort(byLength)).slice(0, ECHO_SEARCH_LIMIT) };
+    }
+    // English: every word must match the start of a definition word (so a
+    // half-typed word already finds), ranked the way the Search tab ranks
+    // (a def2 that is exactly the gloss first); half-typed-only matches after.
+    const score = new Map(
+      searchEnglish(searchIndex, typed, { limit: searchIndex.N || 1 }).results.map(r => [r.lemmaID, r.score])
+    );
+    const hits = f.tiers.flat()
+      .map((e, i) => ({ e, i, s: score.has(e.id) ? score.get(e.id) : -1 }))
+      .sort((a, b) => b.s - a.s || a.i - b.i)
+      .map(x => x.e);
+    return { mode: 'en', hits: hits.slice(0, ECHO_SEARCH_LIMIT) };
+  }, [searchIndex, typed]);
+
+  // Korean with no literal match: "Did you mean". A form you typed in Word
+  // Input, the dictionary form from the global lemma map (reads Firestore, so
+  // it waits for a pause and remembers each answer), then close spellings.
+  const needsFuzzy = literal.mode === 'ko' && literal.hits.length === 0;
+  const localHeadwords = useMemo(() => {
+    const set = new Set();
+    if (!needsFuzzy) return set;
+    for (const l of lemmaMaster || []) { if (l.lemma) set.add(l.lemma); if (l.cleanedLemma) set.add(l.cleanedLemma); }
+    return set;
+  }, [lemmaMaster, needsFuzzy]);
+  const [dictHit, setDictHit] = useState(null);   // { query, entry } (entry null when nothing found)
+  const dictCache = useRef(new Map());
+  useEffect(() => {
+    if (!needsFuzzy || !searchIndex) return undefined;
+    const q = typed;
+    if (dictCache.current.has(q)) { setDictHit({ query: q, entry: dictCache.current.get(q) }); return undefined; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      let entry = null;
+      try {
+        const lemma = await resolveLemmaWithDictionary(q, { localHeadwords });
+        const hit = lemma ? findByLemmaText(searchIndex, lemma) : null;
+        entry = hit ? hit.ref : null;
+      } catch { entry = null; }
+      dictCache.current.set(q, entry);
+      if (!cancelled) setDictHit({ query: q, entry });
+    }, 600);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [needsFuzzy, typed, searchIndex, localHeadwords]);
+  const dictPending = needsFuzzy && !(dictHit && dictHit.query === typed);
+
+  // Rows: { entry (the Lemma Master entry), label ("Did you mean" reason, or null) }.
+  const results = useMemo(() => {
+    if (!needsFuzzy) return literal.hits.map(e => ({ entry: e.ref, label: null }));
+    const out = [];
+    const seen = new Set();
+    const push = (entry, label) => {
+      if (entry && entry.lemmaID && !seen.has(entry.lemmaID)) { seen.add(entry.lemmaID); out.push({ entry, label }); }
+    };
+    const r = resolveKorean(searchIndex, typed, { surfaceMap });
+    if (r.entry) push(r.entry.ref, 'from your input');
+    if (dictHit && dictHit.query === typed) push(dictHit.entry, 'dictionary form');
+    for (const s of suggestLemmas(searchIndex, typed, { limit: ECHO_SEARCH_LIMIT })) push(s.entry.ref, SUGGESTION_KIND_LABEL[s.kind]);
+    return out.slice(0, ECHO_SEARCH_LIMIT);
+  }, [needsFuzzy, literal, searchIndex, typed, surfaceMap, dictHit]);
+  const addedPair = useMemo(() => selectItems(addedItems, addedItems.length).pair, [addedItems]);
+  const pickStatus = (entry) => {
+    const it = itemOf(entry);
+    if (!it) return 'no definition';
+    if (items.some(x => x.id === it.id)) return 'in the list';
+    if (!canAdd(it, addedItems, addedPair)) {
+      const other = addedItems.find(x => collides(x, it));
+      return other ? `too close to ${other.ko}` : 'already listed';
+    }
+    return null;
+  };
+  const addPick = (entry) => {
+    const status = pickStatus(entry);
+    if (status) {
+      setNotice(status.startsWith('too close')
+        ? `${entry.lemma} is ${status}, and the list already has its one look-alike pair.`
+        : null);
+      return;
+    }
+    setAdded(prev => [...prev, entry.lemmaID]);
+    setExcluded(prev => prev.filter(id => id !== entry.lemmaID));
+    setQuery(''); setNotice(null);
+  };
+  const removeItem = (id) => {
+    if (added.includes(id)) setAdded(prev => prev.filter(x => x !== id));
+    else setExcluded(prev => [...prev, id]);
+  };
+
+  const canStart = items.length >= ECHO_SIZE_MIN;
+
+  const firstLine = (s) => String(s || '').split('\n').map(l => l.trim()).find(Boolean) || '';
+  // First sense without its number: "1.[명사] guarantee(d)…" → "[명사] guarantee(d)…"
+  const gist = (en) => splitSenses(en)[0]?.display || firstLine(en);
+  const selectStyle = {
+    padding: '7px 10px', borderRadius: '8px', fontSize: isMobile ? '16px' : '13px', maxWidth: '100%',
+    border: `1px solid ${C.border}`, background: C.bg, color: C.text, outline: 'none',
+  };
+  const sourceLabel = (id) => {
+    const n = counts[id];
+    return n !== undefined ? `${ECHO_SOURCE_LABELS[id]} · ${n}` : ECHO_SOURCE_LABELS[id];
+  };
+
+  return createPortal(
+    <div style={S.overlay} onClick={e => { if (e.target === e.currentTarget) onBack(); }}>
+      <div style={S.modal} className="slide-up">
+        <div style={{ ...S.modalHeader, marginBottom: '16px' }}>
+          <span style={S.modalTitle}>Echo Quiz</span>
+          <button onClick={onBack} aria-label="Close" style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '18px', padding: '2px' }}>✕</button>
+        </div>
+
+        <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '16px', padding: '0 20px', marginBottom: '16px' }}>
+          {/* Where the words come from */}
+          <ConfigRow label="Words from" C={C}>
+            {ECHO_SOURCE_IDS.map(id => (
+              <ToggleChip key={id} label={sourceLabel(id)} active={config.source === id} onClick={() => setSource({ source: id })} C={C} />
+            ))}
+          </ConfigRow>
+
+          {config.source === 'library' && (
+            <ConfigRow label="Source" C={C}>
+              <select value={config.libSource} onChange={e => setSource({ libSource: e.target.value, libSection: '' })} style={selectStyle}>
+                <option value="">Choose a source…</option>
+                {libSources.map(s => <option key={s.title} value={s.title}>{s.title} ({s.count})</option>)}
+              </select>
+              {config.libSource && libSections.length > 0 && (
+                <select value={config.libSection} onChange={e => setSource({ libSection: e.target.value })} style={selectStyle}>
+                  <option value="">All sections</option>
+                  {libSections.map(s => <option key={s.name} value={s.name}>§{s.name} ({s.count})</option>)}
+                </select>
+              )}
+            </ConfigRow>
+          )}
+
+          {config.source === 'deck' && deckChoices.length > 0 && (
+            <ConfigRow label="Decks" C={C}>
+              <ToggleChip label="All decks" active={config.deckIds.length === 0} onClick={() => setSource({ deckIds: [] })} C={C} />
+              {deckChoices.map(d => (
+                <ToggleChip key={d.id} label={d.name} active={config.deckIds.includes(d.id)} C={C}
+                  onClick={() => setSource({ deckIds: config.deckIds.includes(d.id) ? config.deckIds.filter(x => x !== d.id) : [...config.deckIds, d.id] })} />
+              ))}
+            </ConfigRow>
+          )}
+
+          {!manual && (
+            <ConfigRow label="List size" C={C} noBorder>
+              <Stepper value={config.size} onChange={v => set({ size: v })} min={ECHO_SIZE_MIN} max={ECHO_SIZE_MAX} C={C} />
+            </ConfigRow>
+          )}
+        </div>
+
+        {/* The list */}
+        <div style={{ marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '8px', marginBottom: '8px' }}>
+            <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textM }}>
+              Words ({items.length})
+            </div>
+            {pairIds.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: C.textM }}>
+                <EchoPairIcon color={C.accent} /> look-alikes: either order
+              </div>
+            )}
+          </div>
+
+          {items.length > 0 && (
+            <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
+              {items.map((it, i) => (
+                <div key={it.id} style={{
+                  display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 12px',
+                  borderTop: i ? `1px solid ${C.border}` : 'none',
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: SH.fk, fontSize: '15px', color: C.text }}>{it.ko}</div>
+                    <div style={{ fontSize: '12px', color: C.textM, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{gist(it.en)}</div>
+                  </div>
+                  {pairIds.includes(it.id) && <EchoPairIcon color={C.accent} />}
+                  <button
+                    onClick={() => removeItem(it.id)}
+                    title={added.includes(it.id) || manual ? 'Remove' : 'Remove (the next word fills in)'}
+                    aria-label={`Remove ${it.ko}`}
+                    style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '18px', padding: '4px 6px', flexShrink: 0 }}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(items.length === 0 || short) && (
+            <div style={{ fontSize: '12px', color: C.textM, marginTop: '8px' }}>
+              {manual
+                ? 'Search below to add the words you want.'
+                : config.source === 'library' && !config.libSource
+                  ? 'Choose a source.'
+                  : items.length === 0
+                    ? 'No words with a definition here. Try another source, or add words below.'
+                    : `Only ${items.length} word${items.length === 1 ? '' : 's'} available here.`}
+            </div>
+          )}
+
+          {/* Add your own */}
+          <div style={{ marginTop: '12px' }}>
+            <input
+              type="text"
+              lang="ko"
+              value={query}
+              onChange={e => { setQuery(e.target.value); setNotice(null); }}
+              placeholder="Add a word (Korean or English)…"
+              style={{
+                width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: '8px',
+                fontSize: isMobile ? '16px' : '13px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, outline: 'none',
+              }}
+            />
+            {notice && <div style={{ fontSize: '12px', color: C.danger, marginTop: '6px' }}>{notice}</div>}
+            {query.trim() && (
+              <div style={{ marginTop: '6px', background: C.raised, border: `1px solid ${C.border}`, borderRadius: '10px', overflow: 'hidden' }}>
+                {results.length === 0 && (
+                  <div style={{ padding: '8px 12px', fontSize: '12px', color: C.textM }}>
+                    {dictPending ? 'Checking the dictionary…' : 'No matches in Lemma Master.'}
+                  </div>
+                )}
+                {needsFuzzy && results.length > 0 && (
+                  <div style={{ padding: '7px 12px 5px', fontSize: '11px', color: C.textM }}>
+                    No exact match. Did you mean:
+                  </div>
+                )}
+                {results.map(({ entry: e, label }, i) => {
+                  const status = pickStatus(e);
+                  return (
+                    <button key={e.lemmaID} onClick={() => addPick(e)} disabled={!!status && !status.startsWith('too close')} style={{
+                      display: 'flex', width: '100%', alignItems: 'center', gap: '10px', textAlign: 'left',
+                      padding: '8px 12px', background: 'none', border: 'none', borderTop: i || needsFuzzy ? `1px solid ${C.border}` : 'none',
+                      cursor: status ? 'default' : 'pointer', opacity: status ? 0.55 : 1, color: C.text,
+                    }}>
+                      <span style={{ fontFamily: SH.fk, fontSize: '14px', flexShrink: 0 }}>{e.lemma}</span>
+                      <span style={{ flex: 1, minWidth: 0, fontSize: '12px', color: C.textM, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {status || gist(e.def2 || def1ShortGloss(e.def1) || '')}
+                      </span>
+                      {label && <span style={{ fontSize: '11px', color: C.accent, flexShrink: 0 }}>{label}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Round options */}
+        <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '16px', padding: '0 20px', marginBottom: '20px' }}>
+          {!DEMO && (
+            <ConfigRow label="Drill" C={C}>
+              <ToggleChip label="Echo (both ways)" active={config.kind !== 'dictation'} onClick={() => set({ kind: 'echo' })} C={C} />
+              <ToggleChip label="Dictation" active={config.kind === 'dictation'} onClick={() => set({ kind: 'dictation' })} C={C} />
+            </ConfigRow>
+          )}
+          {config.kind === 'dictation' && (
+            <div style={{ fontSize: '11px', color: C.textM, margin: '-6px 0 10px' }}>
+              Hear each word and type it. Every round repeats by ear; showing the meaning counts as a hint.
+            </div>
+          )}
+          {config.kind === 'dictation' && (
+            <>
+              <ConfigRow label="Plays per tap" C={C}>
+                <Stepper value={config.plays ?? 2} onChange={v => set({ plays: v })} min={1} max={ECHO_PLAYS_MAX} C={C} />
+              </ConfigRow>
+              <div style={{ fontSize: '11px', color: C.textM, margin: '-6px 0 10px' }}>
+                How many times the word plays when its row comes into focus, and each time you press play.
+              </div>
+            </>
+          )}
+          <ConfigRow label="Rounds" C={C}>
+            <ToggleChip label="Set number" active={config.mode === 'rounds'} onClick={() => set({ mode: 'rounds' })} C={C} />
+            <ToggleChip label="Until all correct" active={config.mode === 'complete'} onClick={() => set({ mode: 'complete' })} C={C} />
+            {config.mode === 'rounds' && (
+              <Stepper value={config.rounds} onChange={v => set({ rounds: v })} min={1} max={ECHO_CAP} C={C} />
+            )}
+          </ConfigRow>
+          {config.mode === 'complete' && (
+            <div style={{ fontSize: '11px', color: C.textM, margin: '-6px 0 10px' }}>
+              {config.kind === 'dictation' ? 'Every word right once by ear.' : 'Every word right once each way.'} Stops after {ECHO_CAP} rounds.
+            </div>
+          )}
+          {config.kind !== 'dictation' && (
+            <>
+              <ConfigRow label="Start with" C={C}>
+                <ToggleChip label="English → Korean" active={config.startDir === DIRS.EN2KO} onClick={() => set({ startDir: DIRS.EN2KO })} C={C} />
+                <ToggleChip label="Korean → English" active={config.startDir === DIRS.KO2EN} onClick={() => set({ startDir: DIRS.KO2EN })} C={C} />
+              </ConfigRow>
+              {!DEMO && (
+                <ConfigRow label="Korean prompts" C={C}>
+                  <ToggleChip label="Text" active={config.koPrompt !== 'audio'} onClick={() => set({ koPrompt: 'text' })} C={C} />
+                  <ToggleChip label="Audio" active={config.koPrompt === 'audio'} onClick={() => set({ koPrompt: 'audio' })} C={C} />
+                </ConfigRow>
+              )}
+              {DEMO && (
+                <div style={{ fontSize: '11px', color: C.textM, margin: '10px 0' }}>
+                  Audio prompts and Dictation are not available in the demo.
+                </div>
+              )}
+              {config.koPrompt === 'audio' && (
+                <div style={{ fontSize: '11px', color: C.textM, margin: '-6px 0 10px' }}>
+                  Korean → English rounds play the word instead of showing it. Showing it counts as a hint.
+                </div>
+              )}
+            </>
+          )}
+          <ConfigRow label="Each round" C={C}>
+            <ToggleChip label="Full list" active={!config.shrinking} onClick={() => set({ shrinking: false })} C={C} />
+            <ToggleChip label="Shrinking list" active={config.shrinking} onClick={() => set({ shrinking: true })} C={C} />
+          </ConfigRow>
+          {config.shrinking && (
+            <div style={{ fontSize: '11px', color: C.textM, margin: '-6px 0 10px' }}>
+              {config.kind === 'dictation' ? "A word drops out once you've had it right by ear." : "A word drops out once you've had it right both ways."}
+            </div>
+          )}
+          <ConfigRow label="Check answers" C={C}>
+            <ToggleChip label="Whole column" active={config.checkMode !== 'row'} onClick={() => set({ checkMode: 'column' })} C={C} />
+            <ToggleChip label="Row by row" active={config.checkMode === 'row'} onClick={() => set({ checkMode: 'row' })} C={C} />
+          </ConfigRow>
+          <div style={{ padding: '14px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: '13px', color: C.textS }}>Shuffle each round</div>
+            <EchoSwitch on={config.shuffle} onClick={() => set({ shuffle: !config.shuffle })} C={C} />
+          </div>
+          <div style={{ padding: '14px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+            <div>
+              <div style={{ fontSize: '13px', color: C.textS }}>Retype mistakes</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '2px' }}>Write the right answer before the round closes</div>
+            </div>
+            <EchoSwitch on={config.correction} onClick={() => set({ correction: !config.correction })} C={C} />
+          </div>
+        </div>
+
+        <button
+          style={{ ...S.btnPrimary, width: '100%', justifyContent: 'center', padding: '12px', fontSize: '14px', opacity: canStart ? 1 : 0.5 }}
+          onClick={() => canStart && onStart({ items, pair: selection.pair, config })}
+          disabled={!canStart}
+        >
+          {canStart ? `Start ${config.kind === 'dictation' ? 'Dictation' : 'Echo'} · ${items.length} words` : `Add at least ${ECHO_SIZE_MIN} words`}
+        </button>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// ECHO QUIZ SESSION (Stage E3)
+// ─────────────────────────────────────────────────────────────
+// One round = the prompt column + your answer column. Whole-column mode:
+// write every answer, then Check. Row-by-row mode: each row is checked as you
+// leave it (Enter / Next / ✓). After checking, every row shows the Lemma
+// Master answer (E-D11); close answers need Accept or Reject; anything not
+// accepted can be overridden ("I was right"); misses are retyped before the
+// round closes unless that setting is off (E-D9). Decisions can be undone
+// until the round closes. The next round's prompts are this round's answers
+// in canonical form (echoEngine.commitRound, E-D3).
+
+const echoInputStyle = (C, done) => ({
+  width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: '8px',
+  fontSize: isMobile ? '16px' : '15px', lineHeight: 1.3,
+  border: `1.5px solid ${done ? 'transparent' : C.border}`, background: done ? 'transparent' : C.bg,
+  color: C.text, outline: 'none',
+});
+
+// Status line for a checked row.
+function echoStatus(r, decision) {
+  if (r.accepted === true) {
+    if (r.overridden) return { text: 'Marked right', tone: 'ok' };
+    if (r.nearAccepted) return { text: 'Accepted', tone: 'ok' };
+    if (r.via === 'synonym') return { text: 'Right — a synonym', tone: 'ok' };
+    if (r.via === 'alternate') return { text: 'Right — a saved alternate', tone: 'ok' };
+    if (r.via === 'pair') return { text: 'Right — either order', tone: 'ok' };
+    return { text: 'Right', tone: 'ok' };
+  }
+  if (r.accepted === null) {
+    const why = r.via === 'form' ? 'a related form' : r.via === 'partial' ? 'part of it' : 'a small slip';
+    return { text: `Close — ${why}. Count it?`, tone: 'near' };
+  }
+  if (decision === 'reject') return { text: 'Not counted', tone: 'miss' };
+  if (r.verdict === 'blank') return { text: 'Left blank', tone: 'miss' };
+  if (r.via === 'close') return { text: 'Close — one sound off', tone: 'miss' };   // Dictation (X-D14)
+  return { text: 'Not quite', tone: 'miss' };
+}
+
+// initialDraft: the round's answers and decisions saved on this device (E4
+// resume), used only when it belongs to this session and round. onDraft is
+// told about every change so the parent can save it.
+// alternatesOf(id) → the entry's saved alternates; onSaveAlternate(id, text,
+// remove) → Promise<boolean> (X1, E-D18).
+// audioOf(id) → { status: 'pending' | 'ready' | 'failed', url } for audio
+// prompts (X4); ttsSpeed from Settings.
+function EchoRound({ state, initialDraft, onDraft, onCommit, onEnd, alternatesOf, onSaveAlternate, audioOf, ttsSpeed = 0.9, C, S }) {
+  const rows    = useMemo(() => currentRows(state), [state]);
+  const itemMap = useMemo(() => new Map(state.items.map(i => [i.id, i])), [state.items]);
+  const cfg     = state.config;
+  const rowMode = cfg.checkMode === 'row';
+  const correctionOn = cfg.correction !== false;
+  const en2ko   = state.dir === DIRS.EN2KO;
+  const dictation = state.dir === DIRS.EAR;   // Dictation (X4): hear the word, type it
+  const koAnswer  = en2ko || dictation;       // the answer column is Korean
+
+  const draft = initialDraft && initialDraft.startedAt === state.startedAt && initialDraft.round === state.round ? initialDraft : null;
+  const asMap = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? x : {});
+  const [answers,     setAnswers]     = useState(() => asMap(draft?.answers));
+  const [submitted,   setSubmitted]   = useState(() => (Array.isArray(draft?.submitted) ? draft.submitted.filter(id => state.order.includes(id)) : []));  // checked row ids
+  const [decisions,   setDecisions]   = useState(() => asMap(draft?.decisions));  // id → 'accept' | 'reject' | 'override'
+  const [corrections, setCorrections] = useState(() => asMap(draft?.corrections));
+  // Saved alternates this round (X1): id → { text, status: 'saving' | 'saved' | 'error' }.
+  const [alts, setAlts] = useState(() => Object.fromEntries(Object.entries(asMap(draft?.alternates))
+    .filter(([id, a]) => state.order.includes(id) && a && typeof a.text === 'string')
+    .map(([id, a]) => [id, { text: a.text, status: 'saved' }])));
+  // Hidden prompts shown before checking (X4): id → true; each counts as a hint.
+  const [revealed, setRevealed] = useState(() => Object.fromEntries(Object.entries(asMap(draft?.revealed)).filter(([id, v]) => v && state.order.includes(id))));
+  const [confirmEnd,  setConfirmEnd]  = useState(false);
+  const inputRefs  = useRef({});
+
+  // Audio prompts (X4): the play button replays freely; the first play is
+  // automatic once the row's answer box has focus and its audio is ready.
+  const playingRef = useRef(null);
+  const autoPlayed = useRef(new Set());
+  const [playingId, setPlayingId] = useState(null);
+  // Dictation plays the word cfg.plays times per focus or tap, with a short
+  // gap between plays; Echo's audio prompts play it once.
+  const playsPerTap = dictation ? Math.min(ECHO_PLAYS_MAX, Math.max(1, Number(cfg.plays) || 2)) : 1;
+  const play = (id) => {
+    const a = audioOf ? audioOf(id) : null;
+    if (!a || a.status !== 'ready' || !a.url) return;
+    playingRef.current?.cancel?.();
+    let cancelled = false;
+    let clip = null;
+    const h = { cancel() { cancelled = true; clip?.cancel?.(); } };
+    playingRef.current = h;
+    setPlayingId(id);
+    (async () => {
+      for (let k = 0; k < playsPerTap && !cancelled; k++) {
+        if (k) await new Promise(r => setTimeout(r, ECHO_REPEAT_GAP_MS));
+        if (cancelled) break;
+        clip = playAudioUrl(a.url, ttsSpeed);
+        try { await clip.promise; } catch { break; }
+      }
+      if (playingRef.current === h) { playingRef.current = null; setPlayingId(null); }
+    })();
+  };
+  const autoPlay = (row) => {
+    if (!row.prompt.audio || isChecked(row.id) || autoPlayed.current.has(row.id)) return;
+    const a = audioOf ? audioOf(row.id) : null;
+    if (!a || a.status !== 'ready') return;
+    autoPlayed.current.add(row.id);
+    play(row.id);
+  };
+  useEffect(() => () => playingRef.current?.cancel?.(), []);
+  // Plays once the focused row's audio is ready (it may still be generating).
+  const [focusedId, setFocusedId] = useState(null);
+  const focusedAudio = focusedId && audioOf ? audioOf(focusedId)?.status : null;
+  useEffect(() => {
+    if (focusedAudio !== 'ready') return;
+    const row = rows.find(r => r.id === focusedId);
+    if (row) autoPlay(row);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedId, focusedAudio]);
+  const reveal = (id) => setRevealed(prev => ({ ...prev, [id]: true }));
+  const checkBtnRef = useRef(null);
+  const committedRef = useRef(false); // one commit per round (E-D14)
+
+  // Report the round so far, for resume (E4).
+  useEffect(() => {
+    const savedAlts = Object.fromEntries(Object.entries(alts).filter(([, a]) => a.status === 'saved').map(([id, a]) => [id, { text: a.text }]));
+    onDraft?.({ startedAt: state.startedAt, round: state.round, answers, submitted, decisions, corrections, alternates: savedAlts, revealed });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answers, submitted, decisions, corrections, alts, revealed]);
+
+  // Each round starts at the top (the page keeps its scroll position otherwise).
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      const pad = document.querySelector('.content-pad');
+      if (pad) pad.scrollTop = 0;
+      window.scrollTo(0, 0);
+    });
+  }, []);
+
+  const isChecked = (id) => submitted.includes(id);
+  const allChecked = submitted.length === rows.length;
+
+  const graded = useMemo(() => {
+    const sent = Object.fromEntries(rows.map(r => [r.id, submitted.includes(r.id) ? (answers[r.id] ?? '') : '']));
+    const g = gradeRound(state, sent);
+    return { ...g, rows: g.rows.map(r => (decisions[r.id] ? resolveRow(r, decisions[r.id]) : r)) };
+  }, [state, rows, answers, submitted, decisions]);
+  const gradedById = useMemo(() => new Map(graded.rows.map(r => [r.id, r])), [graded]);
+  const blockers = allChecked ? roundBlockers(state, graded, corrections, { skipCorrection: !correctionOn }) : null;
+
+  const focusInput = (id) => {
+    const el = inputRefs.current[id];
+    if (el) el.focus();
+  };
+  const nextUnchecked = (fromId, checked) => {
+    const ids = rows.map(r => r.id);
+    const start = ids.indexOf(fromId);
+    for (let k = 1; k <= ids.length; k++) {
+      const id = ids[(start + k) % ids.length];
+      if (!checked.includes(id)) return id;
+    }
+    return null;
+  };
+
+  const checkAll = () => {
+    setSubmitted(rows.map(r => r.id));
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  };
+  const checkRow = (id) => {
+    if (isChecked(id)) return;
+    const next = [...submitted, id];
+    setSubmitted(next);
+    const n = nextUnchecked(id, next);
+    if (n) setTimeout(() => focusInput(n), 0);
+  };
+
+  // Enter = next row (whole-column mode) or check this row (row mode).
+  // Ignored while the Korean keyboard is still building a syllable.
+  const onAnswerKey = (e, id, idx) => {
+    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    if (rowMode) { checkRow(id); return; }
+    const next = rows[idx + 1];
+    if (next) focusInput(next.id);
+    else checkBtnRef.current?.focus();
+  };
+  const onCorrectionKey = (e, id) => {
+    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    const missIds = graded.rows.filter(r => r.accepted === false).map(r => r.id);
+    const next = missIds[missIds.indexOf(id) + 1];
+    if (next) inputRefs.current[`fix-${next}`]?.focus();
+  };
+  // Phone: keep the row being typed in clear of the keyboard.
+  const onFocusRow = (e) => {
+    if (!isMobile) return;
+    const el = e.target.closest('[data-echo-row]');
+    setTimeout(() => el?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
+  };
+
+  // Saved alternates (X1): written to the Lemma Master entry at once; the
+  // session's later rounds accept them from the next round on.
+  const saveAlt = async (id) => {
+    const text = alternateText(answers[id] ?? '');
+    if (!text || !onSaveAlternate) return;
+    setAlts(prev => ({ ...prev, [id]: { text, status: 'saving' } }));
+    const ok = await onSaveAlternate(id, text, false);
+    setAlts(prev => ({ ...prev, [id]: { text, status: ok ? 'saved' : 'error' } }));
+  };
+  const unsaveAlt = async (id) => {
+    const a = alts[id];
+    if (!a) return;
+    setAlts(prev => { const next = { ...prev }; delete next[id]; return next; });
+    if (a.status !== 'saved' || !onSaveAlternate) return;
+    const ok = await onSaveAlternate(id, a.text, true);
+    if (!ok) setAlts(prev => ({ ...prev, [id]: { text: a.text, status: 'saved' } }));
+  };
+
+  const decide = (id, action) => {
+    if (!action && decisions[id] === 'override' && alts[id]) unsaveAlt(id);
+    setDecisions(prev => {
+      const next = { ...prev };
+      if (action) next[id] = action; else delete next[id];
+      return next;
+    });
+  };
+
+  const commit = () => {
+    if (!blockers?.ok || committedRef.current) return;
+    committedRef.current = true;
+    const saved = Object.entries(alts).filter(([, a]) => a.status === 'saved').map(([id, a]) => ({ id, text: a.text }));
+    onCommit(withAlternates(commitRound(state, graded, { hinted: revealed }), saved));
+  };
+
+  // Header progress: rounds mode = rounds done; until-correct = words done both ways.
+  const resolvedCount = state.items.filter(i => (dictation ? state.progress[i.id].ear : state.progress[i.id].en2ko && state.progress[i.id].ko2en)).length;
+  const pct = cfg.mode === 'complete'
+    ? (resolvedCount / state.items.length) * 100
+    : ((state.round - 1) / cfg.rounds) * 100;
+  const lastFixedRound = cfg.mode === 'rounds' && state.round >= cfg.rounds;
+  const cols = en2ko ? '3fr 2fr' : '2fr 3fr'; // longer text gets the wider column (E-D15)
+  const toneColor = { ok: C.success || '#5a8a5a', near: C.warning, miss: C.danger };
+
+  const blockerText = blockers && !blockers.ok
+    ? [
+        blockers.undecided.length ? `decide ${blockers.undecided.length} close answer${blockers.undecided.length === 1 ? '' : 's'}` : '',
+        blockers.uncorrected.length ? `retype ${blockers.uncorrected.length} answer${blockers.uncorrected.length === 1 ? '' : 's'}` : '',
+      ].filter(Boolean).join(' · ')
+    : '';
+
+  const smallBtn = (primary) => ({
+    fontSize: '12px', padding: '4px 11px', borderRadius: '6px', cursor: 'pointer',
+    color: primary ? C.accent : C.textM,
+    background: primary ? C.accentSoft : 'transparent',
+    border: `1px solid ${primary ? `${C.accent}44` : C.border}`,
+  });
+
+  return (
+    <div style={{ maxWidth: '720px', margin: '0 auto' }} className="fade-up quiz-session">
+      {/* Sticky header */}
+      <div style={{ position: 'sticky', top: 0, zIndex: 10, background: C.bg, paddingTop: isMobile ? '12px' : '4px', paddingBottom: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: SH.fd, fontSize: '17px', color: C.text }}>
+              Round {state.round}{cfg.mode === 'rounds' ? ` of ${cfg.rounds}` : ''}
+            </div>
+            <div style={{ fontSize: '11px', color: C.textM }}>
+              {dictation ? 'Dictation' : en2ko ? 'English → Korean' : 'Korean → English'} · {rows.length} word{rows.length === 1 ? '' : 's'}
+              {cfg.mode === 'complete' ? ` · ${resolvedCount}/${state.items.length} ${dictation ? 'right by ear' : 'done both ways'}` : ''}
+            </div>
+          </div>
+          <button onClick={() => setConfirmEnd(v => !v)} style={{
+            fontSize: '12px', color: C.textM, padding: '3px 10px', borderRadius: '6px',
+            border: `1px solid ${C.border}`, background: 'transparent', cursor: 'pointer', flexShrink: 0,
+          }}>End</button>
+        </div>
+        <div style={{ height: '4px', background: `${C.accent}22`, borderRadius: '2px', marginTop: '8px' }}>
+          <div style={{ height: '100%', width: `${Math.min(100, pct)}%`, background: C.accent, borderRadius: '2px', transition: 'width 0.3s' }} />
+        </div>
+        {confirmEnd && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '10px', fontSize: '12px', color: C.textS }}>
+            End now? This round won't count.
+            <button onClick={() => onEnd(endSession(state))} style={smallBtn(true)}>End session</button>
+            <button onClick={() => setConfirmEnd(false)} style={smallBtn(false)}>Keep going</button>
+          </div>
+        )}
+      </div>
+
+      {/* Column labels */}
+      <div style={{ display: 'grid', gridTemplateColumns: cols, gap: '10px', padding: '0 12px 6px', fontSize: '10px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM }}>
+        <div>{dictation ? 'Listen' : en2ko ? 'Meaning' : cfg.koPrompt === 'audio' ? 'Korean (listen)' : 'Korean'}</div>
+        <div>{koAnswer ? 'Korean' : 'Meaning'}</div>
+      </div>
+
+      <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px' }}>
+        {rows.map((row, idx) => {
+          const item    = itemMap.get(row.id);
+          const checked = isChecked(row.id);
+          const g       = gradedById.get(row.id);
+          const decision = decisions[row.id];
+          const st      = checked ? echoStatus(g, decision) : null;
+          const fixOk   = checked && g.accepted === false && checkCorrection(item, state.dir, corrections[row.id] ?? '');
+          const truest  = koAnswer ? item.ko : item.en;
+          // Audio prompts (X4): hidden until checked or revealed; with no audio
+          // the row falls back to text (Dictation shows the meaning instead).
+          const au       = row.prompt.audio ? (audioOf ? audioOf(row.id) : null) : null;
+          const audioOff = !!row.prompt.audio && (!au || au.status === 'failed');
+          const showText = !row.prompt.audio || audioOff || checked || !!revealed[row.id];
+          const promptText = row.prompt.audio && dictation ? row.prompt.reveal : row.prompt.text;
+          const promptKo   = row.prompt.kind === 'ko' && !(row.prompt.audio && dictation);
+          return (
+            <div key={row.id} data-echo-row style={{ padding: '10px 12px', borderTop: idx ? `1px solid ${C.border}` : 'none' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: cols, gap: '10px', alignItems: 'start' }}>
+                {/* Prompt */}
+                <div style={{ minWidth: 0 }}>
+                  {row.prompt.audio && !audioOff && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: showText ? '4px' : 0 }}>
+                      <button
+                        onClick={() => play(row.id)}
+                        disabled={au?.status !== 'ready'}
+                        aria-label={`Play word ${idx + 1}`}
+                        title="Play"
+                        style={{
+                          flexShrink: 0, width: '32px', height: '32px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          border: `1px solid ${playingId === row.id ? C.accent : C.border}`, background: playingId === row.id ? C.accentSoft : 'transparent',
+                          color: C.accent, cursor: au?.status === 'ready' ? 'pointer' : 'default', opacity: au?.status === 'ready' ? 1 : 0.5,
+                        }}
+                      >{playingId === row.id ? Icons.speakerPlaying : Icons.speaker}</button>
+                      {au?.status === 'pending' && <span style={{ fontSize: '11px', color: C.textM }}>Loading audio…</span>}
+                      {!checked && !revealed[row.id] && (
+                        <button onClick={() => reveal(row.id)} style={{ background: 'none', border: 'none', padding: 0, fontSize: '11.5px', color: C.textM, textDecoration: 'underline', cursor: 'pointer' }}>
+                          {dictation ? 'Show meaning' : 'Show word'}
+                        </button>
+                      )}
+                      {!checked && revealed[row.id] && <span style={{ fontSize: '11px', color: C.warning }}>hint used</span>}
+                    </div>
+                  )}
+                  {showText && (
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+                      <div style={{
+                        flex: 1, minWidth: 0, color: C.text, whiteSpace: 'pre-line', overflowWrap: 'break-word',
+                        wordBreak: promptKo ? 'keep-all' : 'normal',
+                        fontFamily: promptKo ? SH.fk : 'inherit',
+                        fontSize: promptKo ? '16px' : '13.5px', lineHeight: 1.45,
+                      }}>{promptText}</div>
+                      {row.pairId && <EchoPairIcon color={C.accent} />}
+                    </div>
+                  )}
+                  {audioOff && !checked && (
+                    <div style={{ fontSize: '11px', color: C.textM, marginTop: '2px' }}>
+                      {dictation ? 'Audio unavailable: type the word for this meaning.' : 'Audio unavailable: showing the word.'}
+                    </div>
+                  )}
+                  {row.hint && <div style={{ fontSize: '11px', color: C.textM, marginTop: '2px' }}>{row.hint}</div>}
+                  {row.twoPart && !checked && <div style={{ fontSize: '11px', color: C.textM, marginTop: '2px' }}>Two parts — separate with / or ,</div>}
+                </div>
+                {/* Answer */}
+                <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {checked ? (
+                    <div style={{
+                      flex: 1, padding: '8px 0', overflowWrap: 'break-word', wordBreak: koAnswer ? 'keep-all' : 'normal',
+                      fontFamily: koAnswer ? SH.fk : 'inherit', fontSize: koAnswer ? '16px' : '14px',
+                      color: toneColor[st.tone],
+                    }}>{(answers[row.id] || '').trim() || '—'}</div>
+                  ) : (
+                    <>
+                      <input
+                        ref={el => { inputRefs.current[row.id] = el; }}
+                        lang={koAnswer ? 'ko' : 'en'}
+                        value={answers[row.id] ?? ''}
+                        onChange={e => setAnswers(prev => ({ ...prev, [row.id]: e.target.value }))}
+                        onKeyDown={e => onAnswerKey(e, row.id, idx)}
+                        onFocus={e => { onFocusRow(e); setFocusedId(row.id); }}
+                        autoFocus={idx === 0}
+                        enterKeyHint={idx === rows.length - 1 && !rowMode ? 'done' : 'next'}
+                        autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
+                        aria-label={`Answer ${idx + 1}`}
+                        style={echoInputStyle(C, false)}
+                      />
+                      {rowMode && (
+                        <button onClick={() => checkRow(row.id)} aria-label={`Check answer ${idx + 1}`} style={{
+                          flexShrink: 0, width: '30px', height: '30px', borderRadius: '6px', cursor: 'pointer',
+                          border: `1px solid ${C.border}`, background: 'transparent', color: C.accent, fontSize: '15px',
+                        }}>✓</button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Feedback: status, the Lemma Master answer, decisions, retype */}
+              {checked && (
+                <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '11.5px', fontWeight: 600, color: toneColor[st.tone] }}>{st.text}</span>
+                    <span style={{
+                      fontSize: koAnswer ? '14px' : '12.5px', fontFamily: koAnswer ? SH.fk : 'inherit',
+                      color: C.textS, whiteSpace: 'pre-line', overflowWrap: 'break-word', wordBreak: koAnswer ? 'keep-all' : 'normal',
+                    }}>{truest}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {g.accepted === null && (
+                      <>
+                        <button onClick={() => decide(row.id, 'accept')} style={smallBtn(true)}>Accept</button>
+                        <button onClick={() => decide(row.id, 'reject')} style={smallBtn(false)}>Reject</button>
+                      </>
+                    )}
+                    {g.accepted === false && (
+                      <button onClick={() => decide(row.id, 'override')} style={smallBtn(true)}>I was right</button>
+                    )}
+                    {decision && <button onClick={() => decide(row.id, null)} style={smallBtn(false)}>Undo</button>}
+                  </div>
+                  {decision === 'override' && onSaveAlternate && !dictation && !(row.pairId && en2ko) && (() => {
+                    const a = alts[row.id];
+                    const note = { fontSize: '11.5px', color: C.textM, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' };
+                    if (a?.status === 'saved') {
+                      return (
+                        <div style={note}>
+                          <span>Saved as an alternate. It counts as right from now on.</span>
+                          <button onClick={() => unsaveAlt(row.id)} style={smallBtn(false)}>Unsave</button>
+                        </div>
+                      );
+                    }
+                    if (a?.status === 'saving') return <div style={note}>Saving…</div>;
+                    const why = alternateBlocker(item, state.dir, answers[row.id] ?? '', alternatesOf ? alternatesOf(row.id) : []);
+                    if (why === 'full') return <div style={note}>This word already has the maximum number of saved alternates.</div>;
+                    if (why) return null;
+                    return (
+                      <div style={note}>
+                        <button onClick={() => saveAlt(row.id)} style={smallBtn(false)}>Save as alternate</button>
+                        {a?.status === 'error' && <span style={{ color: C.danger }}>Couldn't save. Try again?</span>}
+                      </div>
+                    );
+                  })()}
+                  {g.accepted === false && correctionOn && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <input
+                        ref={el => { inputRefs.current[`fix-${row.id}`] = el; }}
+                        lang={koAnswer ? 'ko' : 'en'}
+                        value={corrections[row.id] ?? ''}
+                        onChange={e => setCorrections(prev => ({ ...prev, [row.id]: e.target.value }))}
+                        onKeyDown={e => onCorrectionKey(e, row.id)}
+                        onFocus={onFocusRow}
+                        placeholder="Retype the answer"
+                        enterKeyHint="next"
+                        autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
+                        aria-label={`Retype answer ${idx + 1}`}
+                        style={{ ...echoInputStyle(C, false), borderColor: fixOk ? (C.success || '#5a8a5a') : C.border }}
+                      />
+                      <span style={{ width: '18px', flexShrink: 0, color: C.success || '#5a8a5a', fontSize: '15px' }} aria-label={fixOk ? 'Retyped correctly' : undefined}>{fixOk ? '✓' : ''}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Footer */}
+      <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '6px' }}>
+        {!allChecked && !rowMode && (
+          <button ref={checkBtnRef} onClick={checkAll} style={{ ...S.btnPrimary, justifyContent: 'center', padding: '11px', fontSize: '14px' }}>
+            Check answers
+          </button>
+        )}
+        {!allChecked && rowMode && (
+          <div style={{ fontSize: '12px', color: C.textM, textAlign: 'center' }}>{submitted.length} of {rows.length} checked</div>
+        )}
+        {allChecked && (
+          <>
+            <button onClick={commit} disabled={!blockers?.ok} style={{
+              ...S.btnPrimary, justifyContent: 'center', padding: '11px', fontSize: '14px', opacity: blockers?.ok ? 1 : 0.5,
+            }}>
+              {lastFixedRound ? 'Finish' : 'Next round'}
+            </button>
+            {blockerText && <div style={{ fontSize: '12px', color: C.textM, textAlign: 'center' }}>First {blockerText}.</div>}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// End of a session (Stage E4): how it went, word by word. The parent saves the
+// summary to echo_sessions once (E-D12, E-D14) and passes the save status in.
+// The summary's title, first-try tiles and word table (E4), shared by the
+// end-of-session screen and the Examiner's Echo log (X2). glossOf(lemmaID)
+// returns a short gloss for the word, or null.
+function EchoSummaryBody({ sum, glossOf, C }) {
+  const pctOf = (x) => (x?.total ? `${Math.round((x.correct / x.total) * 100)}%` : '—');
+  const title = sum.endReason === 'complete' ? 'All done both ways'
+    : sum.endReason === 'cap' ? `Stopped after ${ECHO_CAP} rounds`
+    : sum.endReason === 'ended' ? 'Session ended'
+    : 'Session complete';
+  const modeText = sum.config?.mode === 'complete' ? ' · until all correct' : '';
+  // Words still to work on first, then the most-missed.
+  const rows = (sum.items || [])
+    .map((it, i) => ({ ...it, i }))
+    .sort((a, b) => (a.resolved - b.resolved) || (b.misses - a.misses) || (a.i - b.i));
+  const mark = (v) => (v === 'correct' ? { t: '✓', c: C.success || '#5a8a5a' } : v === 'incorrect' ? { t: '✗', c: C.danger } : { t: '–', c: C.textM });
+  const colW = '44px';
+  const firstTry = sum.firstTry || {};
+  const dict = sum.kind === 'dictation';   // X-D17
+  const tiles = dict ? [['By ear', firstTry.ear]] : [['English → Korean', firstTry.en2ko], ['Korean → English', firstTry.ko2en]];
+  const tableCols = dict ? `1fr ${colW} ${colW}` : `1fr ${colW} ${colW} ${colW}`;
+
+  return (
+    <>
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontFamily: SH.fd, fontSize: '24px', color: C.text }}>{title}</div>
+        <div style={{ fontSize: '12px', color: C.textM, marginTop: '4px' }}>
+          {dict ? 'Dictation · ' : ''}{sum.roundsPlayed} round{sum.roundsPlayed === 1 ? '' : 's'} · {sum.itemCount} words{modeText}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: dict ? '1fr' : '1fr 1fr', gap: '12px' }}>
+        {tiles.map(([label, x]) => (
+          <div key={label} style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '14px', textAlign: 'center' }}>
+            <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.accent }}>{pctOf(x)}</div>
+            <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>{label}</div>
+            <div style={{ fontSize: '10.5px', color: C.textM }}>first try{x?.total ? ` · ${x.correct}/${x.total}` : ''}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Word by word */}
+      <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
+        <div style={{
+          display: 'grid', gridTemplateColumns: tableCols, gap: '6px', padding: '8px 12px',
+          fontSize: '10px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM,
+          borderBottom: `1px solid ${C.border}`,
+        }}>
+          <div>Word</div>
+          {dict ? (
+            <div style={{ textAlign: 'center' }} title="First try, by ear">Ear</div>
+          ) : (
+            <>
+              <div style={{ textAlign: 'center' }} title="First try, English → Korean">EN→KO</div>
+              <div style={{ textAlign: 'center' }} title="First try, Korean → English">KO→EN</div>
+            </>
+          )}
+          <div style={{ textAlign: 'center' }}>Missed</div>
+        </div>
+        {rows.map((r, k) => {
+          const gloss = glossOf ? glossOf(r.lemmaID) : null;
+          const a = mark(dict ? r.firstTry?.ear : r.firstTry?.en2ko), b = mark(r.firstTry?.ko2en);
+          const notes = [
+            !r.resolved ? (dict ? 'not yet right by ear' : 'not yet right both ways') : '',
+            r.overrides ? `marked right ×${r.overrides}` : '',
+            r.nearAccepted ? `close answer accepted ×${r.nearAccepted}` : '',
+          ].filter(Boolean).join(' · ');
+          return (
+            <div key={r.lemmaID} style={{
+              display: 'grid', gridTemplateColumns: tableCols, gap: '6px', alignItems: 'center',
+              padding: '8px 12px', borderTop: k ? `1px solid ${C.border}` : 'none',
+            }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: SH.fk, fontSize: '15px', color: C.text, wordBreak: 'keep-all', overflowWrap: 'break-word' }}>{r.lemma}</div>
+                {gloss && <div style={{ fontSize: '11.5px', color: C.textM, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{gloss}</div>}
+                {notes && <div style={{ fontSize: '10.5px', color: r.resolved ? C.textM : C.warning, marginTop: '1px' }}>{notes}</div>}
+              </div>
+              <div style={{ textAlign: 'center', color: a.c, fontSize: '15px' }}>{a.t}</div>
+              {!dict && <div style={{ textAlign: 'center', color: b.c, fontSize: '15px' }}>{b.t}</div>}
+              <div style={{ textAlign: 'center', fontFamily: SH.fm, fontSize: '13px', color: r.misses ? C.danger : C.textM }}>{r.misses}</div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function EchoSummary({ state, save, onRetrySave, onPracticeMissed, onAgain, onDone, C, S }) {
+  const sum = useMemo(() => buildSummary(state), [state]);
+  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
+  const itemMap = useMemo(() => new Map(state.items.map(i => [i.id, i])), [state.items]);
+  const missed = sum.items.filter(it => it.misses > 0 || !it.resolved);
+  const gist = (en) => splitSenses(en)[0]?.display || String(en || '').split('\n')[0];
+  const glossOf = (id) => { const item = itemMap.get(id); return item ? gist(item.en) : null; };
+  const saveText = !save ? '' : save.status === 'saving' ? 'Saving…'
+    : save.status === 'saved' ? 'Saved to your Echo history.'
+    : save.status === 'skipped' ? 'No rounds were finished, so nothing was saved.'
+    : save.status === 'error' ? "Couldn't save this session." : '';
+
+  return (
+    <div style={{ maxWidth: '620px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '16px', ...(isMobile && { paddingTop: '24px' }) }} className="fade-up quiz-session">
+      <EchoSummaryBody sum={sum} glossOf={glossOf} C={C} />
+      {saveText && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontSize: '11.5px', color: save.status === 'error' ? C.danger : C.textM }}>
+          {saveText}
+          {save.status === 'error' && (
+            <button onClick={onRetrySave} style={{ ...S.btnGhost, padding: '3px 10px', fontSize: '12px' }}>Retry</button>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: '8px', justifyContent: 'flex-end' }}>
+        {missed.length > 0 && missed.length < sum.itemCount && (
+          <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => onPracticeMissed(missed.map(m => m.lemmaID))}>
+            Practice the missed words ({missed.length})
+          </button>
+        )}
+        <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={onAgain}>Run it again</button>
+        <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={onDone}>Back to Quizzes</button>
+      </div>
+    </div>
+  );
+}
+
+// Runs a session: one keyed EchoRound per round (so each round starts with
+// empty answers, or the saved draft when resuming), then the summary. Hides
+// the phone's bottom nav while rounds are on screen (E-D15; CSS rule in
+// buildStyles.js).
+function EchoSession({ state, draft, onDraft, onChange, save, onRetrySave, onPracticeMissed, onAgain, onExit, alternatesOf, onSaveAlternate, audioOf, ttsSpeed, C, S }) {
+  useEffect(() => {
+    if (state.done) return undefined;
+    document.body.classList.add('echo-active');
+    return () => document.body.classList.remove('echo-active');
+  }, [state.done]);
+  if (state.done) {
+    return <EchoSummary state={state} save={save} onRetrySave={onRetrySave} onPracticeMissed={onPracticeMissed} onAgain={onAgain} onDone={onExit} C={C} S={S} />;
+  }
+  return <EchoRound key={`${state.startedAt}|${state.round}`} state={state} initialDraft={draft} onDraft={onDraft} onCommit={onChange} onEnd={onChange} alternatesOf={alternatesOf} onSaveAlternate={onSaveAlternate} audioOf={audioOf} ttsSpeed={ttsSpeed} C={C} S={S} />;
+}
+
+// ─────────────────────────────────────────────────────────────
 // WEIGHTED CARD SELECTION
 // ─────────────────────────────────────────────────────────────
 // Weight formula (applied within the selected pool):
-//   easeFactor < 2.0                    → base weight 3
-//   otherwise                           → base weight 1
-//   lastGrade < 3 (and grade exists)    → weight × 2
-//   no SM-2 history (repetitions === 0) → weight 1 (neutral)
+//   never reviewed                       → weight 1 (neutral)
+// FSRS cards (have stability — every card graded since the FSRS switch):
+//   lapses > 3 or difficulty > 7         → base weight 3 (same "struggling"
+//                                          thresholds as triageBucket)
+//   otherwise                            → base weight 1
+//   state learning/relearning            → weight × 2 (last answer was Again)
+// Legacy SM-2 cards (no stability):
+//   easeFactor < 2.0                     → base weight 3
+//   otherwise                            → base weight 1
+//   lastGrade < 3 (and grade exists)     → weight × 2
+//   no SM-2 history (repetitions === 0)  → weight 1 (neutral)
+// FSRS grading never writes the SM-2 fields, so reading only those left
+// every FSRS card at weight 1 and the weak-card bias silently off.
 function cardWeight(card) {
+  if (isNewCard(card)) return 1;
+  if (card.stability) {
+    const base = (card.lapses ?? 0) > 3 || (card.difficulty ?? 5) > 7 ? 3 : 1;
+    const lastWasAgain = card.state === 'learning' || card.state === 'relearning';
+    return lastWasAgain ? base * 2 : base;
+  }
   const ef    = card.easeFactor  ?? 2.5;
   const grade = card.lastGrade;
   const reps  = card.repetitions ?? 0;
@@ -1580,7 +2712,10 @@ function VocaTypeQ({ q, config, onAnswer, onOverride, onRelatedOverride, C, S })
             lang="ko"
             value={input}
             onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+            // isComposing: the Korean keyboard is still building a syllable.
+            // That Enter only finishes the syllable; submitting on it can
+            // send twice and skip past the feedback.
+            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && handleSubmit()}
             placeholder="Type the Korean word…"
             style={{
                           // 16px on mobile: iOS Safari auto-zooms any focused input whose
@@ -2399,7 +3534,7 @@ function GrammarConceptPick({ q, chosenId, C }) {
 // screen then offers Retry / Assess now instead of a score.
 // Scoring (G3): Drill = translation credit (O 1, △ 0.5, X 0); Broad = 0.5 for
 // the concept pick + 0.5 × translation credit. See scoreTranslationQuiz.
-function GrammarTranslationResults({ questions, translations, conceptChoices, assessment, assessErrorCode, onRetryAssess, links, onDone, C, S }) {
+function GrammarTranslationResults({ questions, translations, conceptChoices, assessment, assessErrorCode, onRetryAssess, onOverride, links, onDone, C, S }) {
   // Enter = Back to Quizzes, except while a Retry button is showing (G2), so
   // pressing Enter on Retry doesn't also leave the screen.
   useGlobalKey(e => { if (e.key === 'Enter') onDone(); }, { enabled: !!assessment });
@@ -2470,7 +3605,7 @@ function GrammarTranslationResults({ questions, translations, conceptChoices, as
               </div>
             </div>
 
-            {/* Corrected sentence (shown for △ and X only) */}
+            {/* Corrected sentence (△ and X; an O only when the assessor fixed a typo or spacing slip) */}
             {a?.corrected && (
               <div>
                 <div style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.textM, marginBottom: '4px' }}>Suggested correction</div>
@@ -2497,6 +3632,41 @@ function GrammarTranslationResults({ questions, translations, conceptChoices, as
                     <div style={{ fontSize: '12.5px', color: C.textS, lineHeight: 1.5 }}>{note}</div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Override the translation verdict (like the Vocabulary Quiz):
+                raise X → △ / O or △ → O, or undo. A Broad concept pick
+                is never overridden. */}
+            {a && onOverride && (a.overriddenFrom || overrideOptions(a).length > 0) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                {a.overriddenFrom && (
+                  <span style={{ fontSize: '11px', color: C.textM }}>Overridden — assessed {a.overriddenFrom}</span>
+                )}
+                {overrideOptions(a).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => onOverride(i, v)}
+                    style={{
+                      fontSize: '12px', color: C.accent,
+                      background: C.accentSoft, border: `1px solid ${C.accent}44`,
+                      borderRadius: '6px', padding: '4px 12px', cursor: 'pointer',
+                    }}
+                  >
+                    {v === 'O' ? 'Mark as correct' : 'Mark as partial'}
+                  </button>
+                ))}
+                {a.overriddenFrom && (
+                  <button
+                    onClick={() => onOverride(i, null)}
+                    style={{
+                      fontSize: '12px', color: C.textM, background: 'none',
+                      border: `1px solid ${C.border}`, borderRadius: '6px', padding: '4px 12px', cursor: 'pointer',
+                    }}
+                  >
+                    Undo
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -3161,10 +4331,239 @@ function MiniLineChart({ data, width = 560, height = 180, C }) {
   );
 }
 
-function ReportCard({ results, links, C, S, dsh = 3 }) {
+// ─────────────────────────────────────────────────────────────
+// ECHO HISTORY ON THE EXAMINER (X2)
+// ─────────────────────────────────────────────────────────────
+const ECHO_END_LABEL = { rounds: 'Complete', complete: 'All done both ways', cap: 'Stopped at the cap', ended: 'Ended early' };
+const echoDay = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : toDateStr(d); };
+const echoPct = (x) => (x?.total ? `${Math.round((x.correct / x.total) * 100)}%` : '—');
+const echoGloss = (e) => (e ? (splitSenses(e.def2 || '')[0]?.display || def1ShortGloss(e.def1) || '') : '');
+
+// One saved Echo session in the Echo Log.
+function EchoLogRow({ s, last, onClick, C }) {
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={e => { e.currentTarget.style.background = `${C.accent}08`; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px',
+        padding: '10px 16px', borderBottom: last ? 'none' : `1px solid ${C.border}`,
+        fontSize: '12.5px', cursor: 'pointer', transition: 'background 0.1s',
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <span style={{
+            fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', padding: '2px 7px', borderRadius: '10px',
+            color: C.warning, background: `${C.warning}18`,
+          }}>{s.kind === 'dictation' ? 'Dictation' : 'Echo'}</span>
+          <span style={{ color: C.textM }}>{echoDay(s.finishedAt || s.startedAt)}</span>
+        </div>
+        <div style={{ fontSize: '11px', color: C.textM, marginTop: '3px' }}>
+          {s.itemCount ?? 0} words · {s.roundsPlayed ?? 0} round{s.roundsPlayed === 1 ? '' : 's'} · {ECHO_END_LABEL[s.endReason] || 'Complete'}
+        </div>
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        {s.kind === 'dictation' ? (
+          <>
+            <div style={{ fontFamily: SH.fm, fontSize: '13px', color: C.accent }}>{echoPct(s.firstTry?.ear)}</div>
+            <div style={{ fontSize: '10px', color: C.textM }}>first try by ear</div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontFamily: SH.fm, fontSize: '13px', color: C.accent }}>{echoPct(s.firstTry?.en2ko)} · {echoPct(s.firstTry?.ko2en)}</div>
+            <div style={{ fontSize: '10px', color: C.textM }}>first try EN→KO · KO→EN</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A saved session's summary, read-only, from the Echo Log.
+function EchoHistoryModal({ session, byId, onClose, C, S }) {
+  useGlobalKey(e => { if (e.key === 'Escape') onClose(); });
+  const glossOf = (id) => echoGloss(byId.get(id)) || null;
+  return createPortal(
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 200,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px',
+    }} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: '620px', maxHeight: 'min(80vh, calc(100dvh - 32px))', display: 'flex', flexDirection: 'column', gap: '16px' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: '12px', color: C.textM }}>Echo · {echoDay(session.finishedAt || session.startedAt)}</span>
+          <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '18px', padding: '2px' }}>✕</button>
+        </div>
+        <EchoSummaryBody sum={session} glossOf={glossOf} C={C} />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// Every word Echo has seen (X-D6): first try each way, misses, last seen,
+// a three-session trend, saved alternates (× removes, X-D3), and ticks for
+// "Practice these", which opens the Echo setup with the ticked words.
+const WR_PAGE_SIZE = 10;
+function EchoWordRecord({ sessions, lemmaMaster, onRemoveAlternate, onPractice, C, S }) {
+  const [query,  setQuery]  = useState('');
+  const [page,   setPage]   = useState(0);
+  const [ticked, setTicked] = useState([]);
+  const record = useMemo(() => buildWordRecord(sessions), [sessions]);
+  const byId = useMemo(() => new Map((lemmaMaster || []).filter(e => e?.lemmaID).map(e => [e.lemmaID, e])), [lemmaMaster]);
+  const rows = useMemo(() => {
+    const q = query.normalize('NFC').trim().toLowerCase();
+    if (!q) return record;
+    const qk = q.replace(/\s+/g, '');
+    return record.filter(r => {
+      const e = byId.get(r.lemmaID);
+      const ko = String(e?.lemma || r.lemma).normalize('NFC').toLowerCase().replace(/\s+/g, '');
+      const en = `${e?.def2 || ''}\n${e?.def1 || ''}`.toLowerCase();
+      return ko.includes(qk) || en.includes(q);
+    });
+  }, [record, query, byId]);
+  const totalPages = Math.max(1, Math.ceil(rows.length / WR_PAGE_SIZE));
+  const pg = Math.min(page, totalPages - 1);
+  const shown = rows.slice(pg * WR_PAGE_SIZE, (pg + 1) * WR_PAGE_SIZE);
+  const usable = ticked.filter(id => byId.has(id));
+  const toggle = (id) => setTicked(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+  const lastSeen = (iso) => { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+  const cols = isMobile ? '24px minmax(0, 1fr) auto' : '24px minmax(0, 1fr) 62px 62px 62px 56px 52px 58px 64px';
+  const head = { fontSize: '10px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM, textAlign: 'center' };
+  const trendMarks = (trend) => (
+    <span title="Last three sessions, oldest first" style={{ letterSpacing: '2px', whiteSpace: 'nowrap' }}>
+      {trend.map((ok, i) => <span key={i} style={{ color: ok ? (C.success || '#5a8a5a') : C.danger }}>{ok ? '✓' : '✗'}</span>)}
+    </span>
+  );
+
+  if (!record.length) {
+    return <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '14px 0' }}>No Echo sessions yet. Words show up here after your first one.</div>;
+  }
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+        <input
+          type="text" lang="ko" value={query}
+          onChange={e => { setQuery(e.target.value); setPage(0); }}
+          placeholder="Search words or meanings…"
+          aria-label="Search the word record"
+          style={{
+            flex: '1 1 200px', minWidth: 0, padding: '7px 10px', borderRadius: '8px', outline: 'none',
+            fontSize: isMobile ? '16px' : '13px', border: `1px solid ${C.border}`, background: C.bg, color: C.text,
+          }}
+        />
+        {ticked.length > 0 && (
+          <button onClick={() => setTicked([])} style={{ ...S.btnGhost, padding: '6px 12px', fontSize: '12px' }}>Clear</button>
+        )}
+        <button
+          onClick={() => usable.length >= 2 && onPractice(usable)}
+          disabled={usable.length < 2}
+          title={usable.length < 2 ? 'Tick at least two words' : undefined}
+          style={{ ...S.btnPrimary, padding: '6px 14px', fontSize: '12px', opacity: usable.length < 2 ? 0.5 : 1 }}
+        >
+          Practice these{usable.length ? ` (${usable.length})` : ''}
+        </button>
+      </div>
+      <div style={{ fontSize: '11px', color: C.textM, marginBottom: '8px' }}>
+        {record.length} word{record.length === 1 ? '' : 's'} across {sessions.length} Echo session{sessions.length === 1 ? '' : 's'}, hardest first.
+      </div>
+
+      <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
+        {!isMobile && (
+          <div style={{ display: 'grid', gridTemplateColumns: cols, gap: '8px', padding: '8px 12px', borderBottom: `1px solid ${C.border}` }}>
+            <div />
+            <div style={{ ...head, textAlign: 'left' }}>Word</div>
+            <div style={head}>Sessions</div>
+            <div style={head} title="First try, English → Korean">EN→KO</div>
+            <div style={head} title="First try, Korean → English">KO→EN</div>
+            <div style={head} title="First try by ear (Dictation)">By ear</div>
+            <div style={head}>Missed</div>
+            <div style={head}>Trend</div>
+            <div style={head}>Last seen</div>
+          </div>
+        )}
+        {shown.length === 0 && <div style={{ padding: '12px', fontSize: '12px', color: C.textM }}>No words match.</div>}
+        {shown.map((r, k) => {
+          const e = byId.get(r.lemmaID);
+          const alts = Array.isArray(e?.echoAlternates) ? e.echoAlternates : [];
+          const ft = (x) => (x.total ? `${x.correct}/${x.total}` : '–');
+          const cell = { textAlign: 'center', fontFamily: SH.fm, fontSize: '12.5px', color: C.textS };
+          return (
+            <div key={r.lemmaID} style={{ display: 'grid', gridTemplateColumns: cols, gap: '8px', alignItems: 'start', padding: '9px 12px', borderTop: k ? `1px solid ${C.border}` : 'none' }}>
+              <input
+                type="checkbox" checked={ticked.includes(r.lemmaID)} disabled={!e}
+                onChange={() => toggle(r.lemmaID)}
+                aria-label={`Tick ${e?.lemma || r.lemma}`}
+                title={e ? undefined : 'No longer in Lemma Master'}
+                style={{ marginTop: '3px', accentColor: C.accent, cursor: e ? 'pointer' : 'default' }}
+              />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: SH.fk, fontSize: '15px', color: C.text, wordBreak: 'keep-all', overflowWrap: 'break-word' }}>{e?.lemma || r.lemma}</div>
+                {e && <div style={{ fontSize: '11.5px', color: C.textM, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{echoGloss(e)}</div>}
+                {isMobile && (
+                  <div style={{ fontSize: '11px', color: C.textM, marginTop: '2px' }}>
+                    {r.sessions} session{r.sessions === 1 ? '' : 's'} · EN→KO {ft(r.en2ko)} · KO→EN {ft(r.ko2en)}{r.ear?.total ? ` · by ear ${ft(r.ear)}` : ''} · {r.misses} missed · {lastSeen(r.lastSeen)}
+                  </div>
+                )}
+                {r.unresolved && <div style={{ fontSize: '10.5px', color: C.warning, marginTop: '1px' }}>{r.lastKind === 'dictation' ? 'not yet right by ear' : 'not yet right both ways'}</div>}
+                {alts.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', alignItems: 'center', marginTop: '4px' }}>
+                    <span style={{ fontSize: '10.5px', color: C.textM }}>Alternates:</span>
+                    {alts.map(a => (
+                      <span key={a} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', fontSize: '11px', padding: '1px 3px 1px 7px', borderRadius: '10px', border: `1px solid ${C.border}`, color: C.textS }}>
+                        {a}
+                        <button
+                          onClick={() => onRemoveAlternate && onRemoveAlternate(r.lemmaID, a)}
+                          aria-label={`Remove alternate ${a}`}
+                          title="Remove this alternate"
+                          style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '12px', padding: '0 3px', lineHeight: 1 }}
+                        >×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {isMobile ? (
+                <div style={{ paddingTop: '2px' }}>{trendMarks(r.trend)}</div>
+              ) : (
+                <>
+                  <div style={cell}>{r.sessions}</div>
+                  <div style={cell}>{ft(r.en2ko)}</div>
+                  <div style={cell}>{ft(r.ko2en)}</div>
+                  <div style={cell}>{ft(r.ear || { correct: 0, total: 0 })}</div>
+                  <div style={{ ...cell, color: r.misses ? C.danger : C.textM }}>{r.misses}</div>
+                  <div style={{ textAlign: 'center' }}>{trendMarks(r.trend)}</div>
+                  <div style={{ ...cell, fontFamily: 'inherit', fontSize: '11.5px', color: C.textM }}>{lastSeen(r.lastSeen)}</div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {totalPages > 1 && (
+        <PaginationFooter
+          page={pg}
+          totalPages={totalPages}
+          count={rows.length}
+          singular="word"
+          onFirst={() => setPage(0)}
+          onPrev={() => setPage(p => Math.max(0, p - 1))}
+          onNext={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+          onLast={() => setPage(totalPages - 1)}
+          C={C}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReportCard({ results, report, echoCount = 0, echoSessions = [], lemmaMaster = [], onRemoveAlternate, onPracticeEcho, links, C, S, dsh = 3 }) {
   const [range,          setRange]          = useState('30');
   const [selectedResult, setSelectedResult] = useState(null); // { result, detail }
   const [rawPage,        setRawPage]        = useState(0);
+  const [echoPage,       setEchoPage]       = useState(0);    // Echo Log page (X2)
+  const [openEcho,       setOpenEcho]       = useState(null); // saved Echo session shown in the modal
 
   const openResult = (r) => {
     setSelectedResult({ result: r, detail: null, detailLoading: !!r.id });
@@ -3194,6 +4593,38 @@ function ReportCard({ results, links, C, S, dsh = 3 }) {
   }, [results, range, dsh]);
 
   const sortedFiltered = useMemo(() => [...filtered].reverse(), [filtered]);
+
+  // Echo Log (X2): same range as the Session Log, newest first.
+  const echoFiltered = useMemo(() => {
+    const at = (e) => new Date(e.finishedAt || e.startedAt);
+    let list = (echoSessions || []).filter(e => !isNaN(at(e)));
+    if (range !== 'all') {
+      const cutoff = getLogicalToday(dsh);
+      cutoff.setDate(cutoff.getDate() - parseInt(range));
+      list = list.filter(e => at(e) >= cutoff);
+    }
+    return list.sort((a, b) => String(b.finishedAt || b.startedAt).localeCompare(String(a.finishedAt || a.startedAt)));
+  }, [echoSessions, range, dsh]);
+  const echoTotalPages = Math.max(1, Math.ceil(echoFiltered.length / RC_PAGE_SIZE));
+  const echoPg         = Math.min(echoPage, echoTotalPages - 1);
+  const echoPaged      = echoFiltered.slice(echoPg * RC_PAGE_SIZE, (echoPg + 1) * RC_PAGE_SIZE);
+  const lemmaById      = useMemo(() => new Map((lemmaMaster || []).filter(e => e?.lemmaID).map(e => [e.lemmaID, e])), [lemmaMaster]);
+
+  // By The Numbers sits beside The State of Quizzes, so it uses the same
+  // fixed window (the last 30 days); Sessions counts Echo too.
+  const numbers30 = useMemo(() => {
+    const cutoff = getLogicalToday(dsh);
+    cutoff.setDate(cutoff.getDate() - 29);
+    const scored = results.filter(r => new Date(r.date) >= cutoff)
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const echo = (echoSessions || []).filter(e => new Date(e.finishedAt || e.startedAt) >= cutoff).length;
+    return {
+      sessions: scored.length + echo,
+      best:     scored.length ? Math.max(...scored.map(r => r.score)) : null,
+      recent:   scored.length ? scored[0].score : null,
+      perfect:  scored.filter(r => r.score === 100).length,
+    };
+  }, [results, echoSessions, dsh]);
   const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / RC_PAGE_SIZE));
   const page       = Math.min(rawPage, Math.max(0, totalPages - 1));
   const pagedRows  = sortedFiltered.slice(page * RC_PAGE_SIZE, (page + 1) * RC_PAGE_SIZE);
@@ -3225,12 +4656,14 @@ function ReportCard({ results, links, C, S, dsh = 3 }) {
 const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.setDate(c.getDate() - 7); return new Date(r.date) >= c; });
   const last7Avg     = last7.length ? Math.round(last7.reduce((s, r) => s + r.score, 0) / last7.length) : null;
 
-  const lead = useMemo(() => getQuizLeadStory({ results, today: todayStr }), [results, todayStr]);
+  // Lead story: the State of Quizzes report (E5), computed by the parent so
+  // the home teaser and this page tell the same story.
+  const lead = report;
 
   return (
     <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <GazetteMasthead
-        cornerLeft={{ value: `${results.length} Session${results.length === 1 ? '' : 's'}`, label: last7Avg != null ? `${last7Avg}% This Week` : 'No Sessions This Week' }}
+        cornerLeft={{ value: `${results.length + echoCount} Session${results.length + echoCount === 1 ? '' : 's'}`, label: last7Avg != null ? `${last7Avg}% This Week` : 'No Scores This Week' }}
         cornerRight={{ value: mastheadDate, label: todayStr.slice(0, 4) }}
         title="The Examiner"
         subtitle="A Record of Scores, Sessions, and Standing"
@@ -3239,12 +4672,20 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
       <GoldRule />
       <BylineRule left="autovocaindex / quizzes" right={todayStr} />
 
-      {/* Lead story */}
-      <div>
-        <GazetteKicker>{lead.kicker}</GazetteKicker>
-        <GazetteHeadline>{lead.headline}</GazetteHeadline>
-        {lead.standfirst && <GazetteStandfirst>{lead.standfirst}</GazetteStandfirst>}
-        <DropCapLead text={lead.leadParagraph} columns={isMobile ? 1 : 2} />
+      {/* Lead story, with By The Numbers beside it (X2) */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) 240px', gap: isMobile ? '20px' : '28px', alignItems: 'start' }}>
+        <div style={{ minWidth: 0 }}>
+          <GazetteKicker>{lead.kicker}</GazetteKicker>
+          <GazetteHeadline>{lead.headline}</GazetteHeadline>
+          {lead.standfirst && <GazetteStandfirst>{lead.standfirst}</GazetteStandfirst>}
+          <DropCapLead text={lead.leadParagraph} columns={isMobile ? 1 : 2} />
+        </div>
+        <GazetteBox title="By The Numbers · 30 Days">
+          <BoxRow label="Sessions" value={numbers30.sessions} />
+          <BoxRow label="Best Score" value={numbers30.best !== null ? `${numbers30.best}%` : '—'} />
+          <BoxRow label="Most Recent" value={numbers30.recent !== null ? `${numbers30.recent}%` : '—'} />
+          <BoxRow label="Perfect Scores" value={numbers30.perfect} />
+        </GazetteBox>
       </div>
 
       {/* Score trend — range toggle, chart, per-type breakdown */}
@@ -3315,50 +4756,75 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
         </div>
       </div>
 
-      {/* Session log */}
+      {/* Word Record (X2): every word Echo has seen */}
       <div>
-        <GazetteKicker>Session Log</GazetteKicker>
-        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 240px', gap: '20px' }}>
-          <div>
-            {pagedRows.length > 0 ? (
-              <>
-                <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
-                  {pagedRows.map((r, i, arr) => (
-                    <QuizResultRow
-                      key={r.id || i}
-                      r={r}
-                      last={i === arr.length - 1}
-                      padding="10px 16px"
-                      onClick={() => openResult(r)}
-                      C={C}
-                    />
-                  ))}
-                </div>
-                <PaginationFooter
-                  page={page}
-                  totalPages={totalPages}
-                  count={sortedFiltered.length}
-                  singular="quiz"
-                  onFirst={() => setRawPage(0)}
-                  onPrev={() => setRawPage(p => Math.max(0, p - 1))}
-                  onNext={() => setRawPage(p => Math.min(totalPages - 1, p + 1))}
-                  onLast={() => setRawPage(totalPages - 1)}
-                  C={C}
-                />
-              </>
-            ) : (
-              <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '14px 0' }}>No sessions in this range.</div>
-            )}
-          </div>
+        <GazetteKicker>Word Record</GazetteKicker>
+        <EchoWordRecord sessions={echoSessions} lemmaMaster={lemmaMaster} onRemoveAlternate={onRemoveAlternate} onPractice={onPracticeEcho} C={C} S={S} />
+      </div>
 
-          <GazetteBox title="By The Numbers">
-            <BoxRow label="Sessions" value={filtered.length} />
-            <BoxRow label="Best Score" value={filtered.length ? `${Math.max(...filtered.map(r => r.score))}%` : '—'} />
-            <BoxRow label="Most Recent" value={sortedFiltered[0] ? `${sortedFiltered[0].score}%` : '—'} />
-            <BoxRow label="Perfect Scores" value={filtered.filter(r => r.score === 100).length} />
-          </GazetteBox>
+      {/* Session Log (Vocabulary, Cloze, Grammar) | Echo Log (X2) */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? '24px' : '28px', alignItems: 'start' }}>
+        <div>
+          <GazetteKicker>Session Log</GazetteKicker>
+          {pagedRows.length > 0 ? (
+            <>
+              <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
+                {pagedRows.map((r, i, arr) => (
+                  <QuizResultRow
+                    key={r.id || i}
+                    r={r}
+                    last={i === arr.length - 1}
+                    padding="10px 16px"
+                    onClick={() => openResult(r)}
+                    C={C}
+                  />
+                ))}
+              </div>
+              <PaginationFooter
+                page={page}
+                totalPages={totalPages}
+                count={sortedFiltered.length}
+                singular="quiz"
+                onFirst={() => setRawPage(0)}
+                onPrev={() => setRawPage(p => Math.max(0, p - 1))}
+                onNext={() => setRawPage(p => Math.min(totalPages - 1, p + 1))}
+                onLast={() => setRawPage(totalPages - 1)}
+                C={C}
+              />
+            </>
+          ) : (
+            <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '14px 0' }}>No sessions in this range.</div>
+          )}
+        </div>
+
+        <div>
+          <GazetteKicker>Echo Log</GazetteKicker>
+          {echoPaged.length > 0 ? (
+            <>
+              <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
+                {echoPaged.map((s, i, arr) => (
+                  <EchoLogRow key={s.id || s.startedAt || i} s={s} last={i === arr.length - 1} onClick={() => setOpenEcho(s)} C={C} />
+                ))}
+              </div>
+              <PaginationFooter
+                page={echoPg}
+                totalPages={echoTotalPages}
+                count={echoFiltered.length}
+                singular="session"
+                onFirst={() => setEchoPage(0)}
+                onPrev={() => setEchoPage(p => Math.max(0, p - 1))}
+                onNext={() => setEchoPage(p => Math.min(echoTotalPages - 1, p + 1))}
+                onLast={() => setEchoPage(echoTotalPages - 1)}
+                C={C}
+              />
+            </>
+          ) : (
+            <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '14px 0' }}>No Echo sessions in this range.</div>
+          )}
         </div>
       </div>
+
+      {openEcho && <EchoHistoryModal session={openEcho} byId={lemmaById} onClose={() => setOpenEcho(null)} C={C} S={S} />}
 
       {/* Result detail popup — portaled to document.body so it anchors to the
           real viewport, not to this page's .fade-up wrapper (a persisting
@@ -3427,7 +4893,12 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
                     }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
                         <div style={{ fontSize: '14px', color: C.text, lineHeight: 1.5, flex: 1 }}>{q.english}</div>
-                        {vs && <div style={{ fontFamily: SH.fm, fontSize: '22px', color: vs.color, flexShrink: 0 }}>{vs.symbol}</div>}
+                        {vs && (
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
+                            <div style={{ fontFamily: SH.fm, fontSize: '22px', color: vs.color }}>{vs.symbol}</div>
+                            {a.overriddenFrom && <div style={{ fontSize: '10px', color: C.textM }}>overridden (was {a.overriddenFrom})</div>}
+                          </div>
+                        )}
                       </div>
                       {q.correctConcept?.term && (
                         <GrammarConceptPick q={q} chosenId={selectedResult.detail.conceptChoices?.[i]} C={C} />
@@ -3837,7 +5308,8 @@ function ClozeTypeQ({ q, onAnswer, onOverride, onRelatedOverride, C, S }) {
             lang="ko"
             value={input}
             onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+            // isComposing guard: see the voca Type input
+            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && handleSubmit()}
             placeholder="Type the missing word…"
             style={{
                           // 16px on mobile prevents the iOS focus auto-zoom (see voca Type input)
@@ -4173,6 +5645,19 @@ function ClozeQuizResults({ questions, correct, total, onDone, C, S }) {
 // cards and decks come from App via shared useFlashcardData — no duplicate reads.
 // Only quiz_results is loaded here (quiz-specific, not shared with Flashcards).
 // One-line summary of an unfinished grammar session for the resume banner (G2).
+// Banner text for an unfinished Echo session (E4).
+function describeEchoResume(saved, now = Date.now()) {
+  const st = saved.state;
+  const mins = Math.max(0, Math.round((now - Date.parse(saved.savedAt)) / 60000));
+  const ago = mins < 1 ? 'just now'
+    : mins < 60 ? `${mins} min ago`
+    : mins < 1440 ? `${Math.round(mins / 60)} h ago`
+    : `${Math.round(mins / 1440)} d ago`;
+  const round = st.config.mode === 'complete' ? `Round ${st.round}` : `Round ${st.round} of ${st.config.rounds}`;
+  const dir = st.config?.kind === 'dictation' ? 'Dictation' : st.dir === DIRS.EN2KO ? 'English → Korean' : 'Korean → English';
+  return `${round} · ${dir} · ${st.items.length} words · saved ${ago}`;
+}
+
 function describeGrammarResume(snap, now = Date.now()) {
   const { answered, total } = snapshotProgress(snap);
   const kind = snap.kind === 'selection' ? 'Selection'
@@ -4187,13 +5672,16 @@ function describeGrammarResume(snap, now = Date.now()) {
 }
 
 const QR_PREFIX = 'avi_quiz_results_';
+const ES_PREFIX = 'avi_echo_sessions_';   // echo_sessions cache, read by the State of Quizzes report (E5)
 function qrRead(key)      { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : null; } catch { return null; } }
 function qrWrite(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 
 // grammarEntries / onNavigateToGrammar / onPracticeGrammarCards (G5) come from
 // App: live mastery levels, open a Grammar Index entry, and start a Grammar
 // Deck study session with the given card ids.
-export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: propCards, decks: propDecks, settings, grammarEntries, onNavigateToGrammar, onPracticeGrammarCards }) {
+// echoDeckTarget / onEchoDeckTargetUsed (X3): a deck card's Echo button sends
+// its deck id here; the Echo setup opens with that deck chosen.
+export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: propCards, decks: propDecks, settings, grammarEntries, onNavigateToGrammar, onPracticeGrammarCards, wordInputs = [], aviSources = [], aviSections = [], echoDeckTarget = null, onEchoDeckTargetUsed = null }) {
   const { C, S } = useAppTheme();
   const uid = auth.currentUser?.uid;
   // Keep module-level ref current so every sub-component in this file reads
@@ -4202,9 +5690,16 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   const dsh = settings?.dayStartHour ?? 3;
 
   const [view,      setView]      = useState('home');
-  const [configModal, setConfigModal] = useState(null); // null | 'voca' | 'cloze' | 'grammar'
+  const [configModal, setConfigModal] = useState(null); // null | 'voca' | 'cloze' | 'grammar' | 'echo'
+  const [echoState,   setEchoState]   = useState(null); // Echo session (echoEngine state, E2)
+  const [echoSeed,    setEchoSeed]    = useState(0);    // Echo setup shuffle seed, picked per opening
+  const [echoDraft,   setEchoDraft]   = useState(null); // saved in-round draft handed to a resumed round (E4)
+  const [echoResume,  setEchoResume]  = useState(null); // unfinished Echo session offered on home (E4)
+  const [echoSave,    setEchoSave]    = useState(null); // { status: 'saving' | 'saved' | 'error' | 'skipped', summary }
+  const [echoPreset,  setEchoPreset]  = useState(null); // Echo setup opened preloaded (X2 Practice these, X3 deck shortcut)
   const [results,   setResults]   = useState(() => qrRead(uid ? QR_PREFIX + uid : null) || []);
   const [resultsLoading, setResultsLoading] = useState(true);
+  const [echoSessions, setEchoSessions] = useState(() => qrRead(uid ? ES_PREFIX + uid : null) || []);
 
   const [activeQuestions, setActiveQuestions] = useState([]);
   const [activeMatchSets, setActiveMatchSets] = useState([]);
@@ -4229,6 +5724,11 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   const [gramResume,       setGramResume]       = useState(null); // unfinished session offered on home (G2)
   const [gramInitial,      setGramInitial]      = useState(null); // resume state handed to a session (G2)
   const [gramSelectionResultId, setGramSelectionResultId] = useState(null); // detail record for saving explanations (G4)
+  const [gramTranslationResultId, setGramTranslationResultId] = useState(null); // result + detail record that verdict overrides update
+  // Latest assessment, updated synchronously by overrides so two quick taps
+  // never build on a stale copy before React re-renders.
+  const gramAssessmentRef = useRef(null);
+  useEffect(() => { gramAssessmentRef.current = gramAssessment; }, [gramAssessment]);
 
   // lemmaMaster — loaded once for related-form credit resolution
   const [lemmaMaster, setLemmaMaster] = useState([]);
@@ -4298,6 +5798,42 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     })();
   }, [uid]);
 
+  // Load echo_sessions for the State of Quizzes report (E5): cache first,
+  // refresh in the background. Not needed to show the page, so no spinner.
+  useEffect(() => {
+    if (!uid) return;
+    const esKey = ES_PREFIX + uid;
+    (async () => {
+      try {
+        const snap = await getDocs(collection(db, 'users', uid, 'echo_sessions'));
+        const fresh = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        setEchoSessions(prev => (prev.length > fresh.length ? prev : fresh));
+        qrWrite(esKey, fresh);
+      } catch (e) {
+        console.error('QuizzesPage: echo sessions load error', e);
+      }
+    })();
+  }, [uid]);
+
+  // The State of Quizzes (E5): last 30 days against the 30 before, for the
+  // Examiner's lead story and the home teaser.
+  const reportToday = toDateStr(getLogicalToday(dsh));
+  const quizReport = useMemo(() => getQuizStateReport({
+    results, echoSessions, grammarEntries: grammarEntries || [], corpus: gramCorpus, today: reportToday, dsh,
+  }), [results, echoSessions, grammarEntries, gramCorpus, reportToday, dsh]);
+
+  // Deck-card shortcut (X3, X-D8): the Echo setup with that deck chosen, for
+  // this opening only (saved source and decks stay as they were).
+  useEffect(() => {
+    if (!echoDeckTarget) return;
+    setEchoPreset({ source: 'deck', deckIds: [echoDeckTarget] });
+    setEchoSeed(Math.floor(Math.random() * 2 ** 31));
+    setView('home');
+    setConfigModal('echo');
+    onEchoDeckTargetUsed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [echoDeckTarget]);
+
   // Reset scroll position when returning to the home/report views on mobile.
   // The topbar is height-collapsed for quizzes on mobile, so the content area
   // extends to the top of the viewport. Without this, the content-pad's
@@ -4343,18 +5879,20 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     }
   }, [uid]);
 
-  // Updates a saved quiz result in Firestore (used by override on results screen)
-  const updateResult = useCallback(async (resultId, newCorrect, total) => {
+  // Updates a saved quiz result in Firestore (used by override on results screen).
+  // metaPatch: optional meta fields to replace too (e.g. missedConcepts).
+  const updateResult = useCallback(async (resultId, newCorrect, total, metaPatch = null) => {
       if (!uid || !resultId) return;
       const rawScore = total > 0 ? newCorrect / total * 100 : 0;
       const newScore = Math.round(rawScore * 10) / 10;
+      const fsPatch = { correct: newCorrect, score: newScore };
+      if (metaPatch) for (const [k, v] of Object.entries(metaPatch)) fsPatch[`meta.${k}`] = v;
       try {
-        await updateDoc(fsDoc(db, 'users', uid, 'quiz_results', resultId), {
-          correct: newCorrect,
-          score:   newScore,
-        });
+        await updateDoc(fsDoc(db, 'users', uid, 'quiz_results', resultId), fsPatch);
         setResults(prev => {
-          const next = prev.map(r => r.id === resultId ? { ...r, correct: newCorrect, score: newScore } : r);
+          const next = prev.map(r => r.id === resultId
+            ? { ...r, correct: newCorrect, score: newScore, ...(metaPatch ? { meta: { ...(r.meta || {}), ...metaPatch } } : {}) }
+            : r);
           qrWrite(QR_PREFIX + uid, next);
           return next;
         });
@@ -4449,6 +5987,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   // app loses the translations.
   const runGrammarAssessment = useCallback(async (translations, conceptChoices) => {
     setGramError(null);
+    setGramTranslationResultId(null);
     setView('grammar_assessing');
 
     const uid = auth.currentUser?.uid;
@@ -4507,6 +6046,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
           console.error('QuizzesPage: detail save failed', e);
         }
       }
+      if (resultId) setGramTranslationResultId(resultId);
 
       clearGramSnapshot();
       setView('grammar_translation_results');
@@ -4517,6 +6057,27 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       setView('grammar_translation_results');
     }
   }, [gramQuestions, gramConfig, saveResult, dsh, clearGramSnapshot]);
+
+  // ── Translation: learner overrides a verdict ───────────────
+  // verdict: '△' (Mark as partial) | 'O' (Mark as correct) | null (Undo).
+  // Rescored and saved like the Vocabulary Quiz overrides: the result's score
+  // and missedConcepts, plus the detail record so the Report Card agrees.
+  const handleTranslationOverride = useCallback(async (i, verdict) => {
+    const base = gramAssessmentRef.current;
+    const next = overrideAssessment(base, i, verdict);
+    if (!next || next === base) return;
+    gramAssessmentRef.current = next;
+    setGramAssessment(next);
+    const uid = auth.currentUser?.uid;
+    if (!uid || !gramTranslationResultId) return;
+    const score = scoreTranslationQuiz(gramQuestions, next, gramConceptChoices);
+    await updateResult(gramTranslationResultId, score.points, score.total, { missedConcepts: score.missedConcepts });
+    try {
+      await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', gramTranslationResultId), { assessment: next }, { merge: true });
+    } catch (e) {
+      console.error('QuizzesPage: override detail save failed', e);
+    }
+  }, [gramTranslationResultId, gramQuestions, gramConceptChoices, updateResult]);
 
   const handleGrammarTranslationFinish = useCallback(({ translations, conceptChoices }) => {
     setGramTranslations(translations);
@@ -4610,6 +6171,184 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       setView('grammar_translation');
     }
   }, [gramResume]);
+
+  // ── Echo: device-only resume (E4, E-D13) ──────────────────
+  // The session state plus the current round's draft, saved on this device on
+  // every committed round and (shortly after) every change inside a round.
+  // Cleared when the session ends or is discarded, or a new one starts.
+  const echoSnapKey = uid ? `avi_echo_session_${uid}` : null;
+  const echoDraftTimer = useRef(null);
+  const echoStateRef = useRef(null);
+  useEffect(() => { echoStateRef.current = echoState; }, [echoState]);
+
+  const writeEchoSnapshot = useCallback((state, draft) => {
+    if (!echoSnapKey || !state || state.done) return;
+    qrWrite(echoSnapKey, { savedAt: new Date().toISOString(), state, draft: draft || null });
+  }, [echoSnapKey]);
+
+  const clearEchoSnapshot = useCallback(() => {
+    clearTimeout(echoDraftTimer.current);
+    if (echoSnapKey) { try { localStorage.removeItem(echoSnapKey); } catch { /* storage unavailable */ } }
+    setEchoResume(null);
+  }, [echoSnapKey]);
+
+  // Offer an unfinished session whenever the home screen shows.
+  useEffect(() => {
+    if (view !== 'home' || !echoSnapKey) return;
+    const saved = qrRead(echoSnapKey);
+    setEchoResume(isResumable(saved, Date.now()) ? saved : null);
+  }, [view, echoSnapKey]);
+
+  const handleEchoDraft = useCallback((draft) => {
+    clearTimeout(echoDraftTimer.current);
+    echoDraftTimer.current = setTimeout(() => {
+      const cur = echoStateRef.current;
+      if (cur && !cur.done && cur.startedAt === draft.startedAt && cur.round === draft.round) writeEchoSnapshot(cur, draft);
+    }, 400);
+  }, [writeEchoSnapshot]);
+  useEffect(() => () => clearTimeout(echoDraftTimer.current), []);
+
+  // ── Echo: save the summary once (E-D12, E-D14) ─────────────
+  const echoSavedRef = useRef(new Set()); // startedAt of sessions already sent
+  // Saved alternates (X1, E-D18): only that entry's echoAlternates field is
+  // touched (arrayUnion / arrayRemove), nothing else on the entry is rewritten.
+  const saveEchoAlternate = useCallback(async (lemmaID, text, remove = false) => {
+    if (!uid || !lemmaID || !text) return false;
+    try {
+      await updateDoc(fsDoc(db, 'users', uid, 'lemmaMaster', lemmaID), {
+        echoAlternates: remove ? arrayRemove(text) : arrayUnion(text),
+      });
+      setLemmaMaster(prev => prev.map(e => {
+        if (e.lemmaID !== lemmaID) return e;
+        const list = Array.isArray(e.echoAlternates) ? e.echoAlternates : [];
+        return { ...e, echoAlternates: remove ? list.filter(a => a !== text) : (list.includes(text) ? list : [...list, text]) };
+      }));
+      return true;
+    } catch (e) {
+      console.error('QuizzesPage: saving an Echo alternate failed', e);
+      return false;
+    }
+  }, [uid]);
+  const echoAlternatesOf = useCallback((lemmaID) => {
+    const e = lemmaMaster.find(x => x.lemmaID === lemmaID);
+    return Array.isArray(e?.echoAlternates) ? e.echoAlternates : [];
+  }, [lemmaMaster]);
+
+  const sendEchoSummary = useCallback(async (summary) => {
+    if (!uid) { setEchoSave({ status: 'error', summary }); return; }
+    setEchoSave({ status: 'saving', summary });
+    try {
+      const saved = JSON.parse(JSON.stringify(summary));
+      const ref = await addDoc(collection(db, 'users', uid, 'echo_sessions'), saved);
+      setEchoSave({ status: 'saved', summary });
+      setEchoSessions(prev => {
+        const next = [...prev, { id: ref.id, ...saved }];
+        qrWrite(ES_PREFIX + uid, next);
+        return next;
+      });
+    } catch (e) {
+      console.error('QuizzesPage: echo session save failed', e);
+      setEchoSave({ status: 'error', summary });
+    }
+  }, [uid]);
+
+  // Every round commit and End come through here.
+  const handleEchoChange = useCallback((next) => {
+    setEchoState(next);
+    setEchoDraft(null);
+    clearTimeout(echoDraftTimer.current);
+    if (!next.done) { writeEchoSnapshot(next, null); return; }
+    clearEchoSnapshot();
+    if (echoSavedRef.current.has(next.startedAt)) return;
+    echoSavedRef.current.add(next.startedAt);
+    if (next.rounds.length === 0) { setEchoSave({ status: 'skipped' }); return; }
+    const summary = buildSummary(next, new Date().toISOString());
+    const firsts = [summary.firstTry.en2ko, summary.firstTry.ko2en, summary.firstTry.ear].filter(Boolean);
+    const tries = firsts.reduce((n, x) => n + x.total, 0);
+    quizCompleteSound(tries ? (firsts.reduce((n, x) => n + x.correct, 0) / tries) * 100 : 0);
+    sendEchoSummary(summary);
+  }, [writeEchoSnapshot, clearEchoSnapshot, sendEchoSummary]);
+
+  // ── Echo: start a session from the setup (E2) ──────────────
+  // Hints ("(not X)") look across the whole Lemma Master (E-D10).
+  // Audio for a session's words (X4, X-D11/X-D15): the word's flashcard audio,
+  // otherwise generated now (cached server-side) without making a card. Only
+  // for Dictation and audio prompts. A newer session cancels an older fetch.
+  const [echoAudio, setEchoAudio] = useState({});   // lemmaID → { status, url }
+  const echoAudioRun = useRef(0);
+  const prepareEchoAudio = useCallback((state) => {
+    const run = ++echoAudioRun.current;
+    const needs = state && (state.config?.kind === 'dictation' || state.config?.koPrompt === 'audio');
+    if (!needs) { setEchoAudio({}); return; }
+    const cardAudio = new Map();
+    for (const c of enrichedCards) {
+      if (!c?.audioUrl || c.type === 'grammar' || c.type === 'sentence') continue;
+      if (c.linkedAVILemmaId && !cardAudio.has(`id:${c.linkedAVILemmaId}`)) cardAudio.set(`id:${c.linkedAVILemmaId}`, c.audioUrl);
+      const k = normalizeLemma(c.lemma || c.front || '');
+      if (k && !cardAudio.has(`k:${k}`)) cardAudio.set(`k:${k}`, c.audioUrl);
+    }
+    const init = {};
+    const missing = [];
+    for (const it of state.items) {
+      const url = cardAudio.get(`id:${it.id}`) || cardAudio.get(`k:${normalizeLemma(it.ko)}`);
+      if (url) init[it.id] = { status: 'ready', url };
+      else { init[it.id] = { status: 'pending', url: null }; missing.push(it); }
+    }
+    setEchoAudio(init);
+    (async () => {
+      for (const it of missing) {
+        const url = await wordAudioUrl(it.ko);
+        if (echoAudioRun.current !== run) return;
+        setEchoAudio(prev => ({ ...prev, [it.id]: url ? { status: 'ready', url } : { status: 'failed', url: null } }));
+      }
+    })();
+  }, [enrichedCards]);
+  const echoAudioOf = useCallback((id) => echoAudio[id] || null, [echoAudio]);
+
+  const handleEchoStart = useCallback(({ items, pair, config }) => {
+    const byId = new Map(lemmaMaster.filter(e => e?.lemmaID).map(e => [e.lemmaID, e]));
+    const allItems = lemmaMaster.map(e => buildItem(e, byId)).filter(Boolean);
+    const state = createSession({
+      items, pair, hints: computeHints(items, allItems), config,
+      startedAt: new Date().toISOString(),
+    });
+    if (!state) return;
+    clearEchoSnapshot();
+    writeEchoSnapshot(state, null);
+    setEchoDraft(null);
+    setEchoSave(null);
+    setEchoState(state);
+    prepareEchoAudio(state);
+    setView('echo_session');
+  }, [lemmaMaster, clearEchoSnapshot, writeEchoSnapshot, prepareEchoAudio]);
+
+  // From the summary: the same words again, or only the missed ones (the
+  // list builder re-checks the look-alike pair).
+  const handleEchoRestart = useCallback((ids) => {
+    if (!echoState) return;
+    const keep = ids ? echoState.items.filter(i => ids.includes(i.id)) : echoState.items;
+    const sel = selectItems(keep, keep.length);
+    handleEchoStart({ items: sel.items, pair: sel.pair, config: echoState.config });
+  }, [echoState, handleEchoStart]);
+
+  // Word Record "Practice these" (X2): the Echo setup, preloaded with the
+  // ticked words as your picks, so rounds and options can be set first.
+  const handleEchoPractice = useCallback((ids) => {
+    setEchoPreset({ source: 'manual', added: ids });
+    setEchoSeed(Math.floor(Math.random() * 2 ** 31));
+    setView('home');
+    setConfigModal('echo');
+  }, []);
+
+  const handleEchoResume = useCallback(() => {
+    const saved = echoResume;
+    if (!saved) return;
+    setEchoSave(null);
+    setEchoDraft(saved.draft || null);
+    setEchoState(saved.state);
+    prepareEchoAudio(saved.state);
+    setView('echo_session');
+  }, [echoResume, prepareEchoAudio]);
 
   // ── handleVocaStart ────────────────────────────────────────
   const handleVocaStart = useCallback((config, vocaDecks) => {
@@ -4798,6 +6537,9 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   const last7     = results.filter(r => { const c = getLogicalToday(dsh); c.setDate(c.getDate() - 7); return new Date(r.date) >= c; });
   const vocaLast7 = last7.filter(r => r.type === 'voca');
   const avgLast7  = last7.length ? Math.round(last7.reduce((s, r) => s + r.score, 0) / last7.length) : null;
+  const echoLast7 = echoSessions.filter(e => { const c = getLogicalToday(dsh); c.setDate(c.getDate() - 7); return new Date(e.finishedAt || e.startedAt) >= c; });
+  // Demo cap (7C): Echo sessions count toward the quiz-session cap too.
+  const quizCapHit = DEMO && demoCapReached([...results, ...echoSessions], 'quizSessions');
 
   const homeChartData = useMemo(() => {
     const c30 = getLogicalToday(dsh); c30.setDate(c30.getDate() - 30);
@@ -4874,6 +6616,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         assessment={gramAssessment}
         assessErrorCode={gramError?.kind === 'assess' ? gramError.code : null}
         onRetryAssess={() => runGrammarAssessment(gramTranslations || [], gramConceptChoices || [])}
+        onOverride={handleTranslationOverride}
         links={gramLinks}
         onDone={() => setView('home')}
         C={C} S={S}
@@ -4888,6 +6631,26 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         onProgress={handleSelectionProgress}
         onEnd={handleGrammarEnd}
         onFinish={handleGrammarSelectionFinish}
+        C={C} S={S}
+      />
+    );
+  }
+  if (view === 'echo_session' && echoState) {
+    return (
+      <EchoSession
+        state={echoState}
+        draft={echoDraft}
+        onDraft={handleEchoDraft}
+        onChange={handleEchoChange}
+        save={echoSave}
+        onRetrySave={() => { if (echoSave?.summary && echoSave.status === 'error') sendEchoSummary(echoSave.summary); }}
+        onPracticeMissed={(ids) => handleEchoRestart(ids)}
+        onAgain={() => handleEchoRestart(null)}
+        onExit={() => { setEchoState(null); setEchoSave(null); setView('home'); }}
+        alternatesOf={echoAlternatesOf}
+        onSaveAlternate={saveEchoAlternate}
+        audioOf={echoAudioOf}
+        ttsSpeed={settings?.ttsSpeed ?? 0.9}
         C={C} S={S}
       />
     );
@@ -4914,7 +6677,13 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         }}>
           ← Back
         </button>
-                <ReportCard results={results} links={gramLinks} C={C} S={S} dsh={dsh} />
+                <ReportCard
+                  results={results} report={quizReport} echoCount={echoSessions.length}
+                  echoSessions={echoSessions} lemmaMaster={lemmaMaster}
+                  onRemoveAlternate={(lemmaID, text) => saveEchoAlternate(lemmaID, text, true)}
+                  onPracticeEcho={handleEchoPractice}
+                  links={gramLinks} C={C} S={S} dsh={dsh}
+                />
       </div>
     );
   }
@@ -4979,6 +6748,18 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
           C={C} S={S}
         />
       )}
+      {echoResume && (
+        <GrammarNotice
+          tone="info"
+          title="Unfinished Echo Quiz"
+          text={describeEchoResume(echoResume)}
+          actions={[
+            { label: 'Resume', primary: true, onClick: handleEchoResume },
+            { label: 'Discard', onClick: clearEchoSnapshot },
+          ]}
+          C={C} S={S}
+        />
+      )}
       <div className="quiz-home-grid" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '32px', alignItems: 'center', marginBottom: '40px' }}>
         {!isMobile && (
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
@@ -5001,7 +6782,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         )}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {DEMO && demoCapReached(results, 'quizSessions') && (
+          {quizCapHit && (
             <div style={{ fontSize: '12px', color: C.warning, fontWeight: 500, lineHeight: 1.5 }}>
               {DEMO_LIMIT_NOTE}
             </div>
@@ -5011,21 +6792,28 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
             description="Multiple choice, true/false, typed answers, and matching — choose your formats, decks, and question counts."
             bestFor="Best for quick sessions."
             flip={false}
-            onClick={() => { if (DEMO && demoCapReached(results, 'quizSessions')) return; quizSound('mouse_click'); setConfigModal('voca'); }}
+            onClick={() => { if (quizCapHit) return; quizSound('mouse_click'); setConfigModal('voca'); }}
+          />
+          <GazetteSplitFig
+            label="Echo Quiz"
+            description="The fold-over drill: write the Korean for each meaning, then the meaning for each word. Your corrected answers become the next round's prompts."
+            bestFor="Best for locking in a word list."
+            flip={true}
+            onClick={() => { if (quizCapHit) return; quizSound('mouse_click'); setEchoPreset(null); setEchoSeed(Math.floor(Math.random() * 2 ** 31)); setConfigModal('echo'); }}
           />
           <GazetteSplitFig
             label="Cloze Quiz"
             description="Fill-in-the-blank questions built from your sentence-mining decks, answered by typing or selecting from choices."
             bestFor="Best for in-context vocabulary recall."
-            flip={true}
-            onClick={() => { if (DEMO && demoCapReached(results, 'quizSessions')) return; quizSound('mouse_click'); setConfigModal('cloze'); }}
+            flip={false}
+            onClick={() => { if (quizCapHit) return; quizSound('mouse_click'); setConfigModal('cloze'); }}
           />
           <div style={DEMO ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
             <GazetteSplitFig
               label="Grammar Quiz"
               description="Translation drills, broader practice, or side-by-side concept comparisons, assessed by AI with correction notes."
               bestFor="Best for direct comparison and explanation."
-              flip={false}
+              flip={true}
               onClick={() => { quizSound('mouse_click'); setConfigModal('grammar'); }}
             />
           </div>
@@ -5035,25 +6823,41 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
             </div>
           )}
 
-          {results.length > 0 && (
+          {(results.length > 0 || echoSessions.length > 0) && (
             <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
               {[
-                { label: 'This week', value: last7.length },
-                avgLast7 !== null ? { label: 'Avg score', value: `${avgLast7}%` } : null,
-                { label: 'All time',  value: results.length },
-              ].filter(Boolean).map(({ label, value }) => (
+                { label: 'This week', value: last7.length + echoLast7.length },
+                avgLast7 !== null ? { label: 'Avg score', note: 'excluding Echo', value: `${avgLast7}%` } : null,
+                { label: 'All time',  value: results.length + echoSessions.length },
+              ].filter(Boolean).map(({ label, note, value }) => (
                 <div key={label} style={{
                   flex: 1, background: C.raised, border: `1px solid ${C.border}`,
                   borderRadius: '10px', padding: '10px 12px', textAlign: 'center',
                 }}>
                   <div style={{ fontFamily: SH.fm, fontSize: '17px', color: C.accent }}>{value}</div>
                   <div style={{ fontSize: '10px', color: C.textM, marginTop: '2px' }}>{label}</div>
+                  {note && <div style={{ fontSize: '9px', color: C.textM, opacity: 0.8, marginTop: '1px', fontStyle: 'italic' }}>{note}</div>}
                 </div>
               ))}
             </div>
           )}
         </div>
       </div>
+
+      {/* The State of Quizzes teaser (E5): headline, standfirst, opening paragraph */}
+      {(results.length > 0 || echoSessions.length > 0) && (
+        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '28px', marginBottom: '32px' }}>
+          <GazetteKicker>{quizReport.kicker}</GazetteKicker>
+          <GazetteHeadline size="md">{quizReport.headline}</GazetteHeadline>
+          {quizReport.standfirst && <GazetteStandfirst>{quizReport.standfirst}</GazetteStandfirst>}
+          <DropCapLead text={quizReport.teaser} columns={isMobile ? 1 : 2} />
+          <button onClick={() => setView('report')} style={{
+            fontSize: '11px', color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+          }}>
+            Read the full report →
+          </button>
+        </div>
+      )}
 
       <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '28px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
@@ -5127,6 +6931,20 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         corpus={gramCorpus}
         C={C} S={S}
       />
+      {configModal === 'echo' && <EchoQuizConfig
+        seed={echoSeed}
+        preset={echoPreset}
+        onBack={() => { setConfigModal(null); setEchoPreset(null); }}
+        onStart={(setup) => { setConfigModal(null); setEchoPreset(null); handleEchoStart(setup); }}
+        cards={enrichedCards}
+        decks={decks}
+        wordInputs={wordInputs}
+        lemmaMaster={lemmaMaster}
+        aviSources={aviSources}
+        aviSections={aviSections}
+        dsh={dsh}
+        C={C} S={S}
+      />}
     </div>
   );
 }

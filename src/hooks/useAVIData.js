@@ -159,7 +159,20 @@ export function useAVIData({ wordInputs: initWords = [], sentenceInputs: initSen
     if (!uid) return;
     (async () => {
       const remote = await aviLoad(uid);
-      if (remote) setData(prev => ({ ...prev, lemmaMaster: remote.lemmaMaster }));
+      if (remote) {
+        // The loaded entries are what Firestore already holds, so they are the
+        // sync baseline. Without this the baseline stayed [], and the first
+        // edit after every AVI visit rewrote the whole collection from this
+        // device's copy. A save queued before the load finished is pointed at
+        // the loaded entries too (now, and again when React applies the
+        // load), so it can never read as "delete them all".
+        lastSynced.current = { ...lastSynced.current, lemmaMaster: remote.lemmaMaster };
+        if (pending.current) pending.current = { ...pending.current, lemmaMaster: remote.lemmaMaster };
+        setData(prev => {
+          if (pending.current) pending.current = { ...pending.current, lemmaMaster: remote.lemmaMaster };
+          return { ...prev, lemmaMaster: remote.lemmaMaster };
+        });
+      }
       setLemmaMasterLoaded(true);
     })();
   }, [uid]);

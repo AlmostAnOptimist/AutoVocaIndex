@@ -40,7 +40,7 @@ Where: readers throughout; `recurrenceEngine.js` and `EditTaskModal.jsx` demonst
 Symptom (prevented): blank screens while Firestore loads.
 Cause: first paint would otherwise wait on network.
 Rule: paint immediately from a localStorage cache, then unconditionally refetch; Firestore wins. The cache is a paint optimization, never a source of truth.
-Where: task/settings state (`avi_v1` via `storage.js`), quiz results (`avi_quiz_results_{uid}`), theme (`avi_theme`).
+Where: task/settings state (`avi_v1` via `storage.js`), quiz results (`avi_quiz_results_{uid}`), Echo sessions (`avi_echo_sessions_{uid}`), theme (`avi_theme`).
 
 **An "unconditional refetch" can still be answered from cache.**
 Symptom: a card edited on one device (a new back, a corrected definition) keeps showing its old content on another device all day.

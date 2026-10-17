@@ -383,6 +383,7 @@ function InnerApp({
   noteTarget, setNoteTarget, grammarTarget, setGrammarTarget,
   grammarMasteryCounts, onMasteryCounts, getCardNextDueDate, onCardNextDueDateChanged,
   grammarEntries, onEntriesChange, flashcardStudyTarget, setFlashcardStudyTarget,
+  echoDeckTarget, setEchoDeckTarget,
   correctionTarget, setCorrectionTarget,
   correctionSessionTarget, setCorrectionSessionTarget,
   contentSourceTarget, setContentSourceTarget,
@@ -678,8 +679,8 @@ wordInputs={aviWordInputs} sentenceInputs={aviSentenceInputs}
 updateCards={updateCards} updateDecks={updateDecks} onSourceCascadeComplete={onSourceCascadeComplete}
 triggerAddSource={clTriggerAddSource} triggerAddQuestion={clTriggerAddQuestion}
 triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection} />}
-{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} />}
-{page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} />}
+{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} />}
+{page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} wordInputs={aviWordInputs} aviSources={aviSources} aviSections={aviSections} echoDeckTarget={echoDeckTarget} onEchoDeckTargetUsed={() => setEchoDeckTarget(null)} />}
 {page === 'avi' && (
   <AVIPage
     cards={cards}
@@ -1224,6 +1225,7 @@ export default function App() {
   const [noteTarget,          setNoteTarget]          = useState(null);
   const [grammarTarget,       setGrammarTarget]       = useState(null);
   const [flashcardStudyTarget, setFlashcardStudyTarget] = useState(null); // ordered cardIds for a manual Grammar Deck session
+  const [echoDeckTarget,       setEchoDeckTarget]       = useState(null); // deck id for an Echo setup opened from a deck card (X3)
   const [correctionTarget,        setCorrectionTarget]        = useState(null);
   const [correctionSessionTarget, setCorrectionSessionTarget] = useState(null);
   const [contentSourceTarget, setContentSourceTarget] = useState(null);
@@ -1283,6 +1285,7 @@ export default function App() {
     if (page !== 'grammar' && page !== 'content') setGrammarTarget(null);
     if (page !== 'content')  setContentSourceTarget(null);
     if (page !== 'flashcards') setFlashcardStudyTarget(null);
+    if (page !== 'quizzes') setEchoDeckTarget(null);
   }, [page]);
 
   // ── Recurrence engine: run immediately on load, then hourly ───
@@ -2058,6 +2061,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         onCardNextDueDateChanged={onCardNextDueDateChanged}
         grammarEntries={grammarEntries} onEntriesChange={setGrammarEntries}
         flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget}
+        echoDeckTarget={echoDeckTarget} setEchoDeckTarget={setEchoDeckTarget}
         correctionTarget={correctionTarget} setCorrectionTarget={setCorrectionTarget}
         correctionSessionTarget={correctionSessionTarget}         
         setCorrectionSessionTarget={setCorrectionSessionTarget}

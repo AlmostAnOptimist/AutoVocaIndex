@@ -3,13 +3,15 @@
 // works naturally) with a filtered list below, instead of a native <select>.
 // Shared by AVISourcePage.jsx (browsing) and App.jsx's topbar AVISourceSelector
 // (capture target), so there's one place to fix instead of two that can drift.
+// AS5b: also the source picker in the Search tab's "Add to Word Input" dialog;
+// `inputStyle` (optional) overrides the input's look there (16px on mobile).
 
 import { useState, useRef } from 'react';
 import { isPassiveMediaExcluded } from '../../utils/contentUtils.js';
 
 export function AVISourceSearchSelect({
   sources, value, onChange, placeholder = '— Source —',
-  excludePassive = false, style, C,
+  excludePassive = false, style, inputStyle, C,
 }) {
   const [open,  setOpen]  = useState(false);
   const [typed, setTyped] = useState('');
@@ -41,6 +43,7 @@ export function AVISourceSearchSelect({
           fontSize: '12px', padding: '3px 8px', borderRadius: '6px',
           border: `1px solid ${C.border}`, background: C.raised,
           color: value ? C.text : C.textM, outline: 'none', width: '100%', boxSizing: 'border-box',
+          ...inputStyle,
         }}
       />
       {open && (

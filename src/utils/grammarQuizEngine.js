@@ -240,7 +240,9 @@ export function alignAssessment(parsed, n) {
       grammar:      cleanLine(a.grammar),
       vocabulary:   cleanLine(a.vocabulary),
       completeness: cleanLine(a.completeness),
-      corrected:    a.verdict === 'O' || !corrected ? null : corrected,
+      // An O can carry a fixed sentence too: typo and spacing slips no longer
+      // lower the verdict, but the assessor still shows the fix.
+      corrected:    corrected || null,
     };
   }
   return out;
@@ -477,6 +479,37 @@ export function scoreTranslationQuiz(questions, assessment, conceptChoices) {
     fullyCorrect: perQuestion.filter(p => p.full).length,
     concepts, missedConcepts,
   };
+}
+
+// ── Learner overrides on translation verdicts ─────────────────
+// The learner can raise a verdict ("Mark as partial" X → △, "Mark as correct"
+// → O) and undo it. Only the translation verdict changes; a Broad concept
+// pick is never overridden. The assessor's first verdict is kept in
+// `overriddenFrom` so the change can be shown and undone. Returns a new array,
+// or the same one when nothing changes.
+export const OVERRIDE_RANK = { 'X': 0, '△': 1, 'O': 2 };
+
+export function overrideOptions(a) {
+  if (!a || !(a.verdict in OVERRIDE_RANK)) return [];
+  return ['△', 'O'].filter(v => OVERRIDE_RANK[v] > OVERRIDE_RANK[a.verdict]);
+}
+
+export function overrideAssessment(assessment, i, verdict) {
+  if (!Array.isArray(assessment)) return assessment;
+  const a = assessment[i];
+  if (!a) return assessment;
+  let next;
+  if (verdict === null) {
+    if (!a.overriddenFrom) return assessment;
+    const { overriddenFrom, ...rest } = a;
+    next = { ...rest, verdict: overriddenFrom };
+  } else {
+    const original = a.overriddenFrom || a.verdict;
+    if (!(verdict in OVERRIDE_RANK) || !(original in OVERRIDE_RANK)) return assessment;
+    if (OVERRIDE_RANK[verdict] <= OVERRIDE_RANK[original] || verdict === a.verdict) return assessment;
+    next = { ...a, verdict, overriddenFrom: original };
+  }
+  return assessment.map((x, k) => (k === i ? next : x));
 }
 
 // Points for display: 3 → "3", 2.5 → "2.5", 2.75 → "2.75".

@@ -18,6 +18,7 @@ import { AVISentenceInputPage } from './avi/AVISentenceInputPage.jsx';
 import { ensureNuanceFlashcard, autoCreateSentenceCard } from '../utils/cardFactory.js';
 import { AVILemmaMasterPage } from './avi/AVILemmaMasterPage.jsx';
 import { AVISearchPage } from './avi/AVISearchPage.jsx';
+import { useSearchStore } from '../hooks/useLemmaSearch.js';
 import { AVIRecentPage } from './avi/AVIRecentPage.jsx';
 import { AVIMobileNav } from '../components/avi/AVIMobileNav.jsx';
 import { NUANCE_SOURCE_TITLE, normalizeLemma } from '../utils/aviUtils.js';
@@ -121,6 +122,10 @@ export function AVIPage({
   // ── Lifted pagination state (persists across tab switches) ────
   const [siPage,    setSiPage]    = useState(0);
   const [lmPage,    setLmPage]    = useState(0);
+  // Lemma Master filter text and maintenance chips — lifted with lmPage so
+  // the three stay paired across tab switches (AS-D24).
+  const [lmFilter,  setLmFilter]  = useState('');
+  const [lmChips,   setLmChips]   = useState({ noDef2: false, noSource: false });
 
   // Word/Sentence Input search query — lives here so the input can render
   // in the sticky tab strip on desktop; cleared on every tab switch.
@@ -274,6 +279,7 @@ export function AVIPage({
     // Lifted pagination
     siPage, setSiPage,
     lmPage, setLmPage,
+    lmFilter, setLmFilter, lmChips, setLmChips,
     // Word/Sentence Input search (rendered in the tab strip)
     inputSearch, setInputSearch,
     // Source tab filter
@@ -292,6 +298,9 @@ export function AVIPage({
   };
 
   const pendingSearchQuery = useRef('');
+  // Search tab state lives here so the search, back trail, typed text and
+  // basket survive switching to another AVI tab and back (AS-D14).
+  const searchStore = useSearchStore();
 
   // Tabs that have adopted the flowing-content + sticky-stack layout
   // (Stage 2+). Everything else keeps today's self-contained internal
@@ -411,7 +420,7 @@ export function AVIPage({
         {activeTab === 'word'      && <AVIWordInputPage        {...sharedProps} />}
         {activeTab === 'sentence'  && <AVISentenceInputPage    {...sharedProps} />}
         {activeTab === 'lemma'     && <AVILemmaMasterPage      {...sharedProps} />}
-        {activeTab === 'search'    && <AVISearchPage           {...sharedProps} pendingQuery={pendingSearchQuery} />}
+        {activeTab === 'search'    && <AVISearchPage           {...sharedProps} pendingQuery={pendingSearchQuery} searchStore={searchStore} />}
         {activeTab === 'source'    && <AVISourcePage           {...sharedProps} />}
         {activeTab === 'recent'    && <AVIRecentPage           {...sharedProps} />}
       </div>

@@ -1,65 +1,74 @@
 // src/pages/avi/AVISearchPage.jsx
 // AVI Search tab — similarity search, pin/hide, connection basket, connect list.
+// AS2: resolution and ranking come from lemmaSearchEngine.js through the
+// useLemmaSearch hook (AVI search overhaul decisions).
+// AS3: click a lemma to pivot (with a back trail), state lifted into AVIPage
+// so it survives tab switches, compact sticky header, Def2 first, sources.
 // Kink #12: Connect List auto-populates with the currently resolved lemma.
 // pendingQuery ref: when goToSearch(query) is called from another tab,
 // the search runs automatically on mount.
+// AS5b: a Korean search with no match offers "Look up definition" and
+// "Add to Word Input" (AVIAddToWordInput.jsx); a staged word pivots the
+// search onto its lemma once the Lemma Master has it.
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
+import {
+  useLemmaSearch, SUGGESTION_KIND_LABEL, rowTag, statusLabel, resolveConnectLines,
+} from '../../hooks/useLemmaSearch.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
-import { Icons } from '../../components/Icons.jsx';
-import {
-  normalizeLemma, hangulToJamo, editDistance,
-  stripKoreanAffixes, tokenizeEnglish, DEFAULT_STOPWORDS, detectMode,
-  applyRelationPin, applyRelationConnect,
-} from '../../utils/aviUtils.js';
+import { AVINoMatchActions } from '../../components/avi/AVIAddToWordInput.jsx';
+import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
+import { normalizeLemma, applyRelationPin, applyRelationConnect } from '../../utils/aviUtils.js';
+import { searchKey } from '../../utils/lemmaSearchEngine.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
+// Nearest scrolling ancestor (AVIPage's scroll shell), or null for the window.
+function scrollParentOf(el) {
+  for (let p = el?.parentElement; p; p = p.parentElement) {
+    const oy = window.getComputedStyle(p).overflowY;
+    if (oy === 'auto' || oy === 'scroll') return p;
+  }
+  return null;
+}
+
 // ── ConnectListModal ─────────────────────────────────────────
-// Paste a list of words, resolve to lemmas, connect them all.
-// initialWord pre-populates the textarea.
-function ConnectListModal({ data, updateData, initialWord, onClose, C, S, showAVIToast }) {
+// Paste a list of words, resolve each through the search engine (AS-D21),
+// then connect them all. initialWord pre-populates the textarea. A line that
+// only has "did you mean" suggestions is left out until one is picked.
+function ConnectListModal({ search, updateData, initialWord, onClose, C, S, showAVIToast }) {
   const [raw,       setRaw]       = useState(() => initialWord ? initialWord + '\n' : '');
-  const [resolved,  setResolved]  = useState([]); // { input, lemma, found }
+  const [resolved,  setResolved]  = useState([]); // { input, status, entry, suggestions, pickedId }
+  const [resolving, setResolving] = useState(false);
   const [relType,   setRelType]   = useState('Form');
   const [connected, setConnected] = useState(false);
+  const reqRef = useRef(0);
 
-  const resolveAll = () => {
+  const resolveAll = async () => {
     const lines = raw.split(/[\n,]+/).map(l => l.trim()).filter(Boolean);
-    const results = lines.map(input => {
-      const normIn = normalizeLemma(input);
-      // Exact match
-      let match = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normIn);
-      // Word input fallback
-      if (!match) {
-        const wi = data.wordInputs.find(w => w.input === input || normalizeLemma(w.lemma) === normIn);
-        if (wi) match = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(wi.lemma));
-      }
-      // Prefix
-      if (!match) match = data.lemmaMaster.find(l => normalizeLemma(l.lemma).startsWith(normIn));
-      // Contains
-      if (!match) match = data.lemmaMaster.find(l => normalizeLemma(l.lemma).includes(normIn));
-      // Jamo edit distance
-      if (!match) {
-        const jamoIn = hangulToJamo(normIn);
-        const candidate = data.lemmaMaster
-          .map(l => ({ l, d: editDistance(jamoIn, hangulToJamo(normalizeLemma(l.lemma)), 2) }))
-          .filter(x => x.d <= 2)
-          .sort((a, b) => a.d - b.d)[0];
-        if (candidate) match = candidate.l;
-      }
-      return { input, lemma: match?.lemma || input, lemmaID: match?.lemmaID || null, found: !!match };
-    });
+    if (!lines.length) return;
+    const token = ++reqRef.current;
+    setResolving(true);
+    const results = await resolveConnectLines(lines, search);
+    if (token !== reqRef.current) return;   // edited or re-resolved meanwhile
     setResolved(results);
+    setResolving(false);
   };
 
+  const idOf = (r) => r.entry?.lemmaID || r.pickedId || null;
+  const pick = (i, lemmaID) => setResolved(prev => prev.map((r, j) => j === i ? { ...r, pickedId: lemmaID } : r));
+
+  // Two lines can resolve to the same lemma (가르치다 / 가르쳐, or a repeated
+  // line). Connecting a lemma to itself writes a self-link, so connect the
+  // set of distinct IDs only.
+  const uniqueIDs = [...new Set(resolved.map(idOf).filter(Boolean))];
+
   const connectAll = () => {
-    const items = resolved.filter(r => r.lemmaID);
-    if (items.length < 2) return;
-    updateData(prev => applyRelationConnect(prev, items.map(r => r.lemmaID), relType, showAVIToast));
+    if (uniqueIDs.length < 2) return;
+    updateData(prev => applyRelationConnect(prev, uniqueIDs, relType, showAVIToast));
     setConnected(true);
     setTimeout(() => { setConnected(false); setResolved([]); setRaw(''); onClose(); }, 2000);
   };
@@ -75,10 +84,10 @@ function ConnectListModal({ data, updateData, initialWord, onClose, C, S, showAV
           Enter one word per line (or comma-separated). Each will be resolved to its lemma, then all pairs connected.
         </div>
         <textarea
-          style={{ width: '100%', minHeight: '120px', padding: '8px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: '13px', fontFamily: SH.fk, outline: 'none', resize: 'vertical', boxSizing: 'border-box', lineHeight: 1.6 }}
+          style={{ width: '100%', minHeight: '120px', padding: '8px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: isMobile ? '16px' : '13px', fontFamily: SH.fk, outline: 'none', resize: 'vertical', boxSizing: 'border-box', lineHeight: 1.6 }}
           placeholder="가리다&#10;가르다&#10;가르치다"
           value={raw}
-          onChange={e => setRaw(e.target.value)}
+          onChange={e => { setRaw(e.target.value); ++reqRef.current; setResolving(false); setResolved([]); }}
         />
 
         {/* Relationship type */}
@@ -86,20 +95,41 @@ function ConnectListModal({ data, updateData, initialWord, onClose, C, S, showAV
           {['Form', 'Meaning', 'Both'].map(t => (
             <button key={t} onClick={() => setRelType(t)} style={{ padding: '4px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 600, border: `1px solid ${relType === t ? C.accent : C.border}`, background: relType === t ? C.accentSoft : 'transparent', color: relType === t ? C.accent : C.textS, cursor: 'pointer' }}>{t}</button>
           ))}
-          <button onClick={resolveAll} style={{ marginLeft: 'auto', padding: '4px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: 600, background: C.raised, border: `1px solid ${C.border}`, color: C.text, cursor: 'pointer' }}>Resolve</button>
+          <button onClick={resolveAll} disabled={resolving} style={{ marginLeft: 'auto', padding: '4px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: 600, background: C.raised, border: `1px solid ${C.border}`, color: C.text, cursor: resolving ? 'default' : 'pointer', opacity: resolving ? 0.6 : 1 }}>{resolving ? 'Resolving…' : 'Resolve'}</button>
         </div>
 
         {/* Resolved results */}
         {resolved.length > 0 && (
           <div style={{ border: `1px solid ${C.border}`, borderRadius: '8px', overflow: 'hidden', marginBottom: '14px' }}>
-            {resolved.map((r, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '7px 12px', borderBottom: i < resolved.length - 1 ? `1px solid ${C.border}` : 'none', background: r.found ? 'transparent' : `${C.danger}08` }}>
-                <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.textM, flexShrink: 0 }}>{r.input}</span>
-                <span style={{ color: C.textM, fontSize: '12px' }}>→</span>
-                <span style={{ fontFamily: SH.fk, fontSize: '13px', color: r.found ? C.accent : C.danger, fontWeight: r.found ? 600 : 400 }}>{r.lemma}</span>
-                {!r.found && <span style={{ fontSize: '10px', color: C.danger, marginLeft: 'auto' }}>not found</span>}
-              </div>
-            ))}
+            {resolved.map((r, i) => {
+              const id   = idOf(r);
+              const dup  = id && resolved.findIndex(x => idOf(x) === id) < i;
+              const note = r.status === 'surface' ? 'from your input' : r.status === 'dictionary' ? 'dictionary form' : '';
+              return (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', padding: '7px 12px', borderBottom: i < resolved.length - 1 ? `1px solid ${C.border}` : 'none', background: id ? 'transparent' : `${C.danger}08` }}>
+                  <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.textM, flexShrink: 0 }}>{r.input}</span>
+                  <span style={{ color: C.textM, fontSize: '12px' }}>→</span>
+                  {r.entry ? (
+                    <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.accent, fontWeight: 600 }}>{r.entry.lemma}</span>
+                  ) : r.suggestions.length > 0 ? (
+                    <select
+                      value={r.pickedId}
+                      onChange={e => pick(i, e.target.value)}
+                      style={{ fontFamily: SH.fk, fontSize: isMobile ? '16px' : '12px', padding: '3px 6px', borderRadius: '6px', border: `1px solid ${r.pickedId ? C.accent : C.border}`, background: C.bg, color: C.text, outline: 'none', cursor: 'pointer', maxWidth: '100%' }}
+                    >
+                      <option value="">Pick one…</option>
+                      {r.suggestions.map(s => <option key={s.lemmaID} value={s.lemmaID}>{s.lemma} ({SUGGESTION_KIND_LABEL[s.kind]})</option>)}
+                    </select>
+                  ) : (
+                    <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.danger }}>{r.input}</span>
+                  )}
+                  {note && <span style={{ fontSize: '10px', color: C.textM }}>{note}</span>}
+                  {!id && r.suggestions.length === 0 && <span style={{ fontSize: '10px', color: C.danger, marginLeft: 'auto' }}>not found</span>}
+                  {!id && r.suggestions.length > 0 && <span style={{ fontSize: '10px', color: C.warning, marginLeft: 'auto' }}>pick one</span>}
+                  {dup && <span style={{ fontSize: '10px', color: C.textM, marginLeft: 'auto' }}>duplicate</span>}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -109,8 +139,8 @@ function ConnectListModal({ data, updateData, initialWord, onClose, C, S, showAV
           ) : (
             <button
               onClick={connectAll}
-              disabled={resolved.filter(r => r.lemmaID).length < 2}
-              style={{ ...S.btnPrimary, ...S.btnMetallic, flex: 1, padding: '10px', borderRadius: '8px', fontSize: '13px', fontWeight: 600, opacity: resolved.filter(r => r.lemmaID).length < 2 ? 0.5 : 1 }}
+              disabled={uniqueIDs.length < 2}
+              style={{ ...S.btnPrimary, ...S.btnMetallic, flex: 1, padding: '10px', borderRadius: '8px', fontSize: '13px', fontWeight: 600, opacity: uniqueIDs.length < 2 ? 0.5 : 1 }}
             >
               Connect All as {relType}
             </button>
@@ -124,26 +154,41 @@ function ConnectListModal({ data, updateData, initialWord, onClose, C, S, showAV
 }
 
 // ── Main page ────────────────────────────────────────────────
-export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) {
+export function AVISearchPage({
+  data, updateData, pendingQuery, showAVIToast, searchStore, goToSource,
+  currentSource, currentSection, aviSources, aviSections,
+  cards, decks, updateCards, updateDecks, dsh,
+}) {
   const { C, S } = useAppTheme();
+  // searchStore is lifted into AVIPage (AS-D14): the search, back trail,
+  // typed text and basket survive tab switches. Without it the hook keeps
+  // its own store, which lasts only while this tab is open.
+  const search = useLemmaSearch(data, { store: searchStore });
+  const { mode, status, anchor, related, english } = search;
+  const {
+    input: query, setInput: setQuery,
+    modeOverride, setModeOverride,
+    basket, setBasket,
+  } = search.store;
 
-  const [query,            setQuery]            = useState('');
-  const [modeOverride,     setModeOverride]      = useState('Auto');
-  const [resolved,         setResolved]          = useState(null);
-  const [nearMatchOptions, setNearMatchOptions]  = useState([]);
-  const [wordResults,      setWordResults]       = useState([]);
-  const [sentenceResults,  setSentenceResults]   = useState([]);
-  const [status,           setStatus]            = useState('');
   const [sentExpanded,     setSentExpanded]      = useState(false);
-  const [basket,           setBasket]            = useState([]);
+  const [hiddenOpen,       setHiddenOpen]        = useState(false);
   const [basketRelType,    setBasketRelType]      = useState('Form');
   const [basketConnected,  setBasketConnected]   = useState(false);
   const [basketCollapsed,  setBasketCollapsed]   = useState(false);
   const [showConnectList,  setShowConnectList]   = useState(false);
+  // AS5b: lemma to anchor on once a staged word's entry is in the index, and
+  // the confirmation shown above its info block.
+  const [pivotTo,          setPivotTo]           = useState(null);
+  const [stagedNote,       setStagedNote]        = useState(null);
+  const staging = useMemo(() => ({
+    currentSource, currentSection, aviSources, aviSections,
+    cards, decks, updateCards, updateDecks, dsh,
+  }), [currentSource, currentSection, aviSources, aviSections, cards, decks, updateCards, updateDecks, dsh]);
 
-  // Measured height of the resolved-info sticky layer. The table header
-  // sticks just below this value instead of covering it, so Def2/Def1
-  // stay visible as reference while working through the candidates table.
+  // Measured height of the compact sticky header (AS-D15). The table header
+  // sticks just below this value instead of covering it, so Def2 stays
+  // visible as reference while working through the candidates table.
   // Measured via ResizeObserver rather than hardcoded since Def2 can wrap
   // to different heights depending on window width.
   const [riHeight, setRiHeight] = useState(0);
@@ -159,6 +204,64 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
       setRiHeight(0);
     }
   }, []);
+
+  // ── Basket center (AS-D12) ───────────────────────────────────
+  // A new anchor replaces the previous center instead of stacking; picks stay.
+  const setCenter = useCallback((ref) => {
+    if (!ref) return;
+    setBasket(prev => [
+      { lemmaID: ref.lemmaID, lemma: ref.lemma, isCenter: true },
+      ...prev.filter(b => !b.isCenter && b.lemmaID !== ref.lemmaID),
+    ]);
+  }, [setBasket]);
+
+  const searchBarRef = useRef(null);
+  const infoRef      = useRef(null);
+  const inputRef     = useRef(null);
+  const scrollToTop  = () => {
+    const sc = scrollParentOf(searchBarRef.current);
+    if (sc) sc.scrollTo({ top: 0, behavior: 'smooth' }); else window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const { run, searchById, back, jumpTo } = search;
+  const runSearch = useCallback(async (q = query, m = modeOverride) => {
+    if (!String(q || '').trim()) return;
+    setHiddenOpen(false);
+    setStagedNote(null);
+    const ref = await run(q, m);
+    setCenter(ref);
+  }, [query, modeOverride, run, setCenter]);
+
+  // Re-anchor on a lemma the user picked: a "Did you mean" suggestion
+  // (AS-D11), a result row (pivot, AS-D13), Back, or a breadcrumb step.
+  const anchorOn = (ref) => {
+    if (!ref) return;
+    setQuery(ref.lemma);
+    setHiddenOpen(false);
+    setSentExpanded(false);
+    setStagedNote(n => (n && n.lemmaID === ref.lemmaID ? n : null));
+    setCenter(ref);
+    scrollToTop();
+  };
+  const pickLemma = (lemmaID) => anchorOn(searchById(lemmaID));
+  const pivot     = (lemmaID) => anchorOn(searchById(lemmaID));
+  const goBack    = () => anchorOn(back());
+  const goToStep  = (i) => anchorOn(jumpTo(i));
+
+  // A newly created lemma reaches the index on the next render, so the pivot
+  // waits for it (an existing lemma is there already).
+  useEffect(() => {
+    if (pivotTo && search.index.byId.has(pivotTo)) {
+      setPivotTo(null);
+      pivot(pivotTo);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pivotTo, search.index]);
+  const onStaged = ({ lemmaID, row, isNewLemma, dest }) => {
+    setStagedNote({ lemmaID, surface: row.input, dest, isNewLemma });
+    if (lemmaID) setPivotTo(lemmaID);
+  };
+
   // ── Auto-run search from pendingQuery (set by goToSearch) ──
   useEffect(() => {
     if (pendingQuery?.current) {
@@ -170,222 +273,12 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function sortResults(results) {
-    return [...results].sort((a, b) => {
-      if ((a.pinForm || a.pinMeaning) && !(b.pinForm || b.pinMeaning)) return -1;
-      if (!(a.pinForm || a.pinMeaning) && (b.pinForm || b.pinMeaning)) return 1;
-      if (a.hide && !b.hide) return 1;
-      if (!a.hide && b.hide) return -1;
-      return 0;
-    });
-  }
-
-  const runSearch = useCallback((q = query, mode = modeOverride) => {
-    const raw = (q || '').trim();
-    if (!raw) return;
-    setStatus('');
-    setWordResults([]);
-    setSentenceResults([]);
-    setResolved(null);
-    setNearMatchOptions([]);
-
-    const detectedMode = mode === 'Auto' ? detectMode(raw) : mode;
-
-    if (detectedMode === 'Korean') {
-      const normQ = normalizeLemma(raw);
-      let resolvedEntry = null;
-      let stat = '';
-
-      // 1. Verbatim match — raw input exactly matches a lemma (e.g. '분명히' → '분명히')
-      resolvedEntry = data.lemmaMaster.find(l => l.lemma === raw);
-      if (resolvedEntry) stat = 'Exact';
-
-      // 2. Normalized exact match (e.g. normalized form matches stored lemma)
-      if (!resolvedEntry) {
-        resolvedEntry = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normQ);
-        if (resolvedEntry) stat = 'Exact';
-      }
-
-      // Collect other matches (prefix, contains, near) — always, regardless of resolution above.
-      // These populate the "Other matches" dropdown, excluding the resolved entry.
-      const otherMatches = [];
-      const seen = new Set(resolvedEntry ? [resolvedEntry.lemmaID] : []);
-
-      const addOther = (entry) => {
-        if (!seen.has(entry.lemmaID)) { seen.add(entry.lemmaID); otherMatches.push(entry); }
-      };
-
-      // Prefix candidates
-      const prefixMatches = data.lemmaMaster
-        .filter(l => normalizeLemma(l.lemma).startsWith(normQ))
-        .sort((a, b) => a.lemma.length - b.lemma.length);
-      if (!resolvedEntry && prefixMatches.length > 0) {
-        resolvedEntry = prefixMatches[0];
-        stat = 'Prefix';
-        seen.add(resolvedEntry.lemmaID);
-        prefixMatches.slice(1).forEach(addOther);
-      } else {
-        prefixMatches.forEach(addOther);
-      }
-
-      // Contains candidates
-      const containsMatches = data.lemmaMaster
-        .filter(l => normalizeLemma(l.lemma).includes(normQ))
-        .sort((a, b) => a.lemma.length - b.lemma.length);
-      if (!resolvedEntry && containsMatches.length > 0) {
-        resolvedEntry = containsMatches[0];
-        stat = 'Contains';
-        seen.add(resolvedEntry.lemmaID);
-        containsMatches.slice(1).forEach(addOther);
-      } else {
-        containsMatches.forEach(addOther);
-      }
-
-      // Jamo near-match — threshold scales with query length to avoid false positives
-      const maxDist = normQ.length <= 2 ? 1 : normQ.length <= 4 ? 2 : 3;
-      const jamoQ = hangulToJamo(normQ);
-      const nearMatches = data.lemmaMaster
-        .map(l => ({ l, d: editDistance(jamoQ, hangulToJamo(normalizeLemma(l.lemma)), maxDist) }))
-        .filter(x => x.d <= maxDist)
-        .sort((a, b) => a.d - b.d);
-      if (!resolvedEntry && nearMatches.length > 0) {
-        resolvedEntry = nearMatches[0].l;
-        stat = `Near (d=${nearMatches[0].d})`;
-        seen.add(resolvedEntry.lemmaID);
-        nearMatches.slice(1).forEach(x => addOther(x.l));
-      } else {
-        nearMatches.forEach(x => addOther(x.l));
-      }
-
-      setNearMatchOptions(otherMatches.slice(0, 6));
-
-      if (!resolvedEntry) { setStatus('No match'); return; }
-      setStatus(stat);
-      setResolved({
-        resolvedLemma: resolvedEntry.lemma,
-        def1: resolvedEntry.def1,
-        def2: resolvedEntry.def2,
-        lemmaID: resolvedEntry.lemmaID,
-      });
-
-      // Auto-add resolved lemma to basket as center
-      setBasket(prev => {
-        if (prev.some(b => b.lemmaID === resolvedEntry.lemmaID)) return prev;
-        return [{ lemmaID: resolvedEntry.lemmaID, lemma: resolvedEntry.lemma, isCenter: true }, ...prev];
-      });
-
-      // Related lemma scoring — includes prefix/contains and definition overlap
-      const resolvedDefTokens = tokenizeEnglish(
-        (resolvedEntry.def1 || '') + ' ' + (resolvedEntry.def2 || ''),
-        DEFAULT_STOPWORDS
-      );
-
-      const results = data.lemmaMaster
-        .filter(l => l.lemmaID !== resolvedEntry.lemmaID)
-        .map(l => {
-          const normL = normalizeLemma(l.lemma);
-          const jamoL = hangulToJamo(normL);
-          const dist  = editDistance(jamoQ, jamoL, 8);
-
-          // Prefix / contains bonuses
-          const queryInLemma  = normL.startsWith(normQ) || normL.includes(normQ);
-          const lemmaInQuery  = normQ.startsWith(normL) || (normL.length > 1 && normQ.includes(normL));
-
-          // Shared Korean syllable blocks
-          const sharedKorean  = [...normQ].filter(ch => normL.includes(ch) && /[가-힣]/.test(ch)).length;
-
-          // English definition token overlap
-          const lemmaDefTokens = tokenizeEnglish((l.def1 || '') + ' ' + (l.def2 || ''), DEFAULT_STOPWORDS);
-          const defOverlap = resolvedDefTokens.filter(t => lemmaDefTokens.includes(t)).length;
-
-          // Composite score
-          let score = 0;
-          // Force-include any lemma that starts with or contains the query syllables
-          const forceInclude = normL.startsWith(normQ) || normL.includes(normQ) ||
-            normQ.startsWith(normL) || (normL.length > 1 && normQ.includes(normL));
-          if (forceInclude) score += 12;
-          if (queryInLemma)  score += 0; // already handled above, keep for clarity
-          if (lemmaInQuery && normL.length > 1) score += 9;
-          score += sharedKorean * 2;
-          score += defOverlap * 3;
-          if (dist <= 2)     score += (3 - dist);
-
-          const relFormIds    = (resolvedEntry.relatedForm    || '').split(',').map(s => s.trim()).filter(Boolean);
-          const relMeaningIds = (resolvedEntry.relatedMeaning || '').split(',').map(s => s.trim()).filter(Boolean);
-          const hiddenIds     = (resolvedEntry.hiddenRelated  || '').split(',').map(s => s.trim()).filter(Boolean);
-          const pinForm    = relFormIds.includes(l.lemmaID);
-          const pinMeaning = relMeaningIds.includes(l.lemmaID);
-          const hide       = hiddenIds.includes(l.lemmaID);
-
-          let tag = '';
-          if (queryInLemma || lemmaInQuery) tag = 'contains';
-          else if (dist <= 2)               tag = 'near';
-          else if (defOverlap > 0)          tag = 'meaning';
-          else if (sharedKorean >= 2)       tag = 'shared';
-          if (pinForm)    tag = 'form';
-          if (pinMeaning) tag = 'meaning';
-
-          return { ...l, score, pinForm, pinMeaning, hide, tag };
-        })
-        .filter(l => l.score >= 2 || l.pinForm || l.pinMeaning || l.hide);
-
-      // Pinned connections are never capped — they only grow over time, and
-      // capping them would shrink the discovery pool for exactly the words
-      // that have accumulated the most confirmed synonyms. Hidden entries
-      // stay ordinary candidates subject to the normal cap, same as always.
-      const pinned = results.filter(l => l.pinForm || l.pinMeaning);
-      const rest = results
-        .filter(l => !(l.pinForm || l.pinMeaning))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 40);
-
-      setWordResults(sortResults([...pinned, ...rest]));
-
-      // Matching sentences (deduplicated by sentence text)
-      const rawSents = data.sentenceInputs.filter(s =>
-        normalizeLemma(s.targetWord) === normQ || s.sentence?.includes(raw)
-      );
-      const seenSents = new Set();
-      setSentenceResults(rawSents.filter(s => {
-        if (seenSents.has(s.sentence)) return false;
-        seenSents.add(s.sentence);
-        return true;
-      }));
-
-    } else {
-      // English search
-      const qTokens = tokenizeEnglish(raw, DEFAULT_STOPWORDS);
-      if (!qTokens.length) { setStatus('No match'); return; }
-
-      const results = data.lemmaMaster.map(l => {
-        const defTokens = tokenizeEnglish((l.def1 || '') + ' ' + (l.def2 || ''), DEFAULT_STOPWORDS);
-        const shared = qTokens.filter(t => defTokens.includes(t)).length;
-        if (!shared) return null;
-        return { ...l, score: shared, pinForm: false, pinMeaning: false, hide: false, tag: 'en' };
-      }).filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 20);
-
-      if (!results.length) { setStatus('No match'); return; }
-      setStatus(`${results.length} matches`);
-      setWordResults(results);
-    }
-  }, [query, modeOverride, data]);
-
-  const handleNearMatchPick = (lemma) => { runSearch(lemma, modeOverride); };
-
   // ── Pin / hide toggle (bidirectional) ────────────────────────
+  // Results are derived from the live Lemma Master, so the row moves between
+  // Pinned / Candidates / Hidden on the next render — no local copy to patch.
   const handlePinToggle = (lemmaID, type, val) => {
-    if (!resolved?.lemmaID) return;
-    updateData(prev => applyRelationPin(prev, resolved.lemmaID, lemmaID, type, val, showAVIToast));
-    setWordResults(prev => sortResults(prev.map(r =>
-      r.lemmaID !== lemmaID ? r : {
-        ...r,
-        pinForm:    type === 'pinForm'    ? val : r.pinForm,
-        pinMeaning: type === 'pinMeaning' ? val : r.pinMeaning,
-        hide:       type === 'hide'       ? val
-                  : ((type === 'pinForm' || type === 'pinMeaning') && val) ? false
-                  : r.hide,
-      }
-    )));
+    if (!anchor?.lemmaID) return;
+    updateData(prev => applyRelationPin(prev, anchor.lemmaID, lemmaID, type, val, showAVIToast));
   };
 
   // ── Basket ───────────────────────────────────────────────────
@@ -404,14 +297,86 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
     setTimeout(() => { setBasketConnected(false); setBasket([]); }, 3000);
   };
 
-  // ── Derived summary ──────────────────────────────────────────
-  const pinnedForm    = wordResults.filter(r => r.pinForm    && !r.hide).map(r => r.lemma);
-  const pinnedMeaning = wordResults.filter(r => r.pinMeaning && !r.hide).map(r => r.lemma);
-  const hiddenItems   = wordResults.filter(r => r.hide).map(r => r.lemma);
-  const candidates    = wordResults.filter(r => !r.pinForm && !r.pinMeaning && !r.hide).map(r => r.lemma);
+  // ── Sentences for the anchored lemma (AS-D19) ────────────────
+  // targetWord matching any headword variant of the anchor (보장되다 finds
+  // 보장하다 / 보장되다 rows), plus sentence text containing the stem (final
+  // 다 dropped) when the stem is 2+ syllables — a one-syllable stem
+  // (가다 → 가) would match nearly every sentence.
+  const sentenceResults = useMemo(() => {
+    if (!anchor) return [];
+    const entry = search.index.byId.get(anchor.lemmaID);
+    const norm  = normalizeLemma(anchor.lemma);
+    const keys  = new Set(entry ? entry.keys : [searchKey(norm)]);
+    const textStem     = norm.endsWith('다') ? norm.slice(0, -1) : norm;
+    const useTextMatch = textStem.replace(/\s/g, '').length >= 2;
+    const seen = new Set();
+    return data.sentenceInputs.filter(s => {
+      const hit = keys.has(searchKey(normalizeLemma(s.targetWord))) ||
+        (useTextMatch && String(s.sentence || '').normalize('NFC').includes(textStem));
+      if (!hit || seen.has(s.sentence)) return false;
+      seen.add(s.sentence);
+      return true;
+    });
+  }, [anchor, search.index, data.sentenceInputs]);
 
-  const hasSearch     = !!status;
-  const basketVisible = basket.length > 0;
+  // ── Sources for the anchored lemma (AS-D17) ──────────────────
+  // Same matching as the sentences above: any Word Input or Sentence Input
+  // row filed under one of the anchor's headword variants.
+  const anchorSources = useMemo(() => {
+    if (!anchor) return [];
+    const entry = search.index.byId.get(anchor.lemmaID);
+    const keys  = new Set(entry ? entry.keys : [searchKey(normalizeLemma(anchor.lemma))]);
+    const map = new Map();
+    const add = (word, source, section) => {
+      if (!source || !keys.has(searchKey(normalizeLemma(word)))) return;
+      const label = section ? `${source} §${section}` : source;
+      if (!map.has(label)) map.set(label, { label, source, section: section || '' });
+    };
+    for (const w of data.wordInputs) add(w.lemma, w.source, w.section);
+    for (const t of data.sentenceInputs) add(t.targetWord, t.source, t.section);
+    return [...map.values()].sort((a, b) => a.label.localeCompare(b.label, 'ko'));
+  }, [anchor, search.index, data.wordInputs, data.sentenceInputs]);
+
+  // ── Compact sticky header (AS-D15) ───────────────────────────
+  // The full info block (Def2, Def1, sources, sentences) scrolls with the
+  // page. Once it has scrolled up under the sticky search bar, a one-row
+  // header takes its place: Back, the anchor lemma, Def2 (two lines at
+  // most) and a search icon that jumps back to the search box.
+  const [infoScrolledAway, setInfoScrolledAway] = useState(false);
+  const anchorKey = mode === 'ko' && anchor ? anchor.lemmaID : '';
+  useEffect(() => {
+    const info = infoRef.current;
+    if (!info) { setInfoScrolledAway(false); return undefined; }
+    const scroller = scrollParentOf(info);
+    let raf = 0;
+    const check = () => {
+      raf = 0;
+      const top = (scroller ? scroller.getBoundingClientRect().top : 0) + (searchBarRef.current?.offsetHeight || 0);
+      setInfoScrolledAway(info.getBoundingClientRect().bottom <= top);
+    };
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(check); };
+    // Scroll events don't bubble, but they do reach the document in the
+    // capture phase — so this hears whichever ancestor actually scrolls.
+    document.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    check();
+    return () => { document.removeEventListener('scroll', onScroll, { capture: true }); if (raf) cancelAnimationFrame(raf); };
+  }, [anchorKey]);
+
+  // ── Derived view ─────────────────────────────────────────────
+  const hasSearch      = mode !== null;
+  // Pin / Hide need a resolved anchor lemma. English searches have none, so
+  // their controls (and the pinned/candidates summary) are not shown.
+  const canPin         = mode === 'ko' && !!anchor && !!related?.anchor;
+  const pinnedRows     = canPin ? related.pinned     : [];
+  const candidateRows  = canPin ? related.candidates : [];
+  const hiddenRows     = canPin ? related.hidden     : [];
+  const englishRows    = mode === 'en' && english ? english.results : [];
+  const mainRows       = mode === 'en' ? englishRows : [...pinnedRows, ...candidateRows];
+  // No exact match: nothing is anchored, the user picks from suggestions.
+  const awaitingPick   = mode === 'ko' && !anchor && (status === 'pending' || status === 'none');
+  const basketVisible  = basket.length > 0;
+  const pinnedFormN    = pinnedRows.filter(r => r.pinForm).length;
+  const pinnedMeaningN = pinnedRows.filter(r => r.pinMeaning).length;
 
   // ── Styles ───────────────────────────────────────────────────
   const thStyle = {
@@ -420,8 +385,8 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
     borderBottom: `2px solid ${C.border}`, textAlign: 'left', whiteSpace: 'nowrap',
     position: 'sticky', top: 0, background: C.raised, zIndex: 4,
   };
-  // Related Lemmas table header only: sticks below the resolved-info
-  // layer (riHeight) instead of covering it.
+  // Related Lemmas table header only: sticks below the compact header
+  // (riHeight) instead of covering it.
   const relatedThStyle = { ...thStyle, top: riHeight };
   const tdStyle = {
     padding: '6px 10px', fontSize: '12px', color: C.text,
@@ -433,41 +398,167 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
     color: C.text, cursor: 'pointer', outline: 'none',
   };
 
+  // Engine rows carry the Lemma Master object as `ref`; flatten so the
+  // cells read def1/def2 the way they always have.
+  const view = (r) => ({ ...r.ref, ...r });
+  // AS-D16: Def2 (the user's own gloss) before Def1.
+  const columns = ['Lemma', 'Definition 2', 'Definition 1', 'Tag', ...(canPin ? ['Pin Form', 'Pin Meaning', 'Hide'] : []), '+ Basket'];
+
+  // A result's lemma is a link: clicking it re-centers the search (AS-D13).
+  const lemmaLink = (r, size) => (
+    <button
+      onClick={() => pivot(r.lemmaID)}
+      title={`Search ${r.lemma}`}
+      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left', fontFamily: SH.fk, fontWeight: size ? 700 : 600, fontSize: size || 'inherit', color: C.accent }}
+    >
+      {r.lemma}
+    </button>
+  );
+
+  const renderCard = (row) => {
+    const r = view(row);
+    const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
+    return (
+      <div
+        key={r.lemmaID}
+        style={{
+          background: r.hide ? `${C.textM}10` : (r.pinForm || r.pinMeaning) ? `${C.accent}06` : C.surface,
+          border: `1px solid ${C.border}`, borderRadius: '10px', padding: '11px 12px', marginTop: '8px', opacity: r.hide ? 0.6 : 1,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+          {lemmaLink(r, '15px')}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+            <span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 6px', color: C.textM, fontFamily: SH.fm }}>{rowTag(r) || '—'}</span>
+            <button
+              onClick={() => toggleBasket(r.lemmaID, r.lemma)}
+              title={inBasket ? 'Remove from basket' : 'Add to basket'}
+              style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '6px', width: '24px', height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+            >
+              {inBasket ? Icons.check : Icons.plus}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ marginTop: '7px' }}>
+          <div style={{ fontSize: '9.5px', fontWeight: 700, color: C.textM, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Definition 2</div>
+          <div style={{ fontSize: '12px', color: r.def2 ? C.text : C.textM, lineHeight: 1.5 }}>{r.def2 || '—'}</div>
+        </div>
+        <div style={{ marginTop: '6px' }}>
+          <div style={{ fontSize: '9.5px', fontWeight: 700, color: C.textM, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Definition 1</div>
+          <Def1Display text={r.def1} />
+        </div>
+
+        {canPin && (
+        <div style={{ display: 'flex', gap: '6px', marginTop: '10px' }}>
+          <button
+            onClick={() => handlePinToggle(r.lemmaID, 'pinForm', !r.pinForm)}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 4px', borderRadius: '6px', fontSize: '10.5px', fontWeight: 600, border: `1px solid ${r.pinForm ? C.accent : C.border}`, background: r.pinForm ? C.accentSoft : 'transparent', color: r.pinForm ? C.accent : C.textM, cursor: 'pointer' }}
+          >
+            {Icons.pin} Form
+          </button>
+          <button
+            onClick={() => handlePinToggle(r.lemmaID, 'pinMeaning', !r.pinMeaning)}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 4px', borderRadius: '6px', fontSize: '10.5px', fontWeight: 600, border: `1px solid ${r.pinMeaning ? C.accent : C.border}`, background: r.pinMeaning ? C.accentSoft : 'transparent', color: r.pinMeaning ? C.accent : C.textM, cursor: 'pointer' }}
+          >
+            {Icons.pin} Meaning
+          </button>
+          <button
+            onClick={() => handlePinToggle(r.lemmaID, 'hide', !r.hide)}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 4px', borderRadius: '6px', fontSize: '10.5px', fontWeight: 600, border: `1px solid ${r.hide ? C.danger : C.border}`, background: r.hide ? `${C.danger}15` : 'transparent', color: r.hide ? C.danger : C.textM, cursor: 'pointer' }}
+          >
+            {Icons.eyeSlash} {r.hide ? 'Unhide' : 'Hide'}
+          </button>
+        </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderTableRow = (row) => {
+    const r = view(row);
+    const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
+    return (
+      <tr key={r.lemmaID} style={{ background: r.hide ? `${C.textM}10` : (r.pinForm || r.pinMeaning) ? `${C.accent}06` : 'transparent', opacity: r.hide ? 0.6 : 1 }}>
+        <td style={tdStyle}>{lemmaLink(r)}</td>
+        <td style={{ ...tdStyle, maxWidth: '180px', color: r.def2 ? C.text : C.textM }}>{r.def2 || '—'}</td>
+        <td style={{ ...tdStyle, maxWidth: '180px' }}><Def1Display text={r.def1} /></td>
+        <td style={tdStyle}><span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 5px', color: C.textM, fontFamily: SH.fm }}>{rowTag(r) || '—'}</span></td>
+        {canPin && (<>
+        <td style={{ ...tdStyle, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinForm}    onChange={e => handlePinToggle(r.lemmaID, 'pinForm',    e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
+        <td style={{ ...tdStyle, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinMeaning} onChange={e => handlePinToggle(r.lemmaID, 'pinMeaning', e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
+        <td style={{ ...tdStyle, textAlign: 'center' }}><input type="checkbox" checked={!!r.hide}       onChange={e => handlePinToggle(r.lemmaID, 'hide',       e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
+        </>)}
+        <td style={{ ...tdStyle, textAlign: 'center' }}>
+          <button
+            onClick={() => toggleBasket(r.lemmaID, r.lemma)}
+            style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '4px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', fontWeight: 600, transition: 'background 0.15s' }}
+          >
+            {inBasket ? '✓' : '+'}
+          </button>
+        </td>
+      </tr>
+    );
+  };
+
+  const resultsLabel = mode === 'en'
+    ? `Definition matches (${english ? english.total : 0})`
+    : `Related Lemmas (${mainRows.length})`;
+
+  // Last five anchors of the trail; the current one is not a link.
+  const crumbs = search.trail.slice(-5);
+  const isCurrentStep = (t) => mode === 'ko' && t.i === search.trail[search.trail.length - 1]?.i && t.lemmaID === anchor?.lemmaID;
+
   return (
     <div style={{ paddingBottom: basketVisible ? (basketCollapsed ? '56px' : '120px') : '0' }}>
 
+      {/* ── Compact sticky header (AS-D15). Zero-height sticky wrapper so it
+           never shifts the layout; its content overlays the search bar
+           once the full info block has scrolled away. ──────────────── */}
+      {mode === 'ko' && anchor && infoScrolledAway && (
+        <div style={{ position: 'sticky', top: 0, zIndex: 3, height: 0 }}>
+          <div ref={setRiNode} style={{ position: 'absolute', left: 0, right: 0, top: 0, background: C.bg, paddingBottom: '10px', display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+            {search.canBack && (
+              <button onClick={goBack} title="Back" style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '5px 9px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer', fontSize: '12px' }}>
+                {Icons.chevronLeft} Back
+              </button>
+            )}
+            <span style={{ flexShrink: 0, fontFamily: SH.fk, fontSize: '15px', fontWeight: 700, color: C.accent, paddingTop: '3px' }}>{anchor.lemma}</span>
+            <div style={{ flex: 1, minWidth: 0, fontSize: '12px', color: anchor.def2 ? C.text : C.textM, lineHeight: 1.5, paddingTop: '4px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+              {anchor.def2 || (anchor.def1 || '').split('\n')[0] || '—'}
+            </div>
+            <button onClick={() => { scrollToTop(); inputRef.current?.focus(); }} title="Back to the search box" style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '30px', height: '30px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer' }}>
+              <MagnifyIcon size={13} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Search bar layer (sticky — covers the AVI tab strip) ── */}
-      <div style={{ position: 'sticky', top: 0, zIndex: 2, background: C.bg, paddingBottom: '14px' }}>
+      <div ref={searchBarRef} style={{ position: 'sticky', top: 0, zIndex: 2, background: C.bg, paddingBottom: '14px' }}>
   <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
 
-    {/* Resolved lemma — shown left of search bar once a search has run */}
+    {/* Resolved lemma + how it was found — shown once a search has run */}
     {hasSearch && (
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-        <span style={{ fontFamily: SH.fk, fontSize: '15px', fontWeight: 700, color: C.accent, flexShrink: 0 }}>
-          {resolved?.resolvedLemma || '—'}
-        </span>
-        <span style={{ fontSize: '10px', background: C.raised, border: `1px solid ${C.border}`, borderRadius: '4px', padding: '1px 6px', color: C.textM, fontFamily: SH.fm, flexShrink: 0 }}>
-          {status}
-        </span>
-        {nearMatchOptions.length > 0 && (
-          <select
-            style={{ ...selectStyle, fontFamily: SH.fk, fontSize: '12px' }}
-            value=""
-            onChange={e => { if (e.target.value) handleNearMatchPick(e.target.value); }}
-          >
-            <option value="" disabled>Other matches</option>
-            {nearMatchOptions.map(opt => <option key={opt.lemmaID} value={opt.lemma}>{opt.lemma}</option>)}
-          </select>
+        {mode === 'ko' && (
+          <span style={{ fontFamily: SH.fk, fontSize: '15px', fontWeight: 700, color: C.accent, flexShrink: 0 }}>
+            {anchor?.lemma || '—'}
+          </span>
         )}
+        <span style={{ fontSize: '10px', background: C.raised, border: `1px solid ${C.border}`, borderRadius: '4px', padding: '1px 6px', color: C.textM, fontFamily: SH.fm, flexShrink: 0 }}>
+          {statusLabel(search)}
+        </span>
       </div>
     )}
 
     <input
-      style={{ flex: 1, minWidth: '160px', padding: '8px 12px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: '13px', fontFamily: SH.fk, outline: 'none' }}
+      ref={inputRef}
+      style={{ flex: 1, minWidth: '160px', padding: '8px 12px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: isMobile ? '16px' : '13px', fontFamily: SH.fk, outline: 'none' }}
       placeholder="Search Korean word or English meaning…"
       value={query}
       onChange={e => setQuery(e.target.value)}
-      onKeyDown={e => e.key === 'Enter' && runSearch()}
+      onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && runSearch()}
     />
     <select style={selectStyle} value={modeOverride} onChange={e => setModeOverride(e.target.value)}>
       <option>Auto</option>
@@ -477,14 +568,90 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
     <button onClick={() => runSearch()} style={{ ...S.btnPrimary, padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 600 }}>Search</button>
     <button onClick={() => setShowConnectList(true)} style={{ padding: '8px 14px', borderRadius: '8px', background: C.raised, border: `1px solid ${C.border}`, color: C.text, cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}>Connect List</button>
   </div>
+
+  {/* Back trail (AS-D13): Back plus the last five anchors */}
+  {search.canBack && (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '8px', fontSize: '12px' }}>
+      <button onClick={goBack} title="Back" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 9px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer', fontSize: '12px' }}>
+        {Icons.chevronLeft} Back
+      </button>
+      {crumbs.map((t, k) => (
+        <span key={t.i} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+          {k > 0 && <span style={{ color: C.textM, display: 'inline-flex' }}>{Icons.chevronRight}</span>}
+          {isCurrentStep(t) ? (
+            <span style={{ fontFamily: SH.fk, fontWeight: 700, color: C.text }}>{t.lemma}</span>
+          ) : (
+            <button onClick={() => goToStep(t.i)} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: SH.fk, color: C.accent, fontSize: '12px' }}>{t.lemma}</button>
+          )}
+        </span>
+      ))}
+    </div>
+  )}
   </div>
 
-  {/* ── Resolved word info layer (sticky — covers the search bar) ── */}
-  {hasSearch && (resolved?.def2 || resolved?.def1 || sentenceResults.length > 0) && (
-    <div ref={setRiNode} style={{ position: 'sticky', top: 0, zIndex: 3, background: C.bg, paddingBottom: '14px' }}>
+  {/* ── Did you mean (AS-D11): no exact match, nothing anchored ── */}
+  {awaitingPick && (
+    <div style={{ marginBottom: '14px', padding: '12px 14px', border: `1px solid ${C.border}`, borderRadius: '10px', background: C.surface }}>
+      <div style={{ fontSize: '13px', color: C.text, marginBottom: search.suggestions.length ? '8px' : 0 }}>
+        No exact match for <span style={{ fontFamily: SH.fk, fontWeight: 700 }}>{search.query}</span>.
+        {status === 'pending' && <span style={{ color: C.textM }}> Checking the dictionary…</span>}
+        {search.suggestions.length > 0 && ' Did you mean:'}
+        {status === 'none' && search.suggestions.length === 0 && <span style={{ color: C.textM }}> Nothing similar in your Lemma Master.</span>}
+      </div>
+      {search.suggestions.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+          {search.suggestions.map(s => (
+            <button
+              key={s.lemmaID}
+              onClick={() => pickLemma(s.lemmaID)}
+              style={{ display: 'inline-flex', alignItems: 'baseline', gap: '6px', padding: '5px 10px', borderRadius: '16px', border: `1px solid ${C.border}`, background: C.raised, color: C.text, cursor: 'pointer' }}
+            >
+              <span style={{ fontFamily: SH.fk, fontSize: '13px', fontWeight: 600, color: C.accent }}>{s.lemma}</span>
+              <span style={{ fontSize: '10px', color: C.textM }}>{SUGGESTION_KIND_LABEL[s.kind]}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* AS5b (AS-D27): once the dictionary check has come back empty */}
+      {status === 'none' && (
+        <AVINoMatchActions
+          key={search.query}
+          query={search.query}
+          data={data}
+          updateData={updateData}
+          staging={staging}
+          showAVIToast={showAVIToast}
+          onStaged={onStaged}
+          onPickLemma={pickLemma}
+        />
+      )}
+    </div>
+  )}
+
+  {/* ── Resolved word info (scrolls; the compact header takes over once it is gone) ── */}
+  {mode === 'ko' && anchor && (
+    <div ref={infoRef} style={{ paddingBottom: '14px' }}>
+    {stagedNote && stagedNote.lemmaID === anchor.lemmaID && (
+      <div style={{ marginBottom: '8px', padding: '6px 10px', borderRadius: '8px', border: `1px solid ${C.success}`, background: `${C.success}12`, fontSize: '12px', color: C.text }}>
+        Added <span style={{ fontFamily: SH.fk, fontWeight: 700 }}>{stagedNote.surface}</span> to Word Input · {stagedNote.dest}.
+        {stagedNote.isNewLemma && <span style={{ color: C.textM }}> New Lemma Master entry.</span>}
+      </div>
+    )}
     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-      {resolved?.def2 && <div style={{ fontSize: '13px', color: C.text }}><span style={{ fontSize: '11px', color: C.textM, marginRight: '6px' }}>Def2:</span>{resolved.def2}</div>}
-      {resolved?.def1 && <div style={{ fontSize: '12px', color: C.textM }}><span style={{ fontSize: '11px', marginRight: '6px' }}>Def1:</span>{resolved.def1.split('\n')[0]}</div>}
+      {anchor.def2 && <div style={{ fontSize: '13px', color: C.text }}><span style={{ fontSize: '11px', color: C.textM, marginRight: '6px' }}>Def2:</span>{anchor.def2}</div>}
+      {anchor.def1 && <div style={{ fontSize: '12px', color: C.textM }}><span style={{ fontSize: '11px', marginRight: '6px' }}>Def1:</span>{anchor.def1.split('\n')[0]}</div>}
+
+      {/* Sources (AS-D17) — each opens the Source tab filtered to it */}
+      {anchorSources.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', alignItems: 'center', marginTop: '2px' }}>
+          <span style={{ fontSize: '11px', color: C.textM, marginRight: '2px' }}>Sources:</span>
+          {anchorSources.map(src => goToSource ? (
+            <button key={src.label} onClick={() => goToSource(src.source, src.section)} title={`Open ${src.label} in the Source tab`} style={{ fontSize: '11px', background: C.accentSoft, color: C.accent, border: 'none', borderRadius: '4px', padding: '1px 6px', fontFamily: SH.fm, cursor: 'pointer' }}>{src.label}</button>
+          ) : (
+            <span key={src.label} style={{ fontSize: '11px', background: C.accentSoft, color: C.accent, borderRadius: '4px', padding: '1px 6px', fontFamily: SH.fm }}>{src.label}</span>
+          ))}
+        </div>
+      )}
 
       {/* Sentences collapsible */}
       <div style={{ marginTop: '2px' }}>
@@ -518,128 +685,85 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
   )}
 
       {/* ── Summary line ──────────────────────────────────────── */}
-      {hasSearch && wordResults.length > 0 && (
+      {canPin && (mainRows.length > 0 || hiddenRows.length > 0) && (
         <div style={{ flexShrink: 0, display: 'flex', gap: '18px', alignItems: 'center', flexWrap: 'wrap', fontSize: '11px', fontFamily: SH.fm, color: C.textM, marginBottom: '10px' }}>
-          <span><span style={{ color: C.tL, fontWeight: 700, letterSpacing: '0.05em' }}>Pinned:</span> {pinnedForm.length} form · {pinnedMeaning.length} meaning</span>
-          <span><span style={{ color: C.warning, fontWeight: 700, letterSpacing: '0.05em' }}>Candidates:</span> {candidates.length}</span>
-          <span><span style={{ color: C.textM, fontWeight: 700, letterSpacing: '0.05em' }}>Hidden:</span> {hiddenItems.length}</span>
+          <span><span style={{ color: C.tL, fontWeight: 700, letterSpacing: '0.05em' }}>Pinned:</span> {pinnedFormN} form · {pinnedMeaningN} meaning</span>
+          <span><span style={{ color: C.warning, fontWeight: 700, letterSpacing: '0.05em' }}>Candidates:</span> {candidateRows.length}{related.totalCandidates > candidateRows.length ? ` of ${related.totalCandidates}` : ''}</span>
+          <span><span style={{ color: C.textM, fontWeight: 700, letterSpacing: '0.05em' }}>Hidden:</span> {hiddenRows.length}</span>
         </div>
       )}
 
-      {/* ── Related lemmas (mobile: cards; desktop: table) ────── */}
+      {/* ── Related lemmas / definition matches (mobile: cards; desktop: table) ── */}
       <div>
-        {wordResults.length > 0 && (
+        {mainRows.length > 0 && (
           isMobile ? (
             <>
-              <div style={relatedThStyle}>
-                Related Lemmas ({wordResults.length})
-              </div>
-              {wordResults.map(r => {
-                const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
-                return (
-                  <div
-                    key={r.lemmaID}
-                    style={{
-                      background: r.hide ? `${C.textM}10` : (r.pinForm || r.pinMeaning) ? `${C.accent}06` : C.surface,
-                      border: `1px solid ${C.border}`, borderRadius: '10px', padding: '11px 12px', marginTop: '8px', opacity: r.hide ? 0.6 : 1,
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
-                      <span style={{ fontFamily: SH.fk, fontWeight: 700, fontSize: '15px', color: C.accent }}>{r.lemma}</span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                        <span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 6px', color: C.textM, fontFamily: SH.fm }}>{r.tag || '—'}</span>
-                        <button
-                          onClick={() => toggleBasket(r.lemmaID, r.lemma)}
-                          title={inBasket ? 'Remove from basket' : 'Add to basket'}
-                          style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '6px', width: '24px', height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
-                        >
-                          {inBasket ? Icons.check : Icons.plus}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div style={{ marginTop: '7px' }}>
-                      <div style={{ fontSize: '9.5px', fontWeight: 700, color: C.textM, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Definition 2</div>
-                      <div style={{ fontSize: '12px', color: r.def2 ? C.text : C.textM, lineHeight: 1.5 }}>{r.def2 || '—'}</div>
-                    </div>
-                    <div style={{ marginTop: '6px' }}>
-                      <div style={{ fontSize: '9.5px', fontWeight: 700, color: C.textM, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Definition 1</div>
-                      <Def1Display text={r.def1} />
-                    </div>
-
-                    <div style={{ display: 'flex', gap: '6px', marginTop: '10px' }}>
-                      <button
-                        onClick={() => handlePinToggle(r.lemmaID, 'pinForm', !r.pinForm)}
-                        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 4px', borderRadius: '6px', fontSize: '10.5px', fontWeight: 600, border: `1px solid ${r.pinForm ? C.accent : C.border}`, background: r.pinForm ? C.accentSoft : 'transparent', color: r.pinForm ? C.accent : C.textM, cursor: 'pointer' }}
-                      >
-                        {Icons.pin} Form
-                      </button>
-                      <button
-                        onClick={() => handlePinToggle(r.lemmaID, 'pinMeaning', !r.pinMeaning)}
-                        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 4px', borderRadius: '6px', fontSize: '10.5px', fontWeight: 600, border: `1px solid ${r.pinMeaning ? C.accent : C.border}`, background: r.pinMeaning ? C.accentSoft : 'transparent', color: r.pinMeaning ? C.accent : C.textM, cursor: 'pointer' }}
-                      >
-                        {Icons.pin} Meaning
-                      </button>
-                      <button
-                        onClick={() => handlePinToggle(r.lemmaID, 'hide', !r.hide)}
-                        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '6px 4px', borderRadius: '6px', fontSize: '10.5px', fontWeight: 600, border: `1px solid ${r.hide ? C.danger : C.border}`, background: r.hide ? `${C.danger}15` : 'transparent', color: r.hide ? C.danger : C.textM, cursor: 'pointer' }}
-                      >
-                        {Icons.eyeSlash} Hide
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+              <div style={relatedThStyle}>{resultsLabel}</div>
+              {mainRows.map(renderCard)}
             </>
           ) : (
             <>
               <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, marginBottom: '6px' }}>
-                Related Lemmas ({wordResults.length})
+                {resultsLabel}
               </div>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
                 <thead>
                   <tr>
-                    {['Lemma', 'Definition 1', 'Definition 2', 'Tag', 'Pin Form', 'Pin Meaning', 'Hide', '+ Basket'].map(h => (
+                    {columns.map(h => (
                       <th key={h} style={relatedThStyle}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {wordResults.map(r => {
-                    const inBasket = basket.some(b => b.lemmaID === r.lemmaID);
-                    return (
-                      <tr key={r.lemmaID} style={{ background: r.hide ? `${C.textM}10` : (r.pinForm || r.pinMeaning) ? `${C.accent}06` : 'transparent', opacity: r.hide ? 0.6 : 1 }}>
-                        <td style={tdStyle}><span style={{ fontFamily: SH.fk, color: C.accent, fontWeight: 600 }}>{r.lemma}</span></td>
-                        <td style={{ ...tdStyle, maxWidth: '180px' }}><Def1Display text={r.def1} /></td>
-                        <td style={{ ...tdStyle, maxWidth: '180px', color: C.textM }}>{r.def2 || '—'}</td>
-                        <td style={tdStyle}><span style={{ fontSize: '10px', background: C.raised, borderRadius: '4px', padding: '1px 5px', color: C.textM, fontFamily: SH.fm }}>{r.tag || '—'}</span></td>
-                        <td style={{ ...tdStyle, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinForm}    onChange={e => handlePinToggle(r.lemmaID, 'pinForm',    e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
-                        <td style={{ ...tdStyle, textAlign: 'center' }}><input type="checkbox" checked={!!r.pinMeaning} onChange={e => handlePinToggle(r.lemmaID, 'pinMeaning', e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
-                        <td style={{ ...tdStyle, textAlign: 'center' }}><input type="checkbox" checked={!!r.hide}       onChange={e => handlePinToggle(r.lemmaID, 'hide',       e.target.checked)} style={{ accentColor: C.accent, cursor: 'pointer' }} /></td>
-                        <td style={{ ...tdStyle, textAlign: 'center' }}>
-                          <button
-                            onClick={() => toggleBasket(r.lemmaID, r.lemma)}
-                            style={{ background: inBasket ? C.accent : C.raised, color: inBasket ? '#fff' : C.textM, border: `1px solid ${inBasket ? C.accent : C.border}`, borderRadius: '4px', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', fontWeight: 600, transition: 'background 0.15s' }}
-                          >
-                            {inBasket ? '✓' : '+'}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {mainRows.map(renderTableRow)}
                 </tbody>
               </table>
             </>
           )
         )}
+
+        {/* English: 20 at a time (AS-D29) */}
+        {mode === 'en' && english && englishRows.length < english.total && (
+          <div style={{ textAlign: 'center', marginTop: '12px' }}>
+            <button onClick={search.showMore} style={{ padding: '7px 16px', borderRadius: '8px', background: C.raised, border: `1px solid ${C.border}`, color: C.text, cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+              Show more ({english.total - englishRows.length} more)
+            </button>
+          </div>
+        )}
+
+        {/* Hidden relations: collapsed, always reachable for unhiding (AS-D4 / AS-D10) */}
+        {canPin && hiddenRows.length > 0 && (
+          <div style={{ marginTop: '14px' }}>
+            <button onClick={() => setHiddenOpen(v => !v)} style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: '6px', color: C.textM, cursor: 'pointer', fontSize: '12px', padding: '3px 10px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              {Icons.eyeSlash}
+              <span style={{ fontWeight: 700, fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Hidden</span>
+              <span style={{ background: C.raised, borderRadius: '10px', padding: '1px 6px', fontSize: '11px', fontFamily: SH.fm }}>{hiddenRows.length}</span>
+              <span style={{ fontSize: '10px' }}>{hiddenOpen ? '▲' : '▼'}</span>
+            </button>
+            {hiddenOpen && (isMobile ? hiddenRows.map(renderCard) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', marginTop: '6px' }}>
+                <thead>
+                  <tr>{columns.map(h => <th key={h} style={{ ...thStyle, position: 'static' }}>{h}</th>)}</tr>
+                </thead>
+                <tbody>{hiddenRows.map(renderTableRow)}</tbody>
+              </table>
+            ))}
+          </div>
+        )}
+
         {!hasSearch && (
           <div style={{ padding: '40px 0', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
             Search for a Korean word or English meaning to explore similarities.
           </div>
         )}
-        {hasSearch && wordResults.length === 0 && (
+        {canPin && mainRows.length === 0 && hiddenRows.length === 0 && (
           <div style={{ padding: '24px 0', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
             No related lemmas found.
+          </div>
+        )}
+        {mode === 'en' && english && english.total === 0 && (
+          <div style={{ padding: '24px 0', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
+            No matches in your definitions.
           </div>
         )}
       </div>
@@ -668,19 +792,17 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
               {basketConnected ? (
                 <span style={{ background: C.success, color: '#fff', borderRadius: '6px', padding: '5px 14px', fontSize: '12px', fontWeight: 700 }}>✓ Connected</span>
               ) : (
-                <button onClick={connectBasket} style={{ ...S.btnPrimary, borderRadius: '6px', padding: '5px 14px', fontSize: '12px', fontWeight: 700 }}>Connect All</button>
+                <button onClick={connectBasket} disabled={basket.length < 2} title={basket.length < 2 ? 'Add at least two lemmas to connect' : undefined} style={{ ...S.btnPrimary, borderRadius: '6px', padding: '5px 14px', fontSize: '12px', fontWeight: 700, opacity: basket.length < 2 ? 0.5 : 1, cursor: basket.length < 2 ? 'default' : 'pointer' }}>Connect All</button>
               )}
               <button onClick={() => setBasketCollapsed(true)} style={{ background: C.raised, border: `1px solid ${C.border}`, color: C.textM, borderRadius: '4px', padding: '3px 8px', cursor: 'pointer', fontSize: '13px' }}>▼</button>
-              {!isMobile && (
-                <button onClick={() => setBasket([])} style={{ background: 'none', border: 'none', color: C.danger, cursor: 'pointer', fontSize: '14px', fontWeight: 700 }}>✕</button>
-              )}
+              <button onClick={() => setBasket([])} title="Clear basket" style={{ background: 'none', border: 'none', color: C.danger, cursor: 'pointer', fontSize: '14px', fontWeight: 700, padding: '3px 6px' }}>✕</button>
             </div>
           </div>
           <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' }}>
             {basket.map(b => (
               <div key={b.lemmaID} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: C.raised, border: `1px solid ${C.border}`, borderRadius: '16px', padding: '3px 10px', fontSize: '13px', color: C.text }}>
                 <span style={{ fontFamily: SH.fk }}>{b.lemma}</span>
-                {!b.isCenter && <button onClick={() => toggleBasket(b.lemmaID, b.lemma)} style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '11px', lineHeight: 1, padding: '0 2px' }}>✕</button>}
+                <button onClick={() => toggleBasket(b.lemmaID, b.lemma)} title="Remove from basket" style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '11px', lineHeight: 1, padding: '0 2px' }}>✕</button>
               </div>
             ))}
           </div>
@@ -690,9 +812,9 @@ export function AVISearchPage({ data, updateData, pendingQuery, showAVIToast }) 
       {/* ── Connect List modal ────────────────────────────────── */}
       {showConnectList && (
         <ConnectListModal
-          data={data}
+          search={search}
           updateData={updateData}
-          initialWord={resolved?.resolvedLemma || ''}
+          initialWord={anchor?.lemma || ''}
           onClose={() => setShowConnectList(false)}
           C={C}
           S={S}

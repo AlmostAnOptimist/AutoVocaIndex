@@ -6,6 +6,11 @@
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
 import { apiFetch } from './apiFetch.js';
+import { spokenLemma } from './spokenText.js';
+
+// What a word card says (Echo X4, X-D12): parentheses dropped with their words
+// read, slash and two-part forms read as both words.
+const sayLemma = (lemma) => spokenLemma(lemma) || String(lemma || '').trim();
 
 // ── Session cache ─────────────────────────────────────────────
 // Avoids calling the function twice for the same text within a session.
@@ -43,7 +48,7 @@ export async function prewarmTtsAudio(text) {
 export async function generateVocabCardAudio({ lemma, cardId, uid }) {
   if (!lemma?.trim() || !cardId || !uid) return;
   try {
-    const audioUrl = await fetchAudioUrl(lemma);
+    const audioUrl = await fetchAudioUrl(sayLemma(lemma));
     await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { audioUrl });
   } catch (err) {
     console.error('generateVocabCardAudio failed:', err);
@@ -54,7 +59,7 @@ export async function generateSentenceCardAudio({ lemma, sentence, cardId, uid }
   if (!cardId || !uid) return;
   try {
     const updates = {};
-    if (lemma?.trim())    updates.audioUrl         = await fetchAudioUrl(lemma);
+    if (lemma?.trim())    updates.audioUrl         = await fetchAudioUrl(sayLemma(lemma));
     if (sentence?.trim()) updates.sentenceAudioUrl = await fetchAudioUrl(sentence);
     if (Object.keys(updates).length > 0) {
       await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), updates);
@@ -95,6 +100,29 @@ export async function generateGrammarCardAudio({ examples, cardId, uid, onComple
   } catch (err) {
     console.error('generateGrammarCardAudio failed:', err);
   }
+}
+
+// One-time refresh (X-D16): re-records a word or sentence card's word audio
+// in the spoken form. Returns the new URL (or null on failure).
+export async function regenerateLemmaAudio({ card, uid }) {
+  const word = card?.type === 'sentence' ? card.lemma : card?.front;
+  if (!word?.trim() || !card?.id || !uid) return null;
+  try {
+    const audioUrl = await fetchAudioUrl(sayLemma(word));
+    await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { audioUrl });
+    return audioUrl;
+  } catch (err) {
+    console.error('regenerateLemmaAudio failed:', err);
+    return null;
+  }
+}
+
+// Audio for a Korean word without a card (Echo X4, X-D15): the spoken form,
+// generated and cached server-side like prewarmTtsAudio. Null on failure.
+export async function wordAudioUrl(lemma) {
+  const say = sayLemma(lemma);
+  if (!say) return null;
+  try { return await fetchAudioUrl(say); } catch { return null; }
 }
 
 // ── Playback ──────────────────────────────────────────────────

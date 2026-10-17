@@ -175,7 +175,12 @@ Overall verdict:
 - "△" = understandable but has errors
 - "X" = incorrect, unintelligible, or left blank
 
-For △ and X, put a corrected Korean sentence in "corrected". For O, set "corrected" to an empty string.
+Minor typos and spacing do not lower the verdict:
+- A minor typo is a slip in spelling a word the learner clearly knows (one wrong, missing or extra letter or syllable) that leaves no doubt which word was meant. It is not a typo when the slip changes the grammar (a different particle, ending, tense or conjugation) or makes a different real word; judge those as errors.
+- Spacing (띄어쓰기) mistakes alone are never errors.
+- If a translation would be "O" apart from minor typos or spacing, its verdict is "O". Mention each slip briefly in the most relevant note.
+
+For △ and X, put a corrected Korean sentence in "corrected". For O, set "corrected" to an empty string, unless you noted a typo or spacing slip: then give the fixed sentence there.
 Return exactly one assessment per item, with the item's number in "item".
 
 Items:

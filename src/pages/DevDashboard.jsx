@@ -2,7 +2,7 @@
 // Accessed via window.location.hash === '#dev'
 // Not linked from main app's navigation UI
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   collection, getDocs, getDoc, addDoc, updateDoc, deleteDoc, setDoc,
   doc, serverTimestamp, writeBatch,
@@ -12,6 +12,8 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { recomputeReviewStats } from '../utils/reviewStatsEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
+import { regenerateLemmaAudio } from '../utils/ttsUtils.js';
+import { spokenLemma, needsSpokenRefresh } from '../utils/spokenText.js';
 
 // ── Constants ─────────────────────────────────────────────────
 const DEV_CATS    = ['calendar', 'language', 'life'];
@@ -1007,6 +1009,97 @@ function SectionRetagRow({ group, sectionsBySrc, onApply, busy, C }) {
   );
 }
 
+// ── Card audio refresh (Echo X4, X-D16) ───────────────────────
+// One-time: word and sentence cards whose word contains "(" or "/" were
+// recorded saying it as written. This re-records their word audio in the
+// spoken form ((주먹을) 날리다 → "주먹을 날리다"; 보장하다 / 보장되다 → both
+// words). Grammar cards and sentence audio are untouched. Reload the main
+// app afterwards so open pages pick up the new audio.
+function CardAudioRefreshPanel({ uid, C }) {
+  const [status,  setStatus]  = useState('idle');   // idle | scanning | ready | running | done
+  const [targets, setTargets] = useState([]);
+  const [prog,    setProg]    = useState({ done: 0, failed: 0 });
+  const stopRef = useRef(false);
+
+  const btnSt = (disabled) => ({
+    padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
+    border: `1px solid ${C.border}`, background: 'transparent',
+    color: C.textS, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+  });
+
+  const scan = async () => {
+    if (status === 'scanning' || status === 'running') return;
+    setStatus('scanning');
+    try {
+      const snap = await getDocs(collection(db, 'users', uid, 'flashcards'));
+      const list = snap.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .filter(c => c.type !== 'grammar')
+        .map(c => ({ card: c, word: c.type === 'sentence' ? c.lemma : c.front }))
+        .filter(t => t.word && needsSpokenRefresh(t.word));
+      setTargets(list);
+      setProg({ done: 0, failed: 0 });
+      setStatus('ready');
+    } catch (e) {
+      console.error('Card audio scan failed', e);
+      setStatus('idle');
+    }
+  };
+
+  const run = async () => {
+    if (status !== 'ready' || !targets.length) return;
+    stopRef.current = false;
+    setStatus('running');
+    let done = 0, failed = 0;
+    for (const t of targets) {
+      if (stopRef.current) break;
+      const url = await regenerateLemmaAudio({ card: t.card, uid });
+      if (url) done++; else failed++;
+      setProg({ done, failed });
+      await new Promise(r => setTimeout(r, 150));   // same pacing as the audio backfill
+    }
+    setStatus('done');
+  };
+
+  return (
+    <div style={{ marginTop: '18px', paddingTop: '14px', borderTop: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: '13px', fontWeight: 600, color: C.text, marginBottom: '4px' }}>Update card audio</div>
+      <div style={{ fontSize: '12px', color: C.textM, marginBottom: '10px', lineHeight: 1.5 }}>
+        Re-records the word audio on cards whose word has parentheses or a slash, so it says the spoken form. Reload the app afterwards.
+      </div>
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <button onClick={scan} disabled={status === 'scanning' || status === 'running'} style={btnSt(status === 'scanning' || status === 'running')}>
+          {status === 'scanning' ? 'Scanning…' : 'Scan cards'}
+        </button>
+        {status === 'ready' && targets.length > 0 && (
+          <button onClick={run} style={btnSt(false)}>Update audio ({targets.length})</button>
+        )}
+        {status === 'running' && (
+          <button onClick={() => { stopRef.current = true; }} style={btnSt(false)}>Stop</button>
+        )}
+      </div>
+      {status === 'ready' && (
+        <div style={{ fontSize: '12px', color: C.textS, marginTop: '10px' }}>
+          {targets.length === 0 ? 'No cards need updating.' : (
+            <>
+              <div style={{ marginBottom: '4px' }}>{targets.length} card{targets.length === 1 ? '' : 's'} to update, for example:</div>
+              {targets.slice(0, 6).map(t => (
+                <div key={t.card.id} style={{ fontFamily: SH.fk, color: C.textM }}>{t.word} → {spokenLemma(t.word)}</div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+      {(status === 'running' || status === 'done') && (
+        <div style={{ fontSize: '12px', color: C.textS, marginTop: '10px' }}>
+          {status === 'running' ? 'Updating' : 'Updated'} {prog.done} of {targets.length}{prog.failed ? ` · ${prog.failed} failed` : ''}.
+          {status === 'done' && ' Reload the app so open pages pick up the new audio.'}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DevDashboard({ user }) {
   const { C, G } = useAppTheme();
 
@@ -1320,6 +1413,7 @@ export function DevDashboard({ user }) {
               <div>
                 <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>AVI Maintenance</div>
                 <AVIMaintenancePanel uid={user.uid} C={C} />
+                <CardAudioRefreshPanel uid={user.uid} C={C} />
               </div>
             </div>
           ) : view === 'list' ? (
