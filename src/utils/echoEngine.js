@@ -16,7 +16,7 @@
 //   - resume check and the session summary saved to echo_sessions
 //
 // Only import: jamoUtils.js (itself import-free). No Firebase, no React, no
-// page imports — runs in plain Node for scripts/echo-golden.mjs. Session state
+// page imports — runs in plain Node, so a test harness can drive it. Session state
 // is plain JSON so it can be saved for resume as is. Nothing here reads the
 // clock or Math.random unless the caller lets it (timestamps and `rand` are
 // parameters).
@@ -101,6 +101,8 @@ function splitTopLevel(s, seps) {
 // ─────────────────────────────────────────────────────────────
 // Korean side
 // ─────────────────────────────────────────────────────────────
+// [LANG-SPECIFIC] Target-language answer grading: normalization, two-part
+// lemmas and spelling variants through jamoUtils.js (docs/08).
 
 // Answer-side Korean normalization: NFC, no spaces, no trailing punctuation.
 export function normKo(s) {
@@ -136,6 +138,8 @@ export function koParts(lemma) {
 // English side
 // ─────────────────────────────────────────────────────────────
 
+// [LANG-SPECIFIC] Definition-language (English) normalization: leading
+// to/a/the/be and filler words. Adapt if your definitions aren't in English (docs/08).
 const FILLER = new Set(['someone', 'something', 'somebody', 'sb', 'sth', "one's", 'oneself', 'etc']);
 const LEADING = /^(?:(?:to|a|an|the|be)\s+)+/;
 

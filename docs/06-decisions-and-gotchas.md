@@ -25,6 +25,12 @@ Cause: the diff sync compares previous in-memory state to next; if a loading rac
 Rule: a pass that would delete every document in a collection of more than five is refused and logged. There is no legitimate "clear everything" action for these collections, so many-to-zero is always treated as a bug, not intent.
 Where: `useAVIData.syncCollection`.
 
+**The Lemma Master sync baseline is the loaded list.**
+Symptom (prevented): the first AVI edit after opening the app rewrote the entire `lemmaMaster` collection, and an entry deleted or merged away by that first edit came back on the next visit.
+Cause: the diff sync's baseline for `lemmaMaster` started as an empty list and was never set after the load, so the first pass saw every entry as new and saw nothing to delete.
+Rule: when the load lands, the loaded entries become the baseline, and any save queued before the load is pointed at them too, so it can never read as "delete them all."
+Where: the `lemmaMaster` load effect in `useAVIData.js`.
+
 **A failed boot load must never fall through to the sync.**
 Symptom (prevented): tasks deleted on another device come back, or newer edits are overwritten, after the app opens on a weak connection.
 Cause: if the boot read fails and the app carries on as though it loaded, the diff sync has no Firestore baseline and treats this device's local snapshot (possibly days old) as the truth, writing it over the database.
@@ -193,6 +199,16 @@ Cause: iOS Safari can evict or partially corrupt localStorage while the app is i
 Rule: an error boundary wraps the app and turns a render-time crash into a screen with one button, "Reset local data and reload." It clears localStorage only: real data reloads from Firestore, and the sign-in (kept in IndexedDB) survives. It catches render and lifecycle errors, not async rejections or event handlers, which don't blank the screen.
 Where: `BootErrorBoundary` in `main.jsx`.
 
+**Search spends network reads only on an explicit search** *(decision)*.
+Symptom (prevented): typing in a search box fires a Firestore read per keystroke.
+Rule: everything that can be answered from data already in memory (exact and headword-variant matches, forms you've typed in Word Input or Sentence Input, fuzzy suggestions) runs synchronously while you type. The global lemma map lookup, which reads Firestore, runs only when a search is submitted, or after a 600 ms pause in the Lemma Master and Echo "did you mean" fallbacks, which also cache answers per query. A lemma map answer is used only if that lemma is already in your Lemma Master.
+Where: `useLemmaSearch.js` (`run`, `resolveConnectLines`); the fallbacks in `AVILemmaMasterPage.jsx` and the Echo setup in `QuizzesPage.jsx`.
+
+**Echo sessions are kept apart from quiz scores** *(decision)*.
+Cause: Echo measures first-try accuracy in each direction across several rounds, and Dictation has a single direction; neither is a quiz score, and averaging them with Vocabulary or Cloze scores would distort both.
+Rule: Echo saves to its own collection (`echo_sessions`, never `quiz_results`), is left out of score averages and the score trend, and is counted in session totals and reported in its own paragraph of the Quizzes report. Echo also never writes to FSRS.
+Where: `sendEchoSummary` in `QuizzesPage.jsx`; `getQuizStateReport` in `quizStateEngine.js`.
+
 ---
 
 ## Language and content quirks
@@ -207,6 +223,7 @@ Where: the separator comment atop the compare picker in `GrammarIndexPage.jsx`; 
 - Bare contracted forms (더워, 몰라) often exist in the seed only in polite shape, so lookup probes a `+요` variant for corroboration.
 - GLM keys were historically written from raw staged inputs — some carry trailing punctuation — so lookup tries the raw key before the normalized key.
 - A candidate the user already studies (`lemmaMaster` headwords) is accepted immediately: free, synchronous, and more reliable than any remote signal.
+- Lemmas in the `(주먹을) 날리다` shape (a leading Hangul parenthetical) are distinct entries from `날리다`, and search keeps them apart: no matching rule ever drops a leading parenthetical, while optional endings (`입사(하다)`) and slash forms (`보장하다 / 보장되다`) count as headword variants of their entry. In quizzes, typing the collocation without parentheses (`주먹을 날리다`) earns full credit.
 - Auto-added synonym/nuance rows use the reserved source title `동의어/유의어` (`NUANCE_SOURCE_TITLE` in `aviUtils.js`); don't create a real source with that name.
 Where: `aviUtils.resolveLemmaWithDictionary` and its comments — read them in full before modifying resolution.
 

@@ -51,6 +51,8 @@ After each stage: `npm run build` must pass; run `netlify dev` and click through
 npx madge --circular --extensions js,jsx src/
 ```
 
+Two plain-Node test gates ship in `scripts/`, and each must pass before a commit that touches its module: `node scripts/heuristics-golden.mjs` for the lemma heuristics in `aviUtils.js` (`extractLemmaCandidates` and friends), and `node scripts/search-golden.mjs` for `lemmaSearchEngine.js`. Both run with no config, network or writes and exit non-zero on a regression. When changing a rule, have the assistant add the case to the harness first, watch it fail, then make the change.
+
 For anything that writes data, verify the write in the Firestore console once — field names, `null` where you expect it, nothing missing that an `undefined` would explain.
 
 ## Guardrails

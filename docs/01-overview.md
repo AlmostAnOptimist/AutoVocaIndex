@@ -66,9 +66,11 @@ Once a word is an entry, it surfaces across multiple areas.
 
 **AVI's Source tab** holds the record of every word and sentence entry per source, broken down by section.
 
+**AVI's Search tab** finds any lemma from a Korean word in any form (it checks your own entries first, then the lemma map) or from an English meaning. A result shows the lemma's definitions, the sources where you met it, its example sentences, and related lemmas ranked by shared stems, spelling and meaning. You can pin a related lemma as a form or meaning relation, hide one, or click it to re-center the search, with a back trail to retrace your steps. When nothing matches exactly, Search suggests close spellings and offers two actions: look up the definition, or add the word to Word Input for a source and section you confirm. The Lemma Master page filters the same way, plus No def2 and No source filters for upkeep.
+
 **Flashcards** is an FSRS scheduler with which to review what you've added to AVI. Cards are automatically separated into decks based on source title and there are virtual collections that group cards based on type (all word cards, all sentence cards, everything). The daily pipeline also watches the schedule for you: if you've been away, overdue cards are triaged so the backlog doesn't bury you, and a forecast looks a week ahead and warns you about upcoming heavy review days (anything over the Daily Review Cap you set in Settings, 80 by default) before they arrive. A separate Grammar Deck (see Grammar Index below) is also included to assist in independently scheduled, non-FSRS review; you can also freely pick and choose one or more topics for a low-stress refresher. Text-to-Speech (TTS) is an optional addition that could incur a cost.
 
-**Quizzes** test recall in a variety of formats within three categories: vocabulary, cloze (fill-in-the-blank), and grammar, each with configurable settings. Grammar quizzes rely on API calls (they require an API key for use and incur a cost per quiz).
+**Quizzes** test recall in four kinds, each with configurable settings: vocabulary (multiple choice, true/false, typed answers, matching), cloze (fill-in-the-blank), Echo, and grammar. **Echo** is a digital version of the paper fold-over drill: write the Korean for each meaning, then the meaning for each word, with your corrected answers becoming the next round's prompts. Lists come from your due cards, trouble words, recent additions, a Content Library source, a deck, or your own picks, and a session can run for a set number of rounds or until every word is right both ways. With TTS set up, Echo can also play the Korean instead of showing it, and its Dictation mode has you type each word you hear. The Quizzes page opens with a report on the last 30 days across every quiz, and keeps a per-word Echo record. Grammar quizzes rely on API calls (they require an API key for use and incur a cost per quiz).
 
 **Grammar Index** is an optional way to document patterns. Entries include areas to add the explanation/usage rules and example sentences (which can be optionally hooked up to TTS), and each can be linked to similar grammar points, questions you need answers to, your practice writing, and sources/sections where you've noticed the pattern. This index feeds the Grammar Deck in Flashcards for targeted review and forms the basis for grammar quizzes.
 
@@ -89,8 +91,8 @@ It's built against Firebase and Netlify, and that's what the guides assume. The 
 - **Firebase and Netlify** — free tiers\*. AVI is sized to fit inside them for a single learner.
 - **KRDict** — free, but you register for an API key.
 - **AI definitions** — optional. Your own API key, and a cost per lookup.
-- **AI grammar quizzes** — same. The other two quiz types don't need a key.
-- **Text-to-speech** — optional. Google Cloud TTS; free tier, then paid, and audio is cached so you don't pay twice for the same word or sentence.
+- **AI grammar quizzes** — same. The other three quiz types don't need a key.
+- **Text-to-speech** — optional. Google Cloud TTS; free tier, then paid, and audio is cached so you don't pay twice for the same word or sentence. It also powers Echo's audio prompts and Dictation mode.
 
 \*Seeding the lemma map is a one-time process that will exceed the free Firestore tier (total cost is around $2). It is optional but recommended to use the seed data as it assists with lemma resolution even before your own entries are added. It is possible to add seed data in batches to stay within the free tier, though at the seed's size that takes weeks — the guide covers both routes.
 

@@ -24,11 +24,13 @@ src/
                      QuizzesPage, ContentLibraryPage, GrammarIndexPage, ...)
   components/        shared UI — modals, pickers, nav, DatePicker, Icons,
                      AVILogo, Gazette components
-  hooks/             useFirestore, useAVIData, useAppTheme, useDragSort,
-                     keyboard/pagination helpers
+  hooks/             useFirestore, useAVIData, useLemmaSearch, useAppTheme,
+                     useDragSort, keyboard/pagination helpers
   utils/             engines and utilities — fsrs, srsEngine, aviUtils,
                      cardFactory, importEngine, recurrenceEngine,
-                     reviewStatsEngine, contentUtils, ttsUtils, dateUtils, ...
+                     reviewStatsEngine, lemmaSearchEngine, wordStaging,
+                     echoEngine, quizStateEngine, contentUtils, ttsUtils,
+                     dateUtils, ...
   theme/             buildColors, buildStyles, decoAssets, ThemeContext
   assets/            decorative art and gazette-plates/library/ — globbed,
                      optional, ships empty (see the theming guide)
@@ -38,7 +40,10 @@ netlify/lib/         verifyUser.cjs — the shared sign-in/allowlist check
 public/              favicon.svg (the single-source logo), PWA icons,
                      manifest
 seed/                globalLemmaMap.json + the Admin SDK import/export scripts
-scripts/             demo-reaper.cjs — maintenance for the hosted demo;
+scripts/             heuristics-golden.mjs, search-golden.mjs — plain-Node
+                     test gates for the lemma heuristics and the search
+                     engine (see the AI guide's Verifying a change);
+                     demo-reaper.cjs — maintenance for the hosted demo;
                      inert in your deployment (no-ops without its secret);
                      demo-tour/ — records a captioned video walkthrough of
                      the hosted demo (separate package.json; see its README)
@@ -59,13 +64,15 @@ The dependency direction is strictly downward:
 pages  →  components  →  hooks  →  utils / theme  →  firebase.js
 ```
 
-**The leaf-module rule.** Leaf modules — utilities, engines, shared components — never import page files. When two pages need the same logic, that logic moves down into a utility host rather than one page importing the other. This is not a style preference: import cycles between page files crash at *runtime* under Vite's bundle initialization (a TDZ error on a blank page) while building cleanly. The rule, the crash, and a real cured instance are documented in the gotchas guide; `contentUtils.js`, `cardFactory.js`, and `wordRowUpdater.js` are the standing precedents. Gate any change to the import graph with:
+**The leaf-module rule.** Leaf modules — utilities, engines, shared components — never import page files. When two pages need the same logic, that logic moves down into a utility host rather than one page importing the other. This is not a style preference: import cycles between page files crash at *runtime* under Vite's bundle initialization (a TDZ error on a blank page) while building cleanly. The rule, the crash, and a real cured instance are documented in the gotchas guide; `contentUtils.js`, `cardFactory.js`, `wordRowUpdater.js`, and `wordStaging.js` (the staging pipeline Word Input shares with the Search tab's Add to Word Input) are the standing precedents. Gate any change to the import graph with:
 
 ```
 npx madge --circular --extensions js,jsx src/
 ```
 
-**Engines come in two flavors.** Pure engines are plain functions with no React and no Firestore — `fsrs.js` (the FSRS-5 scheduler), `recurrenceEngine.js`, the row builders in `importEngine.js` — and are the easiest code in the tree to test, reuse, or port. Pipeline engines orchestrate Firestore alongside their math — `srsEngine.js` (the daily triage/forecast pipeline), `reviewStatsEngine.js` — and sit one layer up. When adding derived logic of your own, prefer the pure flavor and let a caller own the writes.
+**Engines come in two flavors.** Pure engines are plain functions with no React and no Firestore — `fsrs.js` (the FSRS-5 scheduler), `recurrenceEngine.js`, the row builders in `importEngine.js`, `lemmaSearchEngine.js` (resolution and ranking for every lemma search), `echoEngine.js` (Echo Quiz lists, grading and rounds), `quizStateEngine.js` (the Quizzes report) — and are the easiest code in the tree to test, reuse, or port. Pipeline engines orchestrate Firestore alongside their math — `srsEngine.js` (the daily triage/forecast pipeline), `reviewStatsEngine.js` — and sit one layer up. When adding derived logic of your own, prefer the pure flavor and let a caller own the writes.
+
+**One search engine.** Every lemma search — the Search tab, the mini search popup, Connect List, the Lemma Master filter, and the Echo setup's Add a word box — resolves and ranks through `lemmaSearchEngine.js`. The Search tab, the popup and Connect List reach it through the `useLemmaSearch` hook, which also owns the one network step (the global lemma map lookup); the Lemma Master filter and the Echo box call the engine directly. Search behavior therefore changes in one place, and `scripts/search-golden.mjs` gates it.
 
 ## App.jsx is the hub
 

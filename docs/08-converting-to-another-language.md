@@ -21,6 +21,8 @@ Every coupling site of the first kind is tagged with a `[LANG-SPECIFIC]` comment
 | 9 | `netlify/functions/get-definition.cjs` | The Korean-dictionary-assistant persona prompt |
 | 10 | `netlify/functions/get-krdict-api.cjs` | KRDict, the Korean dictionary provider |
 | 11 | `netlify/functions/grammar-quiz.js` — `buildRequest` | The five grammar-quiz prompt templates (and the `SYSTEM` line) |
+| 12 | `src/utils/lemmaSearchEngine.js` — three markers | Hangul syllable decomposition, the stem rules (final 다; 하다/되다/시키다/스럽다 roots), and the particle list used for collocation links |
+| 13 | `src/utils/echoEngine.js` — two markers | Echo's Korean answer grading (through `jamoUtils.js`), and its English-side normalization for the definition language |
 
 One related surface carries no marker but belongs to the same job: the Hangul character-class regexes used for script detection, covered below.
 
@@ -70,9 +72,17 @@ Also delete or empty the `+요` politeness-variant probe in `resolveLemmaWithDic
 
 For an alphabetic language, the honest minimal replacement is: keep the module's structure and exports, replace `toJamo` with a locale normalizer (lowercase, strip diacritics if you want typo forgiveness for them), and let the existing Levenshtein do the rest — the credit thresholds then operate on plain characters. For another syllabic or composed script, decide what a "one-keystroke typo" means there and make the decomposition reflect it. `findClozeTokenIndex` and `getVocaHints` embed assumptions about word boundaries and what a useful first-letter hint is; review both against your script.
 
+## Search (marker 12)
+
+`lemmaSearchEngine.js` resolves and ranks every lemma search, and most of it is language-neutral: headword variants, the surface-form map, definition-word overlap, caps and tiers. Three pieces are Korean. Spelling closeness and "shared stem start" compare Hangul syllables decomposed into jamo (`decompose`, the same idea as `jamoUtils.js`); for an alphabetic language, compare characters directly. `stemOf` / `rootOf` define a stem as the lemma minus a final 다, and a root as the lemma minus 하다/되다/시키다/스럽다; replace these with your language's citation-form ending (the infinitive ending, for example) or make the stem the whole word. `PARTICLE_RE` strips a Korean particle from the non-final words of a collocation so `연봉이 높다` links to `연봉`; use your language's articles or case endings, or drop the rule. After any change, run `node scripts/search-golden.mjs`: its fixture is Korean, so rewrite the cases in your language first and keep the structure.
+
+## Echo (marker 13)
+
+Echo grades the Korean side through `jamoUtils.js` (`normalizeFrontForMatching`, `expandSlashVariants`, `jamoDistance` for close answers), so replacing marker 4 converts most of it; `normKo` and `koHalfVariants` in `echoEngine.js` add only spacing and punctuation rules on top. Dictation and the audio prompts say the word through `spokenText.js` (parentheses dropped, slash forms read as both words), which is script-neutral. The second marker is about the *definition* language, not the target: `normEn` strips leading "to / a / the / be" and filler words like "someone" before matching typed meanings. If your definitions aren't in English, adjust that list for the language they are in.
+
 ## Script detection — the unmarked second tier
 
-Several sites test "is this token in the target language" with a Hangul character class (`/[가-힣]/`). The one that matters most is the **Import tokenizer** in `importEngine.js`, which uses it to keep target-language tokens and route everything else to stopword handling; the others are display/search affordances in `aviUtils.js` and the AVI search, autocomplete, and Lemma Master pages. Convert by replacing the character class with your language's Unicode range (or a small `isTargetLanguage(token)` helper you introduce and reuse — the better long-term move). Grep for `가-힣` to enumerate every site; there are sixteen occurrences across seven files.
+Several sites test "is this token in the target language" with a Hangul character class (`/[가-힣]/`). The one that matters most is the **Import tokenizer** in `importEngine.js`, which uses it to keep target-language tokens and route everything else to stopword handling; the others are display and search affordances in `aviUtils.js`, the search engine and its hook, word staging, the Echo engine and its sources, and the autocomplete and Import pages. Convert by replacing the character class with your language's Unicode range (or a small `isTargetLanguage(token)` helper you introduce and reuse — the better long-term move). Grep for `가-힣` to enumerate every site; at this writing it matches 25 lines across nine files. A few sites spell the range as code points instead (`0xAC00`–`0xD7A3`, in `aviUtils.js`, `jamoUtils.js` and `lemmaSearchEngine.js`), so grep for `0xAC00` as well.
 
 ## Grammar quizzes and the Grammar Index
 
@@ -90,6 +100,6 @@ Everything else is infrastructure: Firestore collections and rules, the sync lay
 
 ## Suggested order, and the test that proves it
 
-Convert in this order — each step is independently verifiable: label and copy (1) → font (2, 3) → dictionary (10, 9) → TTS (8) → script detection tier → grading module (4) → quiz prompts → heuristics last, if at all (5, 6). Leave the seed step out of your setup entirely.
+Convert in this order — each step is independently verifiable: label and copy (1) → font (2, 3) → dictionary (10, 9) → TTS (8) → script detection tier → grading module (4) → search and Echo (12, 13) → quiz prompts → heuristics last, if at all (5, 6). Leave the seed step out of your setup entirely.
 
-Then run the end-to-end test, which is just the architecture guide's trace in your language: catalog a source, enter a conjugated or inflected word, watch it stage (expect identity resolution if you dropped the heuristics), fix the lemma on the row, fetch a definition, write your `def2`, confirm the card lands in the source's deck with working audio, re-enter another form of the same word and watch the map loop resolve it — then take a vocabulary quiz and confirm typed-answer grading feels fair for your script. If all of that holds, the conversion is done.
+Then run the end-to-end test, which is just the architecture guide's trace in your language: catalog a source, enter a conjugated or inflected word, watch it stage (expect identity resolution if you dropped the heuristics), fix the lemma on the row, fetch a definition, write your `def2`, confirm the card lands in the source's deck with working audio, re-enter another form of the same word and watch the map loop resolve it — then take a vocabulary quiz and confirm typed-answer grading feels fair for your script, search for an inflected form and confirm it finds its lemma, and run a short Echo session in both directions. If all of that holds, the conversion is done.

@@ -1,6 +1,6 @@
 // scripts/search-golden.mjs
 // Golden test set for the AVI search engine (src/utils/lemmaSearchEngine.js).
-// Decisions: claude/chirp-avi-search-decisions.md (AS-D5 to AS-D11, AS-D18, AS-D29).
+// Decisions: AS-D5 to AS-D11, AS-D18 and AS-D29 of the AVI search overhaul.
 //
 // Run from the repo root:   node scripts/search-golden.mjs
 //

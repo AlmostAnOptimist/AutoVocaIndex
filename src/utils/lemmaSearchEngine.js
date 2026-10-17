@@ -37,6 +37,8 @@ export function searchKey(s) {
   return nfc(s).replace(/\s+/g, '');
 }
 
+// [LANG-SPECIFIC] Hangul syllable decomposition for stem and spelling
+// comparisons (docs/08).
 const isSyllable = (ch) => {
   const c = ch.charCodeAt(0);
   return c >= 0xAC00 && c <= 0xD7A3;
@@ -108,6 +110,8 @@ export function lemmaVariants(lemma) {
 }
 
 // ── Stems ─────────────────────────────────────────────────────
+// [LANG-SPECIFIC] Korean stem rules: the final 다 and the 하다/되다/시키다/
+// 스럽다 roots (docs/08).
 // stem = form minus a final 다 (가르치다 → 가르치). Nouns are their own stem.
 // root additionally strips 하다/되다/시키다/스럽다 (공부하다 → 공부).
 export function stemOf(form) {
@@ -125,6 +129,7 @@ function rootOf(form) {
 // 연봉이 높다 → {연봉, 높다}. Non-final words lose one common particle so the
 // noun can meet its standalone entry; the final word is the predicate and
 // stays as written.
+// [LANG-SPECIFIC] Korean particles stripped from non-final collocation words (docs/08).
 const PARTICLE_RE = /(을|를|이|가|은|는|의|에|도|와|과|로|으로)$/;
 
 function wordsOf(form) {

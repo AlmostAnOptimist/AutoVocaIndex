@@ -149,7 +149,7 @@ Chapters/episodes/units of a source. Firestore auto-ID.
 
 ## users/{uid}/wordInputs/{row.uid}
 
-The staging table for word entries — the heart of the Gather step. Synced by the diff layer in `useAVIData.js`, keyed on the row's `uid` field. Rows are constructed identically at all three intake sites (Word Input, the Sentence Input word picker in `AVISentenceInputPage.handlePopupDone`, and Import's `buildCommitRows` in `importEngine.js`).
+The staging table for word entries — the heart of the Gather step. Synced by the diff layer in `useAVIData.js`, keyed on the row's `uid` field. Rows are constructed identically at every intake site: Word Input and the Search tab's Add to Word Input (both through `stageWordInput` in `wordStaging.js`, which also runs the duplicate guard, the def1 fetch, the Lemma Master entry and the auto card), the Sentence Input word picker in `AVISentenceInputPage.handlePopupDone`, and Import's `buildCommitRows` in `importEngine.js`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -189,7 +189,7 @@ One row per resolved lemma — the record behind the Lemma Master page and the f
 | `lemma` | string | The headword as entered/resolved |
 | `cleanedLemma` | string | `normalizeLemma(lemma)` — the normalized join key used everywhere lemmas are matched |
 | `def1`, `def2` | string | Reference and targeted definitions; editing here cascades to linked rows and cards |
-| `relatedForm`, `relatedMeaning`, `hiddenRelated` | string | Related-word annotations |
+| `relatedForm`, `relatedMeaning`, `hiddenRelated` | string | Related-word annotations: comma-separated `lemmaID`s, set by pinning, hiding and Connect List in Search (`applyRelationPin` / `applyRelationConnect`). Echo counts `relatedMeaning` lemmas as correct answers and treats `relatedForm` lemmas as close answers |
 | `echoAlternates` | string[] | Answers saved as correct from the Echo Quiz ("Save as alternate"). Written alone with `arrayUnion` / `arrayRemove`, hidden on the Lemma Master page, and unioned when two entries are merged. An array, not a comma string, because English alternates can contain commas. Absent until the first save |
 | `lastUpdated` | string | ISO timestamp |
 | `autoAddedBy` | string | Provenance of auto-created entries (`'pick'` from the sentence picker, `'import'` from Import); absent on manually created entries |
