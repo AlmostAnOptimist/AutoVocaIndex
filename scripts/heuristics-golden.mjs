@@ -167,6 +167,44 @@ const CANDIDATE_CASES = {
     ['먹었대요', '먹다'], ['간대요', '가다'], ['먹었다고요', '먹다'],
     ['친구였어요', '친구'], ['학생이었어요', '학생'],
   ],
+  // L3 (lemma repair, Oct 2026) — a real Oct 2026 import's failures
+  // plus siblings of each rule.
+  'L3 — stacked particles': [
+    ['봄에는', '봄'], ['동쪽에는', '동쪽'], ['한가운데에는', '한가운데'],
+    ['대중교통으로는', '대중교통'], ['해녀들이', '해녀'], ['학교에서는', '학교'],
+    ['친구들과', '친구'], ['사람들을', '사람'], ['집에도', '집'],
+    ['서울까지는', '서울'], ['친구들에게는', '친구'], ['바다에서도', '바다'],
+    ['큰아들부터', '큰아들'], ['능멸하고도', '능멸하다'], ['친구하고도', '친구'],
+  ],
+  'L3 — ㅎ-irregular attributives': [
+    ['그런', '그렇다'], ['이런', '이렇다'], ['어떤', '어떻다'], ['빨간', '빨갛다'],
+  ],
+  'L3 — 마다, (이)나, (이)라서, copula 인': [
+    ['계절마다', '계절'], ['날마다', '날'], ['초콜릿이나', '초콜릿'],
+    ['면허증이나', '면허증'], ['커피나', '커피'], ['성수기라서', '성수기'],
+    ['학생이라서', '학생'], ['비수기인', '비수기'], ['돌인', '돌'], ['산인', '산'],
+    ['모자라서', '모자라다'], ['고양이나', '고양이'], ['고양이라서', '고양이'],
+  ],
+  'L3 — 다면 / 라면': [
+    ['원한다면', '원하다'], ['부담스럽다면', '부담스럽다'], ['먹는다면', '먹다'],
+    ['간다면', '가다'], ['좋다면', '좋다'], ['학생이라면', '학생'], ['친구라면', '친구'],
+  ],
+  'L3 — 는 after a consonant stem': [
+    ['넘는', '넘다'], ['않는', '않다'], ['먹는', '먹다'], ['읽는', '읽다'], ['있는', '있다'],
+  ],
+  'L3 — ㄷ-irregular before 으': [
+    ['걸으러', '걷다'], ['들으면', '듣다'], ['물으니까', '묻다'],
+    ['걸으면서', '걷다'], ['들은', '듣다'], ['들을', '듣다'],
+  ],
+  'L3 — ㅕ→ㅣ and ㅙ→ㅚ restores': [
+    ['지켜야', '지키다'], ['지켜서', '지키다'], ['돼서', '되다'], ['돼요', '되다'],
+    ['기다려요', '기다리다'], ['가르쳐요', '가르치다'], ['돼야', '되다'],
+  ],
+  'L3 — short stems (기, 게, 고)': [
+    ['가기', '가다'], ['쉽게', '쉽다'], ['읽고', '읽다'], ['있고', '있다'],
+    ['쉬워질', '쉬워지다'], ['못할', '못하다'], ['만든', '만들다'], ['잡은', '잡다'],
+    ['낮은', '낮다'], ['내려오는', '내려오다'], ['올라가', '올라가다'], ['긴', '길다'],
+  ],
 };
 
 // Stage D — the heuristic primary is what gets saved when no candidate
@@ -180,6 +218,10 @@ const PRIMARY_CASES = [
   ['먹었거든요', '먹다'], ['먹었잖아요', '먹다'], ['먹었을까요', '먹다'],
   ['갔어요', '가다'], ['했어요', '하다'], ['먹었습니다', '먹다'],
   ['먹었다', '먹다'], ['몰랐어요', '모르다'],
+  // L3: deterministic shapes land on the headword even before validation.
+  ['넘는', '넘다'], ['않는', '않다'], ['걸으러', '걷다'], ['들으면', '듣다'],
+  ['부담스럽다면', '부담스럽다'], ['먹는다면', '먹다'], ['계절마다', '계절'],
+  ['초콜릿이나', '초콜릿'], ['학생이라서', '학생'], ['학생이라면', '학생'],
 ];
 
 // Words the suffix table must never touch: primary result stays identity.
@@ -190,6 +232,12 @@ const IDENTITY_CASES = [
   // Stage B collision guards: the new table entries must leave these
   // untouched (candidate-tier siblings are fine; blind mangling is not).
   '컨트롤러', '트레일러', '사고', '과자', '여자', '바지', '동네',
+  // L3 collision guards: nouns that end in a particle-like syllable.
+  '도로', '사과', '아들', '미로', '기와', '고구마', '바나나', '피아노',
+  // L3: the copula-이 rules must not split a vowel-final noun ending in 이
+  // (고양이나 can't be protected here — 고양 is consonant-final — so the
+  // resolver prefers the 이-noun when both validate; see the candidates).
+  '아이라서',
 ];
 
 // normalizeLemma punctuation handling: [input, expected] — exact equality.
@@ -260,6 +308,8 @@ for (const [group, cases] of Object.entries(CANDIDATE_CASES)) {
   const FUNCTION_WORD_CASES = [
     '그리고', '그래서', '그러나', '그런데', '그러면', '그러니까', '그래도',
     '하지만', '함께', '빨리', '많이', '같이', '정말', '너무', '또는',
+    // L3: bare adverbs that also look like conjugations (안다, 다다, 없다…)
+    '안', '못', '다', '잘', '없이', '곧', '늘', '좀', '꼭', '또', '더',
   ];
   const misses = [];
   for (const w of FUNCTION_WORD_CASES) {

@@ -21,6 +21,8 @@ import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
 import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
+import { useSearchAssist } from '../../hooks/useSearchAssist.js';
+import { SearchAnchorNote, DidYouMean } from '../../components/avi/SearchAssist.jsx';
 
 const WI_PAGE_SIZE = 25;
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -290,9 +292,14 @@ export function AVIWordInputPage({
   // desktop; the mobile input below binds to the same state). NFC on both
   // sides so pre-repair decomposed rows still match a composed query.
   const q = (inputSearch || '').normalize('NFC').trim().toLowerCase();
+  // L4b: a Korean query that's another form of a lemma you study (탐방로는)
+  // also matches that lemma's rows; a query matching nothing offers
+  // "Did you mean" lemmas. Same cascade as the Search tab.
+  const assist = useSearchAssist(data, inputSearch);
   const matchesSearch = (w) => !q ||
     [w.input, w.lemma, w.def1, w.def2]
-      .some(f => (f || '').normalize('NFC').toLowerCase().includes(q));
+      .some(f => (f || '').normalize('NFC').toLowerCase().includes(q)) ||
+    assist.matchesAnchor(w.lemma);
   const allWords     = [...data.wordInputs].filter(matchesSearch).sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
 
   // Back to page 0 whenever the query changes so results are visible.
@@ -410,11 +417,15 @@ export function AVIWordInputPage({
 
         {/* Scrollable table area (mobile: card list instead of a table) */}
         <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: isMobile ? 'hidden' : 'auto' }}>
+          {q && data.wordInputs.some(w => assist.matchesAnchor(w.lemma)) && (
+            <SearchAnchorNote anchor={assist.anchor} query={(inputSearch || '').trim()} C={C} />
+          )}
           {isMobile ? (
             <>
               {pagedWords.length === 0 && (
                 <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
                   {q ? 'No entries match your search.' : 'No entries yet. Paste a word above.'}
+                  {q && <DidYouMean suggestions={assist.suggestions} onPick={setInputSearch} C={C} />}
                 </div>
               )}
               {pagedWords.map(w => (
@@ -446,6 +457,7 @@ export function AVIWordInputPage({
                   <tr>
                     <td colSpan={7} style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
                       {q ? 'No entries match your search.' : 'No entries yet. Paste a word above.'}
+                  {q && <DidYouMean suggestions={assist.suggestions} onPick={setInputSearch} C={C} />}
                     </td>
                   </tr>
                 )}

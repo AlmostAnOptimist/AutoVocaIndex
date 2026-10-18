@@ -27,9 +27,16 @@ export function WordEditModal({
   const { C, S } = useAppTheme();
   const row = rows.find(r => r.uid === uid);
 
-  const [editVal, setEditVal] = useState(() => ({
+  // `initial` is what the fields held when the modal opened. Dirty-checking
+  // and saving work against it, not against the live row: the post-import
+  // Def1 fill can update the row while the modal is open, and comparing to
+  // the live row made untouched fields look edited — paging then wrote the
+  // stale (often blank) def1 back over the fresh one and cascaded the blank
+  // to Lemma Master. Only fields the user actually changed are saved.
+  const [initial] = useState(() => ({
     lemma: row?.lemma || '', def1: row?.def1 || '', def2: row?.def2 || '',
   }));
+  const [editVal, setEditVal] = useState(initial);
   const [def1Editing, setDef1Editing] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -40,17 +47,19 @@ export function WordEditModal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const dirty = !!row && (
-    editVal.lemma !== (row.lemma || '') ||
-    editVal.def1  !== (row.def1  || '') ||
-    editVal.def2  !== (row.def2  || '')
+  const changed = Object.fromEntries(
+    ['lemma', 'def1', 'def2']
+      .filter(k => editVal[k] !== initial[k])
+      .map(k => [k, editVal[k]])
   );
+  const dirty = !!row && Object.keys(changed).length > 0;
 
   const save = useCallback(async () => {
     if (!row || !dirty || saving) return;
     setSaving(true);
-    try { await updateRow(row.uid, { ...editVal }); }
+    try { await updateRow(row.uid, changed); }
     finally { setSaving(false); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [row, dirty, saving, updateRow, editVal]);
 
   const saveAndClose = async () => { await save(); onClose(); };
@@ -139,6 +148,15 @@ export function WordEditModal({
             <LemmaAutocompleteInput
               value={editVal.lemma}
               onChange={val => setEditVal(v => ({ ...v, lemma: val }))}
+              // L4a: picking an existing Lemma Master entry brings its
+              // definitions with it, so the def2 it already has shows here
+              // (editable — a change updates Lemma Master on save).
+              onSelectExisting={l => setEditVal(v => ({
+                ...v,
+                lemma: l.lemma,
+                def1: l.def1 || v.def1,
+                def2: l.def2 || v.def2,
+              }))}
               lemmaMaster={lemmaMaster}
               inputStyle={inputStyle}
               lang="ko"
@@ -155,7 +173,15 @@ export function WordEditModal({
                   autoFocus
                 />
               : <div style={{ minHeight: '24px' }}>
-                  <Def1Display text={editVal.def1} onClick={() => setDef1Editing(true)} />
+                  <Def1Display
+                    // Untouched Def1 shows the live row, so a definition the
+                    // background fill delivers while the modal is open appears.
+                    text={editVal.def1 !== initial.def1 ? editVal.def1 : (row.def1 || '')}
+                    onClick={() => {
+                      if (editVal.def1 === initial.def1) setEditVal(v => ({ ...v, def1: row.def1 || '' }));
+                      setDef1Editing(true);
+                    }}
+                  />
                 </div>
             }
           </div>

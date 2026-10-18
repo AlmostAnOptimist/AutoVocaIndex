@@ -11,7 +11,7 @@ import { SH } from '../../theme/buildStyles.js';
 import { auth } from '../../firebase.js';
 import {
   uuid, normalizeLemma, cleanStagingText, getSourceSections,
-  resolveLemmaWithDictionary, writeGlobalLemma, fetchDefinition,
+  resolveLemmaWithDictionary, resolveLemmaDetailed, writeGlobalLemma, fetchDefinition,
   filterNewSentenceRows, filterNewWordRows, filterNewLemmas,
 } from '../../utils/aviUtils.js';
 import { prewarmTtsAudio } from '../../utils/ttsUtils.js';
@@ -20,6 +20,9 @@ import { DEMO } from '../../demo/demoConfig.js';
 import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
 import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
+import { buildLemmaIndex, buildSurfaceMap } from '../../utils/lemmaSearchEngine.js';
+import { lemmaChoicesForTerm, findLemmaEntryAny, canonicalLemma, otherReadings } from '../../utils/lemmaSuggest.js';
+import { LemmaChoiceChips } from '../../components/avi/SearchAssist.jsx';
 import {
   segmentSentences, segmentWords, segmentWordsDetailed, chunkItems, IMPORT_LIMITS,
   buildImportPlan, buildCommitRows,
@@ -70,6 +73,21 @@ function TermContext({ term, sentences, rawByInput, mode, pos = 0, onCycle, C })
   const idxs = [...new Set(term.sentenceIdxs || [])];
   if (!idxs.length) return null;
   const sent  = sentences[idxs[pos % idxs.length]] || '';
+  // L3: highlight the word itself, not every place its letters occur
+  // (이 lit up inside 이야기, 있어요, 같이…). A token matches when it equals
+  // the term once edge punctuation is set aside; phrases, and surfaces
+  // that never match a whole token, keep the plain substring highlight.
+  const wordParts = (() => {
+    const input = String(term.input || '');
+    if (!input || /\s/.test(input)) return null;
+    let hit = false;
+    const out = String(sent).split(/(\s+)/).map(tok => {
+      const m = tok.match(/^([\p{P}\p{S}]*)(.*?)([\p{P}\p{S}]*)$/u);
+      if (m && m[2] === input) { hit = true; return [m[1], m[2], m[3]]; }
+      return [tok, '', ''];
+    });
+    return hit ? out : null;
+  })();
   const parts = term.input ? String(sent).split(term.input) : [sent];
   return (
     <div
@@ -77,12 +95,20 @@ function TermContext({ term, sentences, rawByInput, mode, pos = 0, onCycle, C })
       title={idxs.length > 1 ? 'Click to cycle sentences' : undefined}
       style={{ fontSize: '11.5px', color: C.textM, fontFamily: SH.fk, lineHeight: 1.5, cursor: idxs.length > 1 ? 'pointer' : 'default' }}
     >
-      {parts.map((p, i) => (
-        <React.Fragment key={i}>
-          {p}
-          {i < parts.length - 1 && <span style={{ color: C.accent, fontWeight: 600 }}>{term.input}</span>}
-        </React.Fragment>
-      ))}
+      {wordParts
+        ? wordParts.map(([pre, word, post], i) => (
+            <React.Fragment key={i}>
+              {pre}
+              {word && <span style={{ color: C.accent, fontWeight: 600 }}>{word}</span>}
+              {post}
+            </React.Fragment>
+          ))
+        : parts.map((p, i) => (
+            <React.Fragment key={i}>
+              {p}
+              {i < parts.length - 1 && <span style={{ color: C.accent, fontWeight: 600 }}>{term.input}</span>}
+            </React.Fragment>
+          ))}
       {idxs.length > 1 && (
         <span style={{ fontFamily: SH.fm, fontSize: '10px', marginLeft: '6px' }}>
           ({(pos % idxs.length) + 1}/{idxs.length})
@@ -246,14 +272,48 @@ export function AVIImportPage({
     autoCreateWordCard, dsh,
   }), [data, updateData, cards, updateCards, decks, updateDecks, aviSources, dsh]);
 
+  // L4b: Lemma Master matches under each review term. Matching scans the
+  // whole Lemma Master, so results are cached per (input, lemma) and only
+  // recomputed for the term being edited; the cache resets when the Lemma
+  // Master or the captured surface forms change.
+  const lemmaIndex = useMemo(() => buildLemmaIndex(data.lemmaMaster || []), [data.lemmaMaster]);
+  const choiceSurfaceMap = useMemo(
+    () => buildSurfaceMap(data.wordInputs || [], data.sentenceInputs || []),
+    [data.wordInputs, data.sentenceInputs]
+  );
+  const choiceCache = useRef({ index: null, surfaceMap: null, map: new Map() });
+  const choicesFor = (t) => {
+    const cache = choiceCache.current;
+    if (cache.index !== lemmaIndex || cache.surfaceMap !== choiceSurfaceMap) {
+      choiceCache.current = { index: lemmaIndex, surfaceMap: choiceSurfaceMap, map: new Map() };
+    }
+    const key = `${t.input}\u0000${t.lemma || ''}`;
+    let hit = choiceCache.current.map.get(key);
+    if (!hit) {
+      hit = lemmaChoicesForTerm(lemmaIndex, { input: t.input, lemma: t.lemma }, { surfaceMap: choiceSurfaceMap });
+      choiceCache.current.map.set(key, hit);
+    }
+    return hit;
+  };
+
+  // Skip in the Fill-Def2 modal carries to the sentence rows this import
+  // created for the same term (both directions), so a skipped word doesn't
+  // leave its sentence queued for a card. Sentence cards already created at
+  // commit (the lemma had defs then) are left as they are.
   const toggleSkip = useCallback((rowUid, val) => {
+    const linked = new Set(summary?.sentencesByWord?.[rowUid] || []);
     updateData(prev => ({
       ...prev,
       wordInputs: prev.wordInputs.map(w =>
         w.uid === rowUid ? { ...w, skipUpload: val } : w
       ),
+      ...(linked.size ? {
+        sentenceInputs: prev.sentenceInputs.map(s =>
+          linked.has(s.uid) ? { ...s, skipUpload: val } : s
+        ),
+      } : {}),
     }));
-  }, [updateData]);
+  }, [updateData, summary]);
 
   // ── Step 1: parse ────────────────────────────────────────────
   const handleParse = () => {
@@ -375,11 +435,24 @@ export function AVIImportPage({
       for (let i = 0; i < plan.newTerms.length; i += RESOLVE_BATCH) {
         const batch = plan.newTerms.slice(i, i + RESOLVE_BATCH);
         await Promise.all(batch.map(async (t) => {
-          const lemma = isPhraseInput(t.input)
-            ? await lemmatizePhraseAsync(t.input, localHeadwords)
-            : (await resolveLemmaWithDictionary(t.input, { localHeadwords }) || t.input);
+          // L3: single words also bring back their other dictionary
+          // readings (봄 / 보다, 낮 / 낮다) for the "Or:" chips.
+          let resolved = t.input;
+          let alternates = [];
+          if (isPhraseInput(t.input)) {
+            resolved = await lemmatizePhraseAsync(t.input, localHeadwords);
+          } else {
+            const d = await resolveLemmaDetailed(t.input, { localHeadwords, withAlternates: true });
+            resolved = d.lemma || t.input;
+            alternates = d.alternates || [];
+          }
+          // L4d: adopt an existing entry's own text when it matches a variant
+          // (입사하다 → 입사(하다)), so the review shows it, the known-term
+          // check below sees it, and commit links to it.
+          const lemma = canonicalLemma(data.lemmaMaster || [], resolved);
           t.lemma = lemma;
           t.resolvedLemma = lemma;
+          t.alternates = alternates.map(a => canonicalLemma(data.lemmaMaster || [], a));
         }));
         setResolving({ done: Math.min(i + RESOLVE_BATCH, plan.newTerms.length), total: plan.newTerms.length });
       }
@@ -443,7 +516,7 @@ export function AVIImportPage({
       if (l.lemma) localHeadwords.add(l.lemma);
       if (l.cleanedLemma) localHeadwords.add(l.cleanedLemma);
     }
-    const lemma = await lemmatizePhraseAsync(phraseText, localHeadwords);
+    const lemma = canonicalLemma(data.lemmaMaster || [], await lemmatizePhraseAsync(phraseText, localHeadwords));
     const norm  = normalizeLemma(lemma) || lemma;
     const inWordInputs = (data.wordInputs || []).some(w => w.lemma && normalizeLemma(w.lemma) === norm);
     const inReview     = review.newTerms.some(t => (normalizeLemma(t.lemma || t.input) || (t.lemma || t.input)) === norm);
@@ -496,6 +569,8 @@ export function AVIImportPage({
     defCancelRef.current = false;
     setDefProgress({ done: 0, total: groups.length, stopped: false });
     let done = 0;
+    let missed = 0;          // L1: lemmas KRDict couldn't be reached for
+    let failStreak = 0;      // consecutive unreachable lookups
     for (const g of groups) {
       if (defCancelRef.current) return;
       while (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
@@ -506,12 +581,27 @@ export function AVIImportPage({
       try {
         const result = await fetchDefinition(g.lemma, data.aviSettings);
         if (result === '__RATE_LIMITED__') {
-          setDefProgress({ done, total: groups.length, stopped: true });
+          setDefProgress({ done, total: groups.length, stopped: true, missed });
           if (showAVIToast) showAVIToast('Definition fetch rate-limited — remaining defs fill via per-row refresh');
           return;
         }
         def1 = result || '';
       } catch { def1 = ''; }
+      // L1: an empty result means the dictionary was unreachable (a real
+      // miss comes back as "Definition not found."). Nothing is saved, so
+      // the row stays def1-less for a later refresh. Three in a row means
+      // KRDict is down for now — stop instead of hammering it.
+      if (!def1) {
+        missed += 1;
+        failStreak += 1;
+        if (failStreak >= 3) {
+          setDefProgress({ done, total: groups.length, stopped: true, unreachable: true, missed });
+          if (showAVIToast) showAVIToast("KRDict isn't responding — remaining definitions fill via per-row refresh in Word Input");
+          return;
+        }
+      } else {
+        failStreak = 0;
+      }
       if (def1) {
         const normL = normalizeLemma(g.lemma);
         const uidSet = new Set(g.uids);
@@ -528,7 +618,7 @@ export function AVIImportPage({
         }));
       }
       done += 1;
-      setDefProgress({ done, total: groups.length, stopped: false });
+      setDefProgress({ done, total: groups.length, stopped: false, missed });
     }
   };
 
@@ -580,6 +670,8 @@ export function AVIImportPage({
         normalizeLemma,
         knownTerms: review.knownTerms || [],
         includeKnownSentences: mode === 'sentence' && !!data.aviSettings?.importKnownSentences,
+        // L4d: lemmas typed in review still find 입사(하다)-style entries.
+        findEntry: (text) => findLemmaEntryAny(data.lemmaMaster || [], text),
       });
 
       updateData(prev => ({
@@ -641,6 +733,12 @@ export function AVIImportPage({
         skippedKnown: review.knownTerms.length,
         remainder: parsed?.remainder?.length || 0,
         committedUids: newWordInputs.map(w => w.uid),
+        // word row uid → the sentence rows committed for the same term, so
+        // the Fill-Def2 modal's Skip can carry over to them.
+        sentencesByWord: Object.fromEntries(newWordInputs.map(w => [
+          w.uid,
+          newSentenceRows.filter(s => s.targetWord === w.lemma).map(s => s.uid),
+        ])),
       });
       setStep('done');
       fetchDefsInBackground(newWordInputs);
@@ -722,7 +820,14 @@ export function AVIImportPage({
             />
             {defProgress.stopped && (
               <div style={{ fontSize: '12px', color: C.textM, lineHeight: 1.5 }}>
-                Paused by the rate limit — the remaining definitions fill via per-row refresh in Word Input.
+                {defProgress.unreachable
+                  ? "KRDict isn't responding right now — the remaining definitions fill via per-row refresh in Word Input."
+                  : 'Paused by the rate limit — the remaining definitions fill via per-row refresh in Word Input.'}
+              </div>
+            )}
+            {!defProgress.stopped && defProgress.missed > 0 && defProgress.done >= defProgress.total && (
+              <div style={{ fontSize: '12px', color: C.textM, lineHeight: 1.5 }}>
+                {defProgress.missed} definition{defProgress.missed === 1 ? '' : 's'} couldn't be reached — refresh {defProgress.missed === 1 ? 'that row' : 'those rows'} in Word Input.
               </div>
             )}
           </div>
@@ -867,6 +972,18 @@ export function AVIImportPage({
                   </button>
                 )}
               </div>
+              {t.included && (() => {
+                const { current, choices } = choicesFor(t);
+                return (
+                  <LemmaChoiceChips
+                    current={current}
+                    choices={choices}
+                    alternates={otherReadings(t, choices)}
+                    onPick={(lemma) => updateTermLemma(idx, lemma)}
+                    C={C}
+                  />
+                );
+              })()}
               <TermContext
                 term={t}
                 sentences={review.sentences}

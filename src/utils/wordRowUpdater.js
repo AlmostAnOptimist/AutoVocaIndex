@@ -100,6 +100,10 @@ export function makeUpdateRow({
           // Master def2 cascade): cardBack = def2, falling back to def1.
           updatedSentenceInputs = updatedSentenceInputs.map(s => {
             if (normalizeLemma(s.targetWord) !== normLemma) return s;
+            // L6: a row with no back is waiting for a def2 — leave it empty so
+            // AVIPage's cascade fills it AND creates the card (it only acts on
+            // rows with an empty back).
+            if (!s.cardBack) return s;
             const cardBack = allEdits.def2 || next.def1 || s.cardBack;
             const changed  = cardBack !== s.cardBack;
             return {

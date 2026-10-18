@@ -194,14 +194,26 @@ export function buildImportPlan(mode, items, deps) {
 // Field sets mirror the live staging flows exactly (handlePopupDone and
 // createSentenceRowsWithLemma): no new fields, no undefined values, defs
 // filled only from an existing lemmaMaster entry — never fetched here.
-export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, section, uuid, normalizeLemma, knownTerms = [], includeKnownSentences = false }) {
+// L4d: `findEntry(lemmaText)` (optional) is a variant-aware lookup for
+// existing entries the text keys below can't see — 입사하다 → 입사(하다),
+// 향상되다 → 향상(하다/되다). A matched term takes the entry's own lemma text
+// so its rows link and its def2 comes along. Injected to keep this module
+// free of app services.
+export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, section, uuid, normalizeLemma, knownTerms = [], includeKnownSentences = false, findEntry = null }) {
   const nl = typeof normalizeLemma === 'function' ? normalizeLemma : (s) => String(s || '').trim();
   const now = new Date().toISOString();
 
   const lemmaMap = {};
+  // L4a: normalized fallback, matching Word Input staging — an entry whose
+  // stored lemma/cleanedLemma differ in spacing, NFC form or a stale
+  // cleanedLemma still links (and brings its def2). Where duplicates share a
+  // normalized form, the one that already has a def2 wins.
+  const normMap = {};
   for (const l of lemmaMaster || []) {
     lemmaMap[l.lemma] = l;
     if (l.cleanedLemma) lemmaMap[l.cleanedLemma] = l;
+    const nk = nl(l.lemma);
+    if (nk && (!normMap[nk] || (!normMap[nk].def2 && l.def2))) normMap[nk] = l;
   }
 
   const newWordInputs = [];
@@ -209,9 +221,17 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
   const newSentenceRows = [];
 
   for (const t of terms || []) {
-    const lemma = t.lemma || t.input;
-    const norm = nl(lemma);
-    let lEntry = lemmaMap[lemma] || lemmaMap[norm] || null;
+    let lemma = t.lemma || t.input;
+    let norm = nl(lemma);
+    let lEntry = lemmaMap[lemma] || lemmaMap[norm] || normMap[norm] || null;
+    if (!lEntry && findEntry) {
+      const hit = findEntry(lemma);
+      if (hit) {
+        lEntry = hit;
+        lemma = hit.lemma;               // store the entry's own text so rows link
+        norm = nl(lemma);
+      }
+    }
     const def1 = lEntry?.def1 || '';
     const def2 = lEntry?.def2 || '';
     if (!lEntry) {
@@ -240,7 +260,9 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
           uid: uuid(), ts: now,
           sentence, targetWord: lemma,
           cardFront: lemma + '\n' + sentence,
-          cardBack: def2 || def1 || '',
+          // L6: sentence cards wait for a def2 — an empty back is filled (and
+          // the card created) by AVIPage's cascade once the lemma has one.
+          cardBack: def2 || '',
           inputForm: sentence.includes(t.input) ? t.input : '',
           source, section,
           uploaded: false, skipUpload: false,
@@ -254,8 +276,7 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
   if (mode === 'sentence' && includeKnownSentences) {
     for (const k of knownTerms || []) {
       const lemma  = k.matchedLemma || k.input;
-      const lEntry = lemmaMap[lemma] || lemmaMap[nl(lemma)] || null;
-      const def1 = lEntry?.def1 || '';
+      const lEntry = lemmaMap[lemma] || lemmaMap[nl(lemma)] || normMap[nl(lemma)] || (findEntry ? findEntry(lemma) : null) || null;
       const def2 = lEntry?.def2 || '';
       for (const idx of [...new Set(k.sentenceIdxs || [])]) {
         const sentence = sentences[idx];
@@ -264,7 +285,7 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
           uid: uuid(), ts: now,
           sentence, targetWord: lemma,
           cardFront: lemma + '\n' + sentence,
-          cardBack: def2 || def1 || '',
+          cardBack: def2 || '', // L6: waits for a def2, as above
           inputForm: sentence.includes(k.input) ? k.input : '',
           source, section,
           uploaded: false, skipUpload: false,

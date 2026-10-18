@@ -13,8 +13,8 @@ import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
   uuid, normalizeLemma, cleanStagingText, extractLemmaFromText,
-  fetchDefinition, fetchDefinitionWithFallback, extractLemmaCandidates,
-  getSourceSections, resolveLemmaWithDictionary,
+  fetchDefinition, fetchDefinitionWithFallback,
+  getSourceSections, resolveLemmaDetailed,
   writeGlobalLemma, updateLinkedCards,
   filterNewSentenceRows, filterNewWordRows, filterNewLemmas,
 } from '../../utils/aviUtils.js';
@@ -25,6 +25,9 @@ import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteIn
 import { Icons } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
+import { useSearchAssist } from '../../hooks/useSearchAssist.js';
+import { SearchAnchorNote, DidYouMean } from '../../components/avi/SearchAssist.jsx';
+import { findLemmaEntryAny, canonicalLemma, otherReadings } from '../../utils/lemmaSuggest.js';
 
 const SI_PAGE_SIZE = 50;
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -42,8 +45,26 @@ function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose,
     setEditedTerms(terms.map(t => ({ ...t, skipped: false })));
   }, [terms]);
 
+  // A def2 belongs to the lemma, so typing one for 탐방로와 fills it in for
+  // 탐방로는 too when both resolved to 탐방로 (skipped terms are left alone).
   const updateTerm   = (i, field, val) =>
-    setEditedTerms(prev => prev.map((t, idx) => idx === i ? { ...t, [field]: val } : t));
+    setEditedTerms(prev => {
+      if (field !== 'def2') return prev.map((t, idx) => idx === i ? { ...t, [field]: val } : t);
+      const key = normalizeLemma(prev[i]?.lemma || '');
+      return prev.map((t, idx) =>
+        idx === i || (key && !t.skipped && normalizeLemma(t.lemma || '') === key)
+          ? { ...t, def2: val }
+          : t
+      );
+    });
+  // Inputs that share each term's lemma, for the "shared with" note.
+  const sameLemmaInputs = (i) => {
+    const key = normalizeLemma(editedTerms[i]?.lemma || '');
+    if (!key) return [];
+    return editedTerms
+      .filter((t, idx) => idx !== i && !t.skipped && normalizeLemma(t.lemma || '') === key)
+      .map(t => t.input);
+  };
   const toggleSkip   = (i) =>
     setEditedTerms(prev => prev.map((t, idx) => idx === i ? { ...t, skipped: !t.skipped } : t));
   const activeTerms  = editedTerms.filter(t => !t.skipped);
@@ -108,7 +129,9 @@ function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose,
                     : <span style={{ fontFamily: SH.fk, fontSize: '14px', color: C.accent }}>{t.lemma}</span>
                   }
                   {step === 1 && !t.skipped && !t.isPhrase && (() => {
-                    const alts = extractLemmaCandidates(t.input).filter(c => c && c !== t.lemma).slice(0, 3);
+                    // L3: dictionary-validated readings (and the original
+                    // guess, to undo an edit) instead of raw jamo guesses.
+                    const alts = otherReadings(t);
                     if (!alts.length) return null;
                     return (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px' }}>
@@ -151,6 +174,11 @@ function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose,
                       onChange={e => updateTerm(i, 'def2', e.target.value)}
                       placeholder="Add your own definition…"
                     />
+                    {sameLemmaInputs(i).length > 0 && (
+                      <div style={{ fontSize: '10.5px', color: C.textM, marginTop: '3px' }}>
+                        Shared with {sameLemmaInputs(i).join(', ')} (same lemma)
+                      </div>
+                    )}
                   </div>
                 </>
               )}
@@ -487,7 +515,9 @@ export function AVISentenceInputPage({
       const dup = classifySentenceDup(sentence, safeTarget, effSource);
       if (dup.skip) { skippedDupes.push(safeTarget); continue; }
       const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
-      const cardBack   = lEntry.def2 || lEntry.def1 || wi?.def2 || wi?.def1 || '';
+      // L6: sentence cards wait for a def2 — an empty back is filled (and the
+      // card created) by AVIPage's cascade once the lemma has one.
+      const cardBack   = lEntry.def2 || wi?.def2 || '';
       // Find inputForm: the surface form appearing in the sentence
       const inputForm  = sentence.includes(input) ? input : '';
       const sid        = sentUid || uuid();
@@ -533,7 +563,7 @@ export function AVISentenceInputPage({
       const dup = classifySentenceDup(sentence, safeTarget, effSource);
       if (dup.skip) { skippedDupes.push(safeTarget); continue; }
       const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
-      const cardBack   = lEntry.def2 || lEntry.def1 || t.def2 || t.def1 || '';
+      const cardBack   = lEntry.def2 || t.def2 || ''; // L6: waits for a def2
       const inputForm  = t.input && sentence.includes(t.input) ? t.input : '';
       const sid        = uuid();
       newRows.push({
@@ -655,10 +685,21 @@ export function AVISentenceInputPage({
         if (l.cleanedLemma) localHeadwords.add(l.cleanedLemma);
       }
       await Promise.all(newTerms.map(async (nt) => {
-        nt.lemma = nt.isPhrase
-          ? lemmatizePhrase(nt.phraseTokens || [])
-          : (await resolveLemmaWithDictionary(nt.input, { localHeadwords }) || nt.input);
+        let resolved = nt.input;
+        let alternates = [];
+        if (nt.isPhrase) {
+          resolved = lemmatizePhrase(nt.phraseTokens || []);
+        } else {
+          // L3: the other dictionary readings ride along for Step 1's chips.
+          const d = await resolveLemmaDetailed(nt.input, { localHeadwords, withAlternates: true });
+          resolved = d.lemma || nt.input;
+          alternates = d.alternates || [];
+        }
+        // L4d: adopt an existing entry's own text when it matches a variant
+        // (입사하다 → 입사(하다)), so the term links instead of duplicating.
+        nt.lemma = canonicalLemma(data.lemmaMaster, resolved);
         nt.resolvedLemma = nt.lemma;
+        nt.alternates = alternates.map(a => canonicalLemma(data.lemmaMaster, a));
       }));
       // Drop the transient helper field so popup state shape is unchanged.
       newTerms.forEach(nt => { delete nt.phraseTokens; });
@@ -710,8 +751,8 @@ export function AVISentenceInputPage({
     const updated = await Promise.all(terms.map(async t => {
       const existing = data.lemmaMaster.find(
         l => l.lemma === t.lemma || normalizeLemma(l.lemma) === normalizeLemma(t.lemma)
-      );
-      if (existing) return { ...t, def1: existing.def1 || '', def2: existing.def2 || '' };
+      ) || findLemmaEntryAny(data.lemmaMaster, t.lemma); // L4d: 입사하다 → 입사(하다)
+      if (existing) return { ...t, lemma: existing.lemma, def1: existing.def1 || '', def2: existing.def2 || '' };
       try {
         // Tier 2: retry a dictionary miss with the surface's next candidates —
         // only when the lemma is still the machine's own untouched guess.
@@ -753,7 +794,7 @@ export function AVISentenceInputPage({
       const norm = normalizeLemma(t.lemma);
       const existingLM = data.lemmaMaster.find(
         l => l.cleanedLemma === norm || l.lemma === t.lemma
-      );
+      ) || findLemmaEntryAny(data.lemmaMaster, t.lemma); // L4d: variant match
       if (!existingLM) {
         newLemmas.push({
           lemma: t.lemma, def1: t.def1, def2: t.def2 || '',
@@ -856,8 +897,10 @@ export function AVISentenceInputPage({
     const newTargetEntry = targetChanged
       ? data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(newTarget))
       : null;
+    // L6: def2 only — with no def2 yet the back stays empty and AVIPage's
+    // cascade creates the card when one arrives.
     const autoBack = (targetChanged && !backChanged)
-      ? (newTargetEntry?.def2 || newTargetEntry?.def1 || '')
+      ? (newTargetEntry?.def2 || '')
       : null;
 
     updateData(prev => ({
@@ -927,12 +970,18 @@ export function AVISentenceInputPage({
   // desktop; the mobile input below binds to the same state). NFC on both
   // sides so pre-repair decomposed rows still match a composed query.
   const q = (inputSearch || '').normalize('NFC').trim().toLowerCase();
+  // L4b: a Korean query that's another form of a lemma you study (탐방로는)
+  // also matches that lemma's sentence rows; a query matching nothing offers
+  // "Did you mean" lemmas. Same cascade as the Search tab.
+  const assist = useSearchAssist(data, inputSearch);
+  const { anchorKey } = assist;
   const sortedSentences = useMemo(() => {
     const match = (s) => !q ||
       [s.sentence, s.targetWord, s.cardBack]
-        .some(f => (f || '').normalize('NFC').toLowerCase().includes(q));
+        .some(f => (f || '').normalize('NFC').toLowerCase().includes(q)) ||
+      (!!anchorKey && normalizeLemma(s.targetWord || '') === anchorKey);
     return [...data.sentenceInputs].filter(match).sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
-  }, [data.sentenceInputs, q]);
+  }, [data.sentenceInputs, q, anchorKey]);
 
   // Back to page 0 when the query changes so results are visible. The ref
   // guard skips the mount run — siPage is lifted state that deliberately
@@ -1083,11 +1132,15 @@ export function AVISentenceInputPage({
         )}
 
         <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: isMobile ? 'hidden' : 'auto' }}>
+          {q && !!anchorKey && data.sentenceInputs.some(s => normalizeLemma(s.targetWord || '') === anchorKey) && (
+            <SearchAnchorNote anchor={assist.anchor} query={(inputSearch || '').trim()} C={C} />
+          )}
           {isMobile ? (
             <>
               {pagedRows.length === 0 && (
                 <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
                   {q ? 'No entries match your search.' : 'No entries yet. Paste a sentence above.'}
+                  {q && <DidYouMean suggestions={assist.suggestions} onPick={setInputSearch} C={C} />}
                 </div>
               )}
               {pagedRows.map(s => (
@@ -1117,6 +1170,7 @@ export function AVISentenceInputPage({
                   <tr>
                     <td colSpan={6} style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
                       {q ? 'No entries match your search.' : 'No entries yet. Paste a sentence above.'}
+                  {q && <DidYouMean suggestions={assist.suggestions} onPick={setInputSearch} C={C} />}
                     </td>
                   </tr>
                 )}

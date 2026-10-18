@@ -39,6 +39,7 @@ import {
   normalizeLemma, cleanStagingText, getSourceSections,
   resolveLemmaWithDictionary, fetchDefinitionWithFallback,
 } from '../../utils/aviUtils.js';
+import { findLemmaEntryAny } from '../../utils/lemmaSuggest.js';
 import { stageWordInput } from '../../utils/wordStaging.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -54,7 +55,7 @@ function findLemmaEntry(lemmaMaster, lemmaText) {
   const norm = normalizeLemma(lemmaText);
   return (lemmaMaster || []).find(l =>
     l.cleanedLemma === norm || l.lemma === lemmaText || normalizeLemma(l.lemma) === norm
-  ) || null;
+  ) || findLemmaEntryAny(lemmaMaster || [], lemmaText); // L4d: 입사하다 → 입사(하다)
 }
 
 // ── Confirm dialog ───────────────────────────────────────────

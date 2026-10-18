@@ -605,6 +605,9 @@ export function AVILemmaMasterPage({
         }),
         sentenceInputs: prev.sentenceInputs.map(s => {
           if (normalizeLemma(s.targetWord) !== oldNorm) return s;
+          // L6: rows with no back are waiting for a def2 — AVIPage's cascade
+          // fills them and creates their cards.
+          if (!s.cardBack) return s;
           const cardBack = value || lmatch.def1 || s.cardBack;
           const changed  = cardBack !== s.cardBack;
           return {
@@ -723,7 +726,9 @@ export function AVILemmaMasterPage({
         sentenceInputs: prev.sentenceInputs.map(s => {
           const norm = normalizeLemma(s.targetWord);
           if (norm === editedNorm) {
-            const cardBack = survivingDef2 || survivor.def1 || edited.def1 || s.cardBack;
+            // L6: a row still waiting for a def2 keeps its empty back (AVIPage's
+            // cascade creates its card once the survivor has a def2).
+            const cardBack = s.cardBack ? (survivingDef2 || survivor.def1 || edited.def1 || s.cardBack) : '';
             const changed  = cardBack !== s.cardBack;
             return {
               ...s,
@@ -738,6 +743,7 @@ export function AVILemmaMasterPage({
           // Survivor's own sentence rows follow the chosen def2 too (mirror
           // of the word-row cascade above).
           if (survivorDef2Changed && norm === survivorNorm) {
+            if (!s.cardBack) return s; // L6: waiting for a def2 — the cascade handles it
             const cardBack = survivingDef2 || survivor.def1 || s.cardBack;
             const changed  = cardBack !== s.cardBack;
             if (!changed) return s;
@@ -792,6 +798,9 @@ export function AVILemmaMasterPage({
     try {
       const def1 = await fetchDefinition(l.lemma, data.aviSettings);
       if (def1 === '__RATE_LIMITED__') { showAVIToast('API rate limit reached.'); return; }
+      // L1: empty = dictionary unreachable — keep the existing def1 rather
+      // than blanking it.
+      if (!def1) { showAVIToast("Couldn't reach the dictionary — Def1 left unchanged."); return; }
       const oldDef1 = l.def1 || '';
       updateData(prev => ({
         ...prev,

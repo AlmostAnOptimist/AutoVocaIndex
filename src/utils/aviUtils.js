@@ -171,9 +171,22 @@ const KOREAN_VERB_ENDINGS = [
   ['으세요','다',1], ['세요','다',1],
   ['을까','다',1], ['느냐','다',1], ['으냐','다',1],
   ['께서는','',1], ['께서도','',1], ['께서','',1],
+  // L3 (lemma repair, Oct 2026). 다면 used to fall to the
+  // bare 면 rule and gain a second 다 (원한다면→원한다다). Fused ㄴ다면
+  // (원한다면→원하다) is a validated candidate below; 는다면 is exact here.
+  ['는다면','다',1], ['다면','다',1], ['이라면','',1],
+  // Noun particles/copula the table lacked. 이라서 and 이나 attach only after
+  // a consonant-final noun, so they're safe to strip blind; vowel-final 라서
+  // and 나 collide with verbs (모자라서, 가나요) and stay validated candidates.
+  ['마다','',1], ['이나','',1], ['이라서','',1],
 ];
 // Pre-sorted longest-first so 하는 wins over 는, 에서 over 에, etc.
 const KVE_SORTED = [...KOREAN_VERB_ENDINGS].sort((a, b) => b[0].length - a[0].length);
+// L3: the copula's 이 only surfaces after a consonant-final noun
+// (학생이나, 학생이라서). After a vowel the 이 belongs to the noun itself —
+// 고양이나 is 고양이 + 나, not 고양 + 이나 — so these rules are skipped
+// there and the shorter rule (or a validated candidate) takes over.
+const COPULA_I_SUFFIXES = new Set(['이나', '이라서', '이라면', '이니까', '이가', '이라고', '이라는']);
 
 // ── Stage C: function-word stoplist ───────────────────────────
 // Conjunctive adverbs and frequency adverbs that are dictionary headwords
@@ -194,6 +207,9 @@ const KOREAN_FUNCTION_WORDS = new Set([
   '함께', '빨리', '많이', '같이', '아직', '이미', '매우', '아주', '정말',
   '진짜', '너무', '다시', '먼저', '서로', '가장', '별로', '계속', '자주',
   '항상', '거의', '바로', '이제', '벌써', '아마', '특히', '역시', '물론',
+  // L3: bare adverbs that also read as conjugations (안→안다, 다→다다,
+  // 없이→없, 잘→자다, 늘→늘다, 곧→곧다) — each is its own headword.
+  '안', '못', '다', '잘', '없이', '곧', '늘', '좀', '꼭', '또', '더',
 ]);
 const isFunctionWord = (s) =>
   !!s && KOREAN_FUNCTION_WORDS.has(String(s).normalize('NFC'));
@@ -273,8 +289,21 @@ export function extractLemmaFromText(cleaned) {
       const suffix = rule[0], replacement = rule[1], minStem = rule[2];
       if (token.endsWith(suffix)) {
         const stem = token.slice(0, token.length - suffix.length);
+        if (COPULA_I_SUFFIXES.has(suffix)) {
+          const dS = stem ? decomposeSyllable(stem[stem.length - 1]) : null;
+          if (!dS || dS[2] === 0) continue;
+        }
         if (hangulCount(stem) >= minStem && /[가-힣]/.test(stem)) {
-          const cand = replacement ? stem + replacement : stem;
+          let cand = replacement ? stem + replacement : stem;
+          const dLast = decomposeSyllable(stem[stem.length - 1]);
+          // L3: 는 after a consonant-final stem is always a verb form — the
+          // topic marker after a consonant is 은 (넘는→넘다, 않는→않다).
+          if (suffix === '는' && !replacement && dLast && dLast[2] !== 0) cand = stem + '다';
+          // L3: a ㄹ-final stem before an 으-ending is always ㄷ-irregular —
+          // real ㄹ-stems never take 으 (걸으러→걷다, 들으면→듣다).
+          if (replacement === '다' && suffix[0] === '으' && dLast && dLast[2] === 8) {
+            cand = stem.slice(0, -1) + composeSyllable(dLast[0], dLast[1], 7) + '다';
+          }
           return decontractIfPast(cand) || token;
         }
       }
@@ -314,6 +343,61 @@ export function extractLemmaFromText(cleaned) {
   return '';
 }
 
+// ── Stacked-particle peeling (L3) ─────────────────────────────
+// Particle → which stem ending it attaches to: 'C' consonant-final,
+// 'CX' consonant-final except ㄹ, 'V' vowel-final, 'VL' vowel- or ㄹ-final (로), 'A' either.
+const OUTER_PARTICLES = [
+  ['는', 'V'], ['은', 'C'], ['를', 'V'], ['을', 'C'], ['가', 'V'], ['이', 'C'],
+  ['도', 'A'], ['만', 'A'], ['의', 'A'],
+];
+const INNER_PARTICLES = [
+  ['에게서', 'A'], ['한테서', 'A'], ['에서', 'A'], ['에게', 'A'], ['한테', 'A'],
+  ['까지', 'A'], ['부터', 'A'], ['처럼', 'A'], ['마다', 'A'], ['보다', 'A'],
+  ['조차', 'A'], ['마저', 'A'], ['밖에', 'A'], ['하고', 'A'], ['이랑', 'C'],
+  ['으로', 'CX'], ['이나', 'C'], ['로', 'VL'], ['랑', 'V'], ['와', 'V'], ['과', 'C'],
+  ['께', 'A'], ['에', 'A'],
+];
+function particleFits(stem, rule) {
+  const d = stem ? decomposeSyllable(stem[stem.length - 1]) : null;
+  if (!d) return false;
+  if (rule === 'A') return true;
+  if (rule === 'C') return d[2] !== 0;
+  if (rule === 'CX') return d[2] !== 0 && d[2] !== 8; // 으로: ㄹ takes 로
+  if (rule === 'V') return d[2] === 0;
+  if (rule === 'VL') return d[2] === 0 || d[2] === 8;
+  return false;
+}
+function peelOne(w, list) {
+  for (const [pt, rule] of list) {
+    if (w.endsWith(pt)) {
+      const stem = w.slice(0, -pt.length);
+      if (hangulCount(stem) >= 1 && particleFits(stem, rule)) return stem;
+    }
+  }
+  return null;
+}
+// Returns the deeper peels of a stacked-particle surface (two or more
+// layers removed), deepest first; [] for anything that isn't stacked.
+function stackedParticlePeels(surface) {
+  let w = String(surface || '').trim()
+    .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
+  if (w.endsWith('요') && hangulCount(w) >= 3) w = w.slice(0, -1);
+  if (!/^[가-힣]+$/.test(w)) return [];
+  const chain = [];
+  const outer = peelOne(w, OUTER_PARTICLES);
+  if (outer) { w = outer; chain.push(w); }
+  const inner = peelOne(w, INNER_PARTICLES);
+  // 하고 is also the verb 하다's connective (능멸하고도 → 능멸하다), so that
+  // reading is offered ahead of the bare noun.
+  const verbReading = inner && w.endsWith('하고') ? inner + '하다' : null;
+  if (inner) { w = inner; chain.push(w); }
+  // Plural 들, except the 아들 compounds (큰아들, 막내아들).
+  if (w.endsWith('들') && hangulCount(w) >= 3 && !w.endsWith('아들')) { w = w.slice(0, -1); chain.push(w); }
+  if (chain.length < 2) return [];
+  const peels = chain.slice(1).reverse();
+  return verbReading ? [verbReading, ...peels] : peels;
+}
+
 // ── extractLemmaCandidates ────────────────────────────────────
 // Ranked candidate lemmas for one surface token, including irregular-verb
 // recoveries (ㅂ/르/ㄷ/ㅅ/으) that are too ambiguous to apply blind.
@@ -327,6 +411,17 @@ export function extractLemmaCandidates(surface) {
   // the identity so no sibling (그러나→그러다, 그러면→그러다) can validate
   // past it downstream.
   if (isFunctionWord(out[0])) return out;
+
+  // L3 — stacked particles (봄에는→봄, 친구들에게는→친구, 해녀들이→해녀).
+  // The table strips one particle, so 봄에는 stopped at 봄에. Peel up to
+  // three layers — outer (topic/object/subject/도/만/의), inner
+  // (location, direction, 와/과…), plural 들 — and offer the results right
+  // after the primary. Candidates only, never the primary: nouns ending in
+  // a particle-shaped syllable (도로, 사과, 아들) must stay whole, and the
+  // primary is checked first, so 도로는 still lands on 도로. Each particle
+  // only peels where Korean allows it (이/을/은/과/으로 after a consonant,
+  // 가/를/는/와/로 after a vowel), which keeps 만나는 from reaching 만.
+  for (const c of stackedParticlePeels(surface)) push(c);
 
   // Peel only the polite 요 (and a fully spelled 었어요/았어요) so the
   // contracted stem stays intact: 들어요→들어, 더워요→더워, 써요→써.
@@ -391,7 +486,9 @@ export function extractLemmaCandidates(surface) {
     .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
   // (a) X기 nominalizer vs noun ending in 기: 비치기→비치다 candidate;
   //     junk like 이야기→이야다 never survives validation.
-  if (t2.endsWith('기') && hangulCount(t2) >= 3) {
+  // L3: two-syllable surfaces too (가기→가다, 먹기→먹다); 2-syllable 기
+  //     nouns (아기, 공기, 일기) carry trusted identity rows upstream.
+  if (t2.endsWith('기') && hangulCount(t2) >= 2) {
     push(t2.slice(0, -1) + '다');
   }
   // (b) Bare particle strip as an alternative to verbalizer bigrams:
@@ -418,6 +515,16 @@ export function extractLemmaCandidates(surface) {
   //     ㄴ/ㄹ final and offer stem+다 (예쁜→예쁘다, 큰→크다, 갈→가다); for
   //     ㄴ also the ㄹ-restored stem (산→살다). Nouns ending in ㄴ/ㄹ
   //     (시간, 물) produce junk candidates that fail validation harmlessly.
+  // L3 — ㅎ-irregular attributives: 그런→그렇다, 어떤→어떻다, 빨간→빨갛다.
+  //     Ranked ahead of (d) because when the ㅎ form validates it is the
+  //     reading (그런 is almost never 그러다). Junk (간→갛다) fails
+  //     validation harmlessly.
+  if (t2.length >= 2) {
+    const dH = decomposeSyllable(t2[t2.length - 1]);
+    if (dH && dH[2] === 4 && (dH[1] === 0 || dH[1] === 4)) {
+      push(t2.slice(0, -1) + composeSyllable(dH[0], dH[1], 27) + '다');
+    }
+  }
   if (t2.length >= 1) {
     const dF = decomposeSyllable(t2[t2.length - 1]);
     if (dF && (dF[2] === 4 || dF[2] === 8)) {
@@ -428,8 +535,13 @@ export function extractLemmaCandidates(surface) {
   // (e) Syllabic 은/을 attributives on consonant stems (the particle strip
   //     already offers 작은→작; add the adjective/verb reading 작다) and
   //     는 on a vowel stem (하는→하다, 만나는→만나다).
+  //     L3: a ㄹ-final stem before 은/을 is ㄷ-irregular — a real ㄹ-stem
+  //     drops its ㄹ instead (들다→든/들) — so 들은/들을 offer 듣다.
   if ((t2.endsWith('은') || t2.endsWith('을')) && hangulCount(t2) >= 2) {
-    push(t2.slice(0, -1) + '다');
+    const st = t2.slice(0, -1);
+    const dSt = decomposeSyllable(st[st.length - 1]);
+    if (dSt && dSt[2] === 8) push(st.slice(0, -1) + composeSyllable(dSt[0], dSt[1], 7) + '다');
+    else push(st + '다');
   }
   if (t2.endsWith('는') && t2.length >= 2) {
     const st = t2.slice(0, -1);
@@ -479,9 +591,10 @@ export function extractLemmaCandidates(surface) {
   {
     const u = t.endsWith('서') ? t.slice(0, -1) : t;
     const dU = u ? decomposeSyllable(u[u.length - 1]) : null;
-    if (dU && dU[2] === 0 && [0, 1, 4, 9, 14].includes(dU[1]) && hangulCount(u) >= 1) {
-      push(u + '다');
-      const rest = { 9: 8, 14: 13, 1: 0 }[dU[1]];
+    // L3: ㅕ (지켜→지키다, 기다려→기다리다) and ㅙ (돼→되다) added.
+    if (dU && dU[2] === 0 && [0, 1, 4, 6, 9, 10, 14].includes(dU[1]) && hangulCount(u) >= 1) {
+      if (dU[1] !== 10) push(u + '다');
+      const rest = { 9: 8, 14: 13, 1: 0, 6: 20, 10: 11 }[dU[1]];
       if (rest !== undefined) push(u.slice(0, -1) + composeSyllable(dU[0], rest, 0) + '다');
     }
   }
@@ -510,7 +623,7 @@ export function extractLemmaCandidates(surface) {
       const dSt = decomposeSyllable(st[st.length - 1]);
       push(st + '다');
       if (dSt && dSt[2] === 0) {
-        const rest = { 9: 8, 14: 13, 1: 0 }[dSt[1]];
+        const rest = { 9: 8, 14: 13, 1: 0, 6: 20, 10: 11 }[dSt[1]];
         if (rest !== undefined) push(st.slice(0, -1) + composeSyllable(dSt[0], rest, 0) + '다');
       }
     }
@@ -521,6 +634,13 @@ export function extractLemmaCandidates(surface) {
     // (가고→가다, 자고→자다) — noun headwords (사고) are likewise protected
     // by the identity tier.
     if (b.endsWith('고') && hangulCount(b) === 2) push(b.slice(0, -1) + '다');
+    // L3: adverbial 게 on a 1-syllable stem, same reason (쉽게→쉽다,
+    // 크게→크다).
+    // ㄹ-final stems (갈게, 살게) are the fused-future case just below.
+    if (b.endsWith('게') && hangulCount(b) === 2) {
+      const dG = decomposeSyllable(b[0]);
+      if (dG && dG[2] !== 8) push(b[0] + '다');
+    }
     // Fused-ㄹ futures/questions 게/까/래(+요): the ㄹ may be the
     // prospective (갈게→가다) or stem-final (살게→살다) — offer both,
     // ㄹ-stripped first (higher corpus frequency).
@@ -538,6 +658,35 @@ export function extractLemmaCandidates(surface) {
     if ((b.endsWith('니다') || b.endsWith('니까')) && b.length >= 3) {
       const dB = decomposeSyllable(b[b.length - 3]);
       if (dB && dB[2] === 17) push(b.slice(0, -3) + composeSyllable(dB[0], dB[1], 0) + '다');
+    }
+  }
+  // L3 — vowel-final noun + copula/particle forms the table can't strip
+  // blind: 커피나 (가나요 is a verb), 성수기라서 (모자라서 is a verb),
+  // 친구라면 (모자라면), and attributive copula 인 (비수기인, 돌인 — 인
+  // after any noun). The verb readings are offered above (모자라서 →
+  // 모자라다 in (h)) and rank first; these add the noun reading.
+  {
+    const b = t2.endsWith('요') && hangulCount(t2) >= 3 ? t2.slice(0, -1) : t2;
+    for (const suf of ['라서', '라면', '나']) {
+      if (b.endsWith(suf)) {
+        const st = b.slice(0, -suf.length);
+        const dSt = st ? decomposeSyllable(st[st.length - 1]) : null;
+        if (dSt && dSt[2] === 0 && hangulCount(st) >= 1) push(st);
+        break;
+      }
+    }
+    if (t2.endsWith('인') && hangulCount(t2) >= 2) push(t2.slice(0, -1));
+    // The table's 이-copula rules read 고양이나 as 고양 + 이나; offer the
+    // 이-final noun too (the resolver prefers it when both validate).
+    for (const suf of COPULA_I_SUFFIXES) {
+      if (b.endsWith(suf) && hangulCount(b) > suf.length) { push(b.slice(0, -suf.length) + '이'); break; }
+    }
+    // Conditional 다면 on a fused-ㄴ declarative: 원한다면→원하다,
+    // 간다면→가다 (the table's 다면 rule leaves 원한다).
+    if (b.endsWith('다면') && hangulCount(b) >= 3) {
+      const st = b.slice(0, -2);
+      const dN = decomposeSyllable(st[st.length - 1]);
+      if (dN && dN[2] === 4) push(st.slice(0, -1) + composeSyllable(dN[0], dN[1], 0) + '다');
     }
   }
   // Stage B — honorific and future markers on the primary: 하셨다's primary
@@ -738,12 +887,28 @@ function glmEntryIsOrganic(entry) {
   return (entry?.updatedAt || '') >= GLM_SEED_END || (entry?.contributorCount || 0) >= 2;
 }
 
+// L2 (lemma repair, Oct 2026): the Oct 2026 cleanup vetted
+// every seed row against a morphological analyzer and a dictionary word
+// list, and wrote two flags:
+//   verified: true  — the mapping was confirmed independently → trusted.
+//   headword: true  — the key itself is a dictionary word, whatever its
+//                     row maps to (봄 is a word even though its row reads
+//                     it as a form of 보다).
+// An unvetted identity row is no longer headword evidence on its own: the
+// seed held junk identities (할다, 다다, 이요) that let wrong candidates
+// win. Organic rows (user corrections) stay fully trusted, and vetted
+// rows keep their seed-era updatedAt, so a user correction still
+// overrides them (writeGlobalLemma).
 function glmEntryTrust(key, entry) {
   if (!entry) return { headword: false, mapping: null };
   const lemma    = entry.cleanedLemma || '';
   const organic  = glmEntryIsOrganic(entry);
+  const verified = entry.verified === true;
   const identity = globalLemmaKey(lemma) === key;
-  return { headword: identity || organic, mapping: (organic || identity) ? lemma : null };
+  return {
+    headword: entry.headword === true || (identity && (organic || verified)),
+    mapping:  (organic || verified) ? lemma : null,
+  };
 }
 
 async function fetchGlmEntry(key) {
@@ -770,22 +935,50 @@ export async function lookupGlobalLemma(surface) {
 // directly in the parenthetical lemma convention (마무리(하다)) must pass
 // through untouched.
 export async function resolveLemmaWithDictionary(surface, opts = {}) {
+  return (await resolveLemmaDetailed(surface, { ...opts, withAlternates: false })).lemma;
+}
+
+// L3: how many candidates are validated against the GLM per surface. The
+// stacked-particle peels sit right after the primary, so the irregular
+// recoveries further down need the extra room.
+const GLM_CANDIDATE_CHECKS = 8;
+const MAX_ALTERNATES = 3;
+
+// L3 (lemma repair, Oct 2026): the same cascade, also
+// returning the other readings that validate as dictionary words, so the
+// Import review and the Sentence Input picker can offer them one tap away
+// when the most likely reading is wrong (봄 the noun vs 보다, 낮은 →
+// 낮 vs 낮다, 들었어요 → 들다 vs 듣다).
+//   { lemma, alternates: string[] }
+// alternates are only computed with { withAlternates: true }; they never
+// include the lemma itself, and function words get none.
+export async function resolveLemmaDetailed(surface, opts = {}) {
   const raw = String(surface || '').trim();
-  if (!raw) return '';
+  if (!raw) return { lemma: '', alternates: [] };
   // Optional synchronous validation set: normalized headwords the user
   // already studies (lemmaMaster lemma + cleanedLemma values).
   const localHeadwords = opts.localHeadwords || null;
+  const withAlternates = !!opts.withAlternates;
+  const isLocal = (c) => !!localHeadwords && (localHeadwords.has(c) || localHeadwords.has(normalizeLemma(c)));
 
-const variants = [raw, normalizeLemma(raw) || raw];
+  const variants = [raw, normalizeLemma(raw) || raw];
   // Bare contracted forms (더워, 몰라) often exist in the seed only in their
   // polite shape — include the +요 variant for corroboration.
   if (!raw.endsWith('요') && /[가-힣]$/.test(raw)) variants.push(raw + '요');
   const keys = [...new Set(variants.map(v => globalLemmaKey(v)))];
+  // L2: the +요 variant exists to find a rewrite the seed only recorded in
+  // its polite shape (더워요→덥다). Its identity row says nothing about the
+  // bare surface — accepting it returned 이요 for 이 (and would return the
+  // noun 가요 for 가).
+  const yoKey = (!raw.endsWith('요') && /[가-힣]$/.test(raw)) ? globalLemmaKey(raw + '요') : null;
   let seedMapping = null;
+  let rawIsHeadword = false;
+  let trusted = null;
   for (const k of keys) {
     const entry = await fetchGlmEntry(k);
     const trust = glmEntryTrust(k, entry);
-    if (trust.mapping) return trust.mapping;
+    if (k !== yoKey && trust.headword) rawIsHeadword = true;
+    if (trust.mapping && !(k === yoKey && globalLemmaKey(trust.mapping) === k)) { trusted = trust.mapping; break; }
     // Remember an untrusted seed rewrite for corroboration below.
     if (!seedMapping && entry && entry.cleanedLemma) seedMapping = entry.cleanedLemma;
   }
@@ -794,17 +987,45 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // loop so an organic user correction still overrides, and before every
   // seed tier so an untrusted seed rewrite (그리고→그리다) never can —
   // 그리다 IS a headword, so the C2 gate below could not reject it.
-  if (isFunctionWord(normalizeLemma(raw) || raw)) return normalizeLemma(raw) || raw;
+  if (!trusted && isFunctionWord(normalizeLemma(raw) || raw)) {
+    return { lemma: normalizeLemma(raw) || raw, alternates: [] };
+  }
 
   const candidates = extractLemmaCandidates(raw);
   const primary = candidates[0] || raw;
+  const toCheck = candidates.filter(c => c && c !== raw).slice(0, GLM_CANDIDATE_CHECKS);
+
+  // Headword validation of the candidates, in rank order. Skipped when a
+  // trusted mapping already answered and no alternates were asked for.
+  let validated = null;
+  const validate = async () => {
+    if (validated) return validated;
+    const entries = await Promise.all(toCheck.map(c => isLocal(c) ? null : fetchGlmEntry(globalLemmaKey(c))));
+    validated = toCheck.filter((c, i) => isLocal(c) || glmEntryTrust(globalLemmaKey(c), entries[i]).headword);
+    return validated;
+  };
+  const finish = async (lemma) => {
+    if (!withAlternates) return { lemma, alternates: [] };
+    const alts = [];
+    const add = (c) => {
+      // The bare copula validates for any 이-final remainder; never a useful offer.
+      if (c === '이다') return;
+      if (c && c !== lemma && normalizeLemma(c) !== normalizeLemma(lemma) && !alts.includes(c)) alts.push(c);
+    };
+    // The surface itself when it is a dictionary word (봄, 보고 the noun).
+    if (rawIsHeadword) add(normalizeLemma(raw) || raw);
+    for (const c of await validate()) add(c);
+    return { lemma, alternates: alts.slice(0, MAX_ALTERNATES) };
+  };
+
+  if (trusted) return finish(trusted);
 
   // Local headword validation: free and synchronous — a candidate the user
   // already studies is accepted immediately (몰라요→모르다 when 모르다 is
   // in lemmaMaster).
   if (localHeadwords) {
     for (const c of candidates) {
-      if (c && c !== raw && (localHeadwords.has(c) || localHeadwords.has(normalizeLemma(c)))) return c;
+      if (c && c !== raw && isLocal(c)) return finish(c);
     }
   }
 
@@ -812,15 +1033,26 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // machine-generated with the same naive suffix assumptions as the
   // heuristic, so a validated headword candidate (이야기는→이야기) must
   // beat a seed row that merely agrees with a heuristic guess.
-  // Stage B widened the candidate set, so validate up to 6 (was 4) — the
-  // good candidate for chained endings can sit past index 3.
-  const toCheck = candidates.filter(c => c && c !== raw).slice(0, 6);
-  if (toCheck.length) {
-    const entries = await Promise.all(toCheck.map(c => fetchGlmEntry(globalLemmaKey(c))));
-    for (let i = 0; i < toCheck.length; i++) {
-      const tr = glmEntryTrust(globalLemmaKey(toCheck[i]), entries[i]);
-      if (tr.headword) return toCheck[i];
-    }
+  const ok = await validate();
+  if (ok.length) {
+    // L3: 고양이나 validates as both 고양 (+ 이나) and 고양이 (+ 나) — a
+    // validated 이-final noun the surface spells out is the likelier one.
+    const longer = ok[0] + '이';
+    if (ok.includes(longer) && (normalizeLemma(raw) || raw).startsWith(longer)) return finish(longer);
+    return finish(ok[0]);
+  }
+
+  // L3 — X어지다/X아지다 "become" verbs are productive and mostly absent
+  // from the map (쉬워지다, 따뜻해지다): accept one when its base validates
+  // (쉬워 → 쉽다).
+  for (const c of toCheck) {
+    if (!c.endsWith('지다') || hangulCount(c) < 3) continue;
+    const stem = c.slice(0, -2);
+    const dS = decomposeSyllable(stem[stem.length - 1]);
+    if (!dS || dS[2] !== 0 || ![0, 1, 4, 6, 9, 14].includes(dS[1])) continue; // fused 아/어/해/여/와/워
+    const bases = extractLemmaCandidates(stem).filter(b => b.endsWith('다')).slice(0, 4);
+    const rows = await Promise.all(bases.map(b => isLocal(b) ? null : fetchGlmEntry(globalLemmaKey(b))));
+    if (bases.some((b, i) => isLocal(b) || glmEntryTrust(globalLemmaKey(b), rows[i]).headword)) return finish(c);
   }
 
   // Seed corroboration, last resort: the bulk seed's mappings are
@@ -828,7 +1060,11 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // independently jamo-derived candidate is two independent signals —
   // hallucinated junk (까닥여→퇴창) can never coincide with a candidate we
   // generated. Reached only when nothing validated as a headword.
-  if (seedMapping && seedMapping !== raw && candidates.includes(seedMapping)) return seedMapping;
+  if (seedMapping && seedMapping !== raw && candidates.includes(seedMapping)) return finish(seedMapping);
+
+  // L3: a surface that is itself a dictionary word keeps itself rather
+  // than taking an uncorroborated seed rewrite (봄 stayed 보다).
+  if (rawIsHeadword) return finish(normalizeLemma(raw) || raw);
 
   // Option B structural gate: allow an uncorroborated seed rewrite through
   // when it is structurally consistent with the surface. Ranked below both
@@ -842,10 +1078,10 @@ const variants = [raw, normalizeLemma(raw) || raw];
   // read, only in this last-resort branch.
   if (seedMapping && seedMappingPlausible(raw, seedMapping)) {
     const mKey = globalLemmaKey(seedMapping);
-    if (glmEntryTrust(mKey, await fetchGlmEntry(mKey)).headword) return seedMapping;
+    if (glmEntryTrust(mKey, await fetchGlmEntry(mKey)).headword) return finish(seedMapping);
   }
 
-  return primary || raw;
+  return finish(primary || raw);
 }
 
 // ── seedMappingPlausible ──────────────────────────────────────
@@ -910,16 +1146,18 @@ export async function writeGlobalLemma(surface, cleanedLemma) {
     const snap = await getDoc(ref);
     if (snap.exists()) {
       const existing = snap.data();
+      // L2: merge, so the cleanup's headword flag (a fact about the key, not
+      // the mapping) survives a correction.
       if (existing.cleanedLemma === cleanedLemma) {
         await setDoc(ref, {
           cleanedLemma,
           contributorCount: (existing.contributorCount || 1) + 1,
           updatedAt: new Date().toISOString(),
-        });
+        }, { merge: true });
       } else if (!glmEntryIsOrganic(existing)) {
         // Seed-era rows with rewritten mappings include machine-generated
-        // errors — a manual correction overrides them.
-        await setDoc(ref, { cleanedLemma, contributorCount: 1, updatedAt: new Date().toISOString() });
+        // errors — a manual correction overrides them, vetted rows included.
+        await setDoc(ref, { cleanedLemma, contributorCount: 1, updatedAt: new Date().toISOString() }, { merge: true });
       }
       // Organic conflicting entries keep first-writer-wins.
     } else {
@@ -1072,39 +1310,45 @@ function parseKrDictApiXml(xml, lang, queriedLemma) {
 
 // ── KRDict (English) via Netlify function ─────────────────────
 // No client-side API key needed — key is configured in Netlify env.
-async function fetchKrDictEn(lemma) {
+// L1: two different outcomes, never conflated —
+//   'Definition not found.' → KRDict answered and has no entry (a real miss;
+//                             may trigger the Tier 2 candidate retry).
+//   ''                      → KRDict could not be reached (502/503/504,
+//                             network error). Nothing is saved, no candidate
+//                             retry fires, and the row stays def1-less so a
+//                             later refresh fills it.
+// One client retry after a short pause covers a single bad function
+// instance; the function itself already retries inside its time budget.
+async function fetchKrDict(lemma, lang) {
   if (!lemma) return '';
-  try {
-    const resp = await apiFetch('/api/get-krdict-api', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lemma, lang: 'eng' }),
-    });
-    if (resp.ok) {
-      const json   = await resp.json();
-      const result = parseKrDictApiXml(json.xml || '', 'eng', lemma);
-      if (result) return result;
-    }
-  } catch {}
-  return 'Definition not found.';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1200));
+    try {
+      const resp = await apiFetch('/api/get-krdict-api', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lemma, lang }),
+      });
+      if (resp.ok) {
+        const json   = await resp.json();
+        const result = parseKrDictApiXml(json.xml || '', lang, lemma);
+        return result || 'Definition not found.';
+      }
+      // Only gateway/upstream failures are worth a retry; anything else
+      // (401, 405, 400) will not change on a second try.
+      if (![502, 503, 504].includes(resp.status)) return '';
+    } catch {}
+  }
+  return '';
+}
+
+async function fetchKrDictEn(lemma) {
+  return fetchKrDict(lemma, 'eng');
 }
 
 // ── KRDict (Korean) via Netlify function ──────────────────────
 async function fetchKrDictKo(lemma) {
-  if (!lemma) return '';
-  try {
-    const resp = await apiFetch('/api/get-krdict-api', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lemma, lang: 'kor' }),
-    });
-    if (resp.ok) {
-      const json   = await resp.json();
-      const result = parseKrDictApiXml(json.xml || '', 'kor', lemma);
-      if (result) return result;
-    }
-  } catch {}
-  return 'Definition not found.';
+  return fetchKrDict(lemma, 'kor');
 }
 
 // ── KRDict bilingual ──────────────────────────────────────────
@@ -1112,6 +1356,9 @@ const BILINGUAL_SEPARATOR = '\n\n· · ·\n\n';
 
 async function fetchKrDictBilingual(lemma) {
   const [en, ko] = await Promise.all([fetchKrDictEn(lemma), fetchKrDictKo(lemma)]);
+  // L1: either half unreachable → report the whole lookup as unreachable,
+  // so a half-filled bilingual def1 is never saved.
+  if (en === '' || ko === '') return '';
   const parts = [en, ko].filter(d => d && d !== 'Definition not found.');
   return parts.length === 0 ? 'Definition not found.' : parts.join(BILINGUAL_SEPARATOR);
 }
@@ -1157,10 +1404,12 @@ export async function fetchDefinition(lemma, aviSettings = {}) {
   if (terms.length === 1) return fetchOne(terms[0]);
 
   // Composite: fetch each expanded term and merge
-  const blocks = await Promise.all(terms.map(async (t) => {
-    const def = await fetchOne(t);
-    return def || 'Definition not found.';
-  }));
+  const raw = await Promise.all(terms.map(t => fetchOne(t)));
+  if (raw.includes('__RATE_LIMITED__')) return '__RATE_LIMITED__';
+  // L1: a KRDict-mode block that could not be reached makes the whole
+  // composite unreachable, so a partial merge is never saved as def1.
+  if (mode !== 'api' && raw.some(d => d === '')) return '';
+  const blocks = raw.map(def => def || 'Definition not found.');
   return blocks.join('\n\n-----\n\n');
 }
 

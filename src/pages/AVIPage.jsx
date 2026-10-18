@@ -213,10 +213,13 @@ export function AVIPage({
     const uid = auth.currentUser?.uid;
     if (!uid) return;
 
+    // L6: only a def2 releases a sentence card. A def1 alone (e.g. the
+    // post-import Def1 fill) no longer creates cards before you've decided
+    // whether to study or skip the word.
     const defByNorm = {};
     for (const l of data.lemmaMaster) {
       const k = normalizeLemma(l.lemma);
-      const cb = l.def2 || l.def1 || '';
+      const cb = l.def2 || '';
       if (k && cb) defByNorm[k] = cb;
     }
 

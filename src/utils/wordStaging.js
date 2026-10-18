@@ -32,6 +32,7 @@ import {
   resolveLemmaWithDictionary, fetchDefinitionWithFallback,
 } from './aviUtils.js';
 import { autoCreateWordCard } from './cardFactory.js';
+import { findLemmaEntryAny } from './lemmaSuggest.js';
 
 export async function stageWordInput({
   surface, source, section,
@@ -77,6 +78,12 @@ export async function stageWordInput({
     l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
          normalizeLemma(l.lemma) === normLemma
   );
+  // L4d: variant-aware fallback (입사하다 → 입사(하다), 향상되다 →
+  // 향상(하다/되다)); the row takes the entry's own text so it links.
+  if (!existingLemmaEntry) {
+    const hit = findLemmaEntryAny(data.lemmaMaster, lemmaText);
+    if (hit) { existingLemmaEntry = hit; lemmaText = hit.lemma; normLemma = normalizeLemma(lemmaText); }
+  }
 
   let def1 = '', def2 = '';
   if (existingLemmaEntry) {
@@ -99,6 +106,10 @@ export async function stageWordInput({
           l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
                normalizeLemma(l.lemma) === normLemma
         );
+        if (!existingLemmaEntry) {
+          const hit = findLemmaEntryAny(data.lemmaMaster, lemmaText);
+          if (hit) { existingLemmaEntry = hit; lemmaText = hit.lemma; normLemma = normalizeLemma(lemmaText); }
+        }
       }
       if (existingLemmaEntry) {
         def1 = existingLemmaEntry.def1 || fb.def1;
