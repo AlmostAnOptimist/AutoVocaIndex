@@ -24,12 +24,13 @@ src/
                      QuizzesPage, ContentLibraryPage, GrammarIndexPage, ...)
   components/        shared UI — modals, pickers, nav, DatePicker, Icons,
                      AVILogo, Gazette components
-  hooks/             useFirestore, useAVIData, useLemmaSearch, useAppTheme,
-                     useDragSort, keyboard/pagination helpers
+  hooks/             useFirestore, useAVIData, useLemmaSearch, useSearchAssist,
+                     useAppTheme, useDragSort, keyboard/pagination helpers
   utils/             engines and utilities — fsrs, srsEngine, aviUtils,
                      cardFactory, importEngine, recurrenceEngine,
-                     reviewStatsEngine, lemmaSearchEngine, wordStaging,
-                     echoEngine, quizStateEngine, contentUtils, ttsUtils,
+                     reviewStatsEngine, lemmaSearchEngine, lemmaSuggest,
+                     wordStaging, echoEngine, quizStateEngine, contentUtils,
+                     ttsUtils,
                      dateUtils, ...
   theme/             buildColors, buildStyles, decoAssets, ThemeContext
   assets/            decorative art and gazette-plates/library/ — globbed,
@@ -131,7 +132,7 @@ The app ships a PWA manifest and icons, so a deployment is installable to a phon
 
 The whole architecture in a single trace. You're reading a novel you've cataloged in the Content Library, and it's set as your current source. You meet 훌륭한 and drop it into Word Input.
 
-1. **Resolve.** `resolveLemmaWithDictionary` (`aviUtils.js`) probes the global lemma map with per-key `getDoc` reads — raw key, normalized key, `+요` variant — through the trust gate. On a trusted hit it returns the mapped lemma; otherwise the de-conjugation heuristics generate candidates, validated against your own `lemmaMaster` headwords first, then against the map, with seed corroboration as a last resort.
+1. **Resolve.** `resolveLemmaWithDictionary` (`aviUtils.js`) probes the global lemma map with per-key `getDoc` reads — raw key, normalized key, `+요` variant — through the trust gate. On a trusted hit it returns the mapped lemma; otherwise the de-conjugation heuristics generate candidates, validated against your own `lemmaMaster` headwords first, then against the map, with seed corroboration as a last resort. Import and the Sentence Input picker call the same cascade as `resolveLemmaDetailed`, which also returns the other readings that validate as dictionary words; they appear under the term as one-tap "Or:" chips (훌륭한 has none, but 낮은 offers both 낮 and 낮다). If the lemma matches an existing Lemma Master entry in another spelling (`입사하다` for `입사(하다)`), the row takes that entry's text so it links and inherits its `def2` (`canonicalLemma` in `lemmaSuggest.js`).
 2. **Stage.** A row lands in `wordInputs` — surface form, resolved lemma, and provenance as your current source title and section — via the debounced diff sync.
 3. **Define.** The reference definition arrives through `/api/get-krdict-api` (throttled client-side by the `aviApiRateLimit` setting) into `def1`; you distill your targeted definition into `def2`.
 4. **Correct, maybe.** If the resolution was wrong and you fix the lemma on the row, both loops fire: `writeGlobalLemma` teaches the map (the map loop — next encounter resolves correctly everywhere), and the cascade helpers repair the linked lemma entry and any cards (the master loop). Fixing later in Lemma Master fires only the master loop — the asymmetry is documented in the gotchas guide.

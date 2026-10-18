@@ -62,7 +62,7 @@ Open the live site and walk the same smoke test as setup, because production has
 
 1. **Sign in** with Google (proves the config baked into the bundle and the authorized domain).
 2. **Add a task and reload** (proves a database read and write through the deployed rules).
-3. **Fetch a definition** (proves the functions deployed and can see their env vars — function variables live on Netlify now, not in your `.env`). If it comes back "Definition not found.", open the site's function logs (Logs → Functions → `get-krdict-api`): a line saying `ALLOWED_UIDS is not set` or `uid not on ALLOWED_UIDS` means the allowlist variable is missing or has the wrong uid — fix it and trigger a deploy.
+3. **Fetch a definition** (proves the functions deployed and can see their env vars — function variables live on Netlify now, not in your `.env`). If no definition comes back, open the site's function logs (Logs → Functions → `get-krdict-api`): a line saying `ALLOWED_UIDS is not set` or `uid not on ALLOWED_UIDS` means the allowlist variable is missing or has the wrong uid — fix it and trigger a deploy.
 
 If all three pass, the deployment is done.
 
