@@ -6,12 +6,14 @@
 // module imports utilities and firebase only — NEVER page files (the
 // circular-import / TDZ guard, wordRowUpdater precedent).
 
-import { doc, collection, setDoc, updateDoc, increment } from 'firebase/firestore';
+import { doc, collection, setDoc, updateDoc, increment, arrayUnion } from 'firebase/firestore';
 import { db } from '../firebase.js';
 import { normalizeLemma } from './aviUtils.js';
 import { generateVocabCardAudio, generateSentenceCardAudio } from './ttsUtils.js';
 import { toDateStr, getLogicalToday } from './dateUtils.js';
 import { DEMO, DEMO_CAPS, nonSeededCount } from '../demo/demoConfig.js';
+import { compareHistorySurvivor } from './cardDedupe.js';
+import { seriesSiblingTitles } from './seriesDecks.js';
 
 // ── Demo card budget (7C) ─────────────────────────────────────
 // React state lags behind a burst of creations (callers fire factories from
@@ -122,10 +124,51 @@ export async function autoCreateWordCard(args) {
     if (existingCard) return existingCard.id;
   }
 
+  // SD-D8: one word card per series. A word that already has a card in
+  // another book of the same Content Library series joins that card (this
+  // book's deck is added to it), so its review history carries over and a
+  // review in either deck, or in the series deck, moves the same card.
+  const shared = findSeriesCard({ normLemma, deckName, cards, decks, aviSources: args.aviSources });
+
   // Burst guard — concurrent creations for the same (uid, deck, lemma)
   // all read the same stale cards array, so the check above alone can be
   // missed by every caller in a burst.
-  return withCardCreateLock(`${uid}|${deckName}|${normLemma}`, () => createWordCardUnchecked(args));
+  return withCardCreateLock(`${uid}|${deckName}|${normLemma}`, () => (shared
+    ? joinCardToDeck({ ...args, card: shared, deckName })
+    : createWordCardUnchecked(args)));
+}
+
+const nfcTrim = (s) => String(s || '').normalize('NFC').trim();
+
+// The word card of another book in this source's series, if any (the one
+// with more review history when more than one exists). Pure.
+export function findSeriesCard({ normLemma, deckName, cards, decks, aviSources }) {
+  const siblings = new Set(seriesSiblingTitles(deckName, aviSources));
+  if (!siblings.size) return null;
+  const siblingDeckIds = new Set((decks || []).filter(d => siblings.has(nfcTrim(d.name))).map(d => d.id));
+  if (!siblingDeckIds.size) return null;
+  const hits = (cards || []).filter(c =>
+    c.type !== 'grammar' && c.type !== 'sentence' && c.lemma &&
+    normalizeLemma(c.lemma) === normLemma &&
+    (c.deckIds || []).some(id => siblingDeckIds.has(id)));
+  return hits.sort(compareHistorySurvivor)[0] || null;
+}
+
+// Adds this source's deck (found or created) to an existing card.
+async function joinCardToDeck({ card, deckName, decks, uid, updateCards, updateDecks, aviSources }) {
+  const deckId = await resolveDeckId({
+    uid, deckName, sourceTitle: deckName, decks, aviSources, updateDecks,
+  });
+  if ((card.deckIds || []).includes(deckId)) return card.id;
+  await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { deckIds: arrayUnion(deckId) });
+  await updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) });
+  updateCards(prev => (prev
+    ? prev.map(c => (c.id === card.id ? { ...c, deckIds: [...new Set([...(c.deckIds || []), deckId])] } : c))
+    : prev));
+  updateDecks(prev =>
+    prev.map(d => d.id === deckId ? { ...d, totalCards: (d.totalCards || 0) + 1 } : d)
+  );
+  return card.id;
 }
 
 async function createWordCardUnchecked({

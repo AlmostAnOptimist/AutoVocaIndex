@@ -59,7 +59,15 @@ import {
   GazetteMasthead, GoldRule, BylineRule, GazetteKicker, GazetteHeadline,
   GazetteStandfirst, DropCapLead, GazetteFig, GazetteBox, BoxRow, GazetteSplitFig,
 } from '../components/GazetteComponents.jsx';
+import { SessionIntro, ScorePlate, Rail } from '../components/Ornaments.jsx';
 import { isSubmitEnter } from '../utils/keyUtils.js';
+import {
+  buildSeriesGroups, wordSeries, sentenceSeries, expandDeckSelection,
+  toggleSeriesSelection, toggleDeckSelection, selectionNames,
+} from '../utils/seriesDecks.js';
+
+// O1: views that open with the SessionIntro bookend.
+const QUIZ_SESSION_VIEWS = ['voca_session', 'cloze_session', 'grammar_translation', 'grammar_selection', 'echo_session'];
 
 // Module-level ref updated by QuizzesPage on every render, so all sub-components
 // in this file share the quiz-sounds enabled state without prop drilling.
@@ -251,7 +259,7 @@ function computeTotal(types, typeCounts) {
   return total;
 }
 
-function VocaQuizConfig({ open, decks, onStart, onBack, C, S }) {
+function VocaQuizConfig({ open, decks, seriesGroups = [], onStart, onBack, C, S }) {
   const [config, setConfig] = useState(() => loadConfig(VOCA_CONFIG_KEY, VOCA_DEFAULTS));
 
   const set = (key, val) => setConfig(prev => {
@@ -276,11 +284,9 @@ function VocaQuizConfig({ open, decks, onStart, onBack, C, S }) {
     set('questionTypes', next);
   };
 
-  const toggleDeck = (id) => {
-    set('deckIds', config.deckIds.includes(id)
-      ? config.deckIds.filter(d => d !== id)
-      : [...config.deckIds, id]);
-  };
+  // SD-D5/SD-D6: a series chip stands in for its books; tapping a book while
+  // its series is on switches to that book.
+  const toggleDeck = (id) => set('deckIds', toggleDeckSelection(config.deckIds, id, seriesGroups));
 
   const types      = config.questionTypes || ['multiple'];
   const typeCounts = config.typeCounts    || VOCA_DEFAULTS.typeCounts;
@@ -429,6 +435,10 @@ function VocaQuizConfig({ open, decks, onStart, onBack, C, S }) {
           {!DEMO && vocaDecks.length > 0 && (
             <ConfigRow label="Card pools" C={C}>
               <ToggleChip label="All decks" active={config.deckIds.length === 0} onClick={() => set('deckIds', [])} C={C} />
+              {wordSeries(seriesGroups).map(g => (
+                <ToggleChip key={g.wordId} label={`${g.name} (series)`} active={config.deckIds.includes(g.wordId)}
+                  onClick={() => set('deckIds', toggleSeriesSelection(config.deckIds, g, 'word'))} C={C} />
+              ))}
               {vocaDecks.map(d => (
                 <ToggleChip key={d.id} label={d.name} active={config.deckIds.includes(d.id)} onClick={() => toggleDeck(d.id)} C={C} />
               ))}
@@ -568,10 +578,14 @@ function EchoQuizConfig({ seed, preset = null, onBack, onStart, cards, decks, wo
   }), [baseCtx, itemOf]);
 
   const candidates = useMemo(() => {
-    const ctx = { ...baseCtx, deckIds: config.deckIds, sourceTitle: config.libSource, section: config.libSection, rand: echoRng(seed + reshuffle * 7919) };
+    // Series picks expand to their books' decks (a pick that matches nothing
+    // stays nothing rather than falling back to every deck).
+    const picked = expandDeckSelection(config.deckIds, buildSeriesGroups(aviSources, decks));
+    const deckIds = config.deckIds.length && !picked.length ? ['__none__'] : picked;
+    const ctx = { ...baseCtx, deckIds, sourceTitle: config.libSource, section: config.libSection, rand: echoRng(seed + reshuffle * 7919) };
     const skip = new Set(excluded);
     return sourceEntries(config.source, ctx).filter(e => !skip.has(e.lemmaID)).map(itemOf).filter(Boolean);
-  }, [baseCtx, config.source, config.deckIds, config.libSource, config.libSection, seed, reshuffle, excluded, itemOf]);
+  }, [baseCtx, config.source, config.deckIds, config.libSource, config.libSection, seed, reshuffle, excluded, itemOf, aviSources, decks]);
 
   const addedItems = useMemo(() => added.map(id => itemOf(index.byId.get(id))).filter(Boolean), [added, index, itemOf]);
   const manual = config.source === 'manual';
@@ -592,6 +606,7 @@ function EchoQuizConfig({ seed, preset = null, onBack, onStart, cards, decks, wo
     return librarySectionsWithWords(wordInputs, config.libSource, ordered);
   }, [wordInputs, aviSources, aviSections, config.libSource]);
   const deckChoices = useMemo(() => vocabDecks(decks), [decks]);
+  const seriesGroups = useMemo(() => buildSeriesGroups(aviSources, decks), [aviSources, decks]);
 
   // Search to add your own words, with the AVI search engine (lemmaSearchEngine.js):
   // the same rules as the Lemma Master filter and its "Did you mean" fallback.
@@ -743,9 +758,13 @@ function EchoQuizConfig({ seed, preset = null, onBack, onStart, cards, decks, wo
           {config.source === 'deck' && deckChoices.length > 0 && (
             <ConfigRow label="Decks" C={C}>
               <ToggleChip label="All decks" active={config.deckIds.length === 0} onClick={() => setSource({ deckIds: [] })} C={C} />
+              {wordSeries(seriesGroups).map(g => (
+                <ToggleChip key={g.wordId} label={`${g.name} (series)`} active={config.deckIds.includes(g.wordId)} C={C}
+                  onClick={() => setSource({ deckIds: toggleSeriesSelection(config.deckIds, g, 'word') })} />
+              ))}
               {deckChoices.map(d => (
                 <ToggleChip key={d.id} label={d.name} active={config.deckIds.includes(d.id)} C={C}
-                  onClick={() => setSource({ deckIds: config.deckIds.includes(d.id) ? config.deckIds.filter(x => x !== d.id) : [...config.deckIds, d.id] })} />
+                  onClick={() => setSource({ deckIds: toggleDeckSelection(config.deckIds, d.id, seriesGroups) })} />
               ))}
             </ConfigRow>
           )}
@@ -1542,6 +1561,8 @@ function EchoSummary({ state, save, onRetrySave, onPracticeMissed, onAgain, onDo
           )}
         </div>
       )}
+
+      <Rail label="끝" />
 
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: '8px', justifyContent: 'flex-end' }}>
         {missed.length > 0 && missed.length < sum.itemCount && (
@@ -2938,7 +2959,7 @@ const handleOverride = async (qIdx) => {
     <div style={{ maxWidth: '560px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' }} className="fade-up quiz-session">
       {/* Score */}
       <div style={{ textAlign: 'center' }}>
-                <div style={{ fontFamily: SH.fd, fontSize: '40px', color: C.accent }}>{pct}%</div>
+        <ScorePlate>{pct}%</ScorePlate>
         {rawPct >= 90 && <div style={{ marginTop: '10px', fontSize: '13px', color: C.warning, fontWeight: 500 }}>Excellent work!</div>}
       </div>
 
@@ -3051,6 +3072,8 @@ const handleOverride = async (qIdx) => {
           </div>
         </div>
       )}
+
+      <Rail label="끝" />
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <button style={S.btnGhost} onClick={onDone}>Back to Quizzes</button>
@@ -3609,7 +3632,7 @@ function GrammarTranslationResults({ questions, translations, conceptChoices, as
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }} className="fade-up quiz-session">
       <div style={{ textAlign: 'center' }}>
-        <div style={{ fontFamily: SH.fm, fontSize: '38px', color: C.accent }}>{assessment ? `${score.pct}%` : '—'}</div>
+        <ScorePlate>{assessment ? `${score.pct}%` : '—'}</ScorePlate>
         <div style={{ fontSize: '12px', color: C.textM, marginTop: '4px' }}>
           {assessment
             ? `${formatPoints(score.points)} / ${score.total} points · ${score.fullyCorrect} fully correct`
@@ -3735,6 +3758,8 @@ function GrammarTranslationResults({ questions, translations, conceptChoices, as
           </div>
         );
       })}
+
+      <Rail label="끝" />
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <button style={S.btnGhost} onClick={onDone}>Back to Quizzes</button>
@@ -3959,7 +3984,7 @@ function GrammarSelectionResults({ questions, userSelections, onExplanations, li
   return (
     <div style={{ maxWidth: '680px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }} className="fade-up quiz-session">
       <div style={{ textAlign: 'center' }}>
-        <div style={{ fontFamily: SH.fm, fontSize: '38px', color: C.accent }}>{score.pct}%</div>
+        <ScorePlate>{score.pct}%</ScorePlate>
         <div style={{ fontSize: '12px', color: C.textM, marginTop: '4px' }}>
           {score.points} / {score.total} questions fully right
         </div>
@@ -3980,6 +4005,8 @@ function GrammarSelectionResults({ questions, userSelections, onExplanations, li
           </button>
         </div>
       )}
+
+      <Rail label="끝" />
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <button style={S.btnGhost} onClick={onDone}>Back to Quizzes</button>
@@ -5206,7 +5233,7 @@ function SentenceWithBlank({ sentence, inputForm, revealed, revealedText, C }) {
   );
 }
 
-function ClozeQuizConfig({ open, sentenceDecks, allSentenceDecks, onStart, onBack, C, S }) {
+function ClozeQuizConfig({ open, sentenceDecks, allSentenceDecks, seriesGroups = [], onStart, onBack, C, S }) {
   const [config, setConfig] = useState(() => loadConfig(CLOZE_CONFIG_KEY, CLOZE_DEFAULTS));
 
   const set = (key, val) => setConfig(prev => {
@@ -5215,11 +5242,8 @@ function ClozeQuizConfig({ open, sentenceDecks, allSentenceDecks, onStart, onBac
     return next;
   });
 
-  const toggleDeck = (id) => {
-    set('deckIds', config.deckIds.includes(id)
-      ? config.deckIds.filter(d => d !== id)
-      : [...config.deckIds, id]);
-  };
+  // SD-D5/SD-D6, as in the Vocabulary Quiz.
+  const toggleDeck = (id) => set('deckIds', toggleDeckSelection(config.deckIds, id, seriesGroups));
 
   const canStart = sentenceDecks.length > 0;
 
@@ -5264,6 +5288,10 @@ function ClozeQuizConfig({ open, sentenceDecks, allSentenceDecks, onStart, onBac
             {!DEMO && sentenceDecks.length > 0 && (
             <ConfigRow label="Card pools" C={C} noBorder>
               <ToggleChip label="All decks" active={config.deckIds.length === 0} onClick={() => set('deckIds', [])} C={C} />
+              {sentenceSeries(seriesGroups).map(g => (
+                <ToggleChip key={g.sentenceId} label={`${g.name} (series)`} active={config.deckIds.includes(g.sentenceId)}
+                  onClick={() => set('deckIds', toggleSeriesSelection(config.deckIds, g, 'sentence'))} C={C} />
+              ))}
               {sentenceDecks.map(d => (
                 <ToggleChip
                   key={d.id}
@@ -5677,7 +5705,7 @@ function ClozeQuizResults({ questions, correct, total, onDone, C, S }) {
   return (
     <div style={{ maxWidth: '560px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' }} className="fade-up quiz-session">
       <div style={{ textAlign: 'center' }}>
-                <div style={{ fontFamily: SH.fd, fontSize: '40px', color: C.accent }}>{pct}%</div>
+        <ScorePlate>{pct}%</ScorePlate>
         {rawPct >= 90 && <div style={{ marginTop: '10px', fontSize: '13px', color: C.warning, fontWeight: 500 }}>Excellent!</div>}
       </div>
 
@@ -5728,6 +5756,8 @@ function ClozeQuizResults({ questions, correct, total, onDone, C, S }) {
           </div>
         </div>
       )}
+
+      <Rail label="끝" />
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <button style={S.btnGhost} onClick={onDone}>Back to Quizzes</button>
@@ -5787,6 +5817,13 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   const dsh = settings?.dayStartHour ?? 3;
 
   const [view,      setView]      = useState('home');
+  // O1: the session view whose opening bookend has been dismissed. Cleared
+  // whenever the page leaves the session views, so each new session opens
+  // with the intro (an Echo restart stays in echo_session and skips it).
+  const [introDoneFor, setIntroDoneFor] = useState(null);
+  useEffect(() => {
+    if (!QUIZ_SESSION_VIEWS.includes(view)) setIntroDoneFor(null);
+  }, [view]);
   const [configModal, setConfigModal] = useState(null); // null | 'voca' | 'cloze' | 'grammar' | 'echo'
   const [echoState,   setEchoState]   = useState(null); // Echo session (echoEngine state, E2)
   const [echoSeed,    setEchoSeed]    = useState(0);    // Echo setup shuffle seed, picked per opening
@@ -5880,6 +5917,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   // Use props directly — these come from App's shared useFlashcardData
   const cards = propCards || [];
   const decks  = propDecks || [];
+  const seriesGroups = useMemo(() => buildSeriesGroups(aviSources, propDecks || []), [aviSources, propDecks]);
 
   // Concept links on grammar results (G5): live mastery from the Grammar Index
   // when App passes it, otherwise the level recorded in the quiz corpus.
@@ -6478,6 +6516,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   // ── handleVocaStart ────────────────────────────────────────
   const handleVocaStart = useCallback(async (config, vocaDecks) => {
     if (DEMO) config = { ...config, deckIds: [] }; // demo: all decks (7D)
+    const pickedDeckIds = expandDeckSelection(config.deckIds, seriesGroups); // series → books
     const eligible = enrichedCards.filter(c => {
       if (c.type === 'grammar') return false;
       if (c.type === 'sentence') return false; // voca formats are word-card only; sentence recall lives in cloze
@@ -6485,7 +6524,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       if (config.deckIds.length === 0) {
         return vocaDecks.some(d => (c.deckIds || []).includes(d.id));
       }
-      return config.deckIds.some(id => (c.deckIds || []).includes(id));
+      return pickedDeckIds.some(id => (c.deckIds || []).includes(id));
     });
     // Q2: one card per word.
     const pool = dedupeWordCards(eligible);
@@ -6542,7 +6581,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     setActiveMatchSets(matchSets);
     setQuizConfig(config);
     setView('voca_session');
-  }, [enrichedCards, ensureLemmaMaster, onNotice]);
+  }, [enrichedCards, ensureLemmaMaster, onNotice, seriesGroups]);
 
     const handleVocaFinish = useCallback(async (questions, correct, total, matchMisses = [], matchTotal = 0) => {
     // U8: End before answering anything leaves without saving a 0% result.
@@ -6572,7 +6611,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     const deckIds = quizConfig?.deckIds || [];
     const { score, id: resultId } = await saveResult('voca', correct, total, {
       deckIds,
-      deckNames: deckIds.map(id => deckNameMap[id]).filter(Boolean),
+      deckNames: selectionNames(deckIds, seriesGroups, deckNameMap),
       questionTypes: quizConfig?.questionTypes || [],
       byType,
       missedTerms,
@@ -6585,13 +6624,13 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       setTimeout(() => setConfetti(false), 5500);
     }
     setView('voca_results');
-  }, [saveResult, quizConfig, deckNameMap]);
+  }, [saveResult, quizConfig, deckNameMap, seriesGroups]);
 
    const handleClozeStart = useCallback(async (config) => {
   if (DEMO) config = { ...config, deckIds: [] }; // demo: all decks (7D)
   const sentenceDecks = decks.filter(d => d.name?.endsWith('(sentence mining)'));
   const activeDeckIds = config.deckIds.length > 0
-    ? config.deckIds
+    ? expandDeckSelection(config.deckIds, seriesGroups) // series → books
     : sentenceDecks.map(d => d.id);
 
   const activeSourceNames = new Set(
@@ -6667,7 +6706,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   setClozeConfig({ ...config, activeDeckIds, sourceNames: [...activeSourceNames] });
   setClozeQuestions(questions);
   setView('cloze_session');
-}, [enrichedCards, decks, uid, wordInputs, ensureLemmaMaster, onNotice]);
+}, [enrichedCards, decks, uid, wordInputs, ensureLemmaMaster, onNotice, seriesGroups]);
 
      const handleClozeFinish = useCallback(async (questions, correct, total) => {
        // Missed lemmas + the exact form that filled the blank (Stage A-4) —
@@ -6722,7 +6761,36 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   }
 
   // Sub-views
-  
+
+  // O1: opening bookend — shown before the session mounts, so no session
+  // timers, inputs or audio start underneath it.
+  if (QUIZ_SESSION_VIEWS.includes(view) && introDoneFor !== view && (view !== 'echo_session' || echoState)) {
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    const intro =
+      view === 'voca_session' ? {
+        korean: '어휘 퀴즈', title: 'Vocabulary Quiz',
+        detail: plural(activeQuestions.length, 'question') + (activeMatchSets.length > 0 ? ` · ${plural(activeMatchSets.length, 'matching set')}` : ''),
+      }
+      : view === 'cloze_session' ? {
+        korean: '빈칸 퀴즈', title: 'Cloze Quiz', detail: plural(clozeQuestions.length, 'question'),
+      }
+      : view === 'echo_session' ? {
+        korean: '에코 퀴즈', title: 'Echo Quiz', detail: plural(echoState.items?.length || 0, 'word'),
+      }
+      : {
+        korean: '문법 퀴즈', title: 'Grammar Quiz',
+        detail: `${plural(gramQuestions?.length || 0, 'question')} · ${view === 'grammar_selection' ? 'Selection' : 'Translation'}`,
+        sub: gramInitial ? 'Picking up where you left off' : null,
+      };
+    return (
+      <SessionIntro
+        kind="frame"
+        {...intro}
+        onBegin={() => setIntroDoneFor(view)}
+      />
+    );
+  }
+
   if (view === 'voca_session') {
     return (
       <VocaQuizSession
@@ -7079,6 +7147,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       <VocaQuizConfig
         open={configModal === 'voca'}
         decks={decks}
+        seriesGroups={seriesGroups}
         onStart={(config, vocaDecks) => { setConfigModal(null); handleVocaStart(config, vocaDecks); }}
         onBack={() => setConfigModal(null)}
         C={C} S={S}
@@ -7086,6 +7155,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       <ClozeQuizConfig
         open={configModal === 'cloze'}
         sentenceDecks={decks.filter(d => d.name?.endsWith('(sentence mining)'))}
+        seriesGroups={seriesGroups}
         onStart={(config) => { setConfigModal(null); handleClozeStart(config); }}
         onBack={() => setConfigModal(null)}
         C={C} S={S}

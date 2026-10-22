@@ -12,7 +12,7 @@ import {
   uuid, normalizeLemma, writeGlobalLemma, fetchDefinition, updateLinkedCards,
   isRealDefinition, resolveCorrectedDef1,
 } from './aviUtils.js';
-import { planCardDedupe, applyCardDedupe, dedupeLemmaRows } from './cardDedupe.js';
+import { planCardDedupe, applyCardDedupe, dedupeLemmaRows, planDeckLeave, planIsEmpty } from './cardDedupe.js';
 
 // ── Lemma correction: which definitions win (bug sweep A2/A3) ─────────
 // A corrected row takes the corrected lemma's definitions, not the wrong
@@ -491,6 +491,22 @@ export function makeUpdateRow({
                 ? { back: entryDef2 } : null,
             }))
             .catch(e => console.error('Word Input: card lemma update failed', e));
+        }
+
+        // SD-D8: a word card shared by several books of a series stays on the
+        // old lemma while other books still use it, but leaves the decks of
+        // the books the old lemma has left (the corrected row gets the
+        // corrected lemma's card below).
+        if (scopePre && !scopePre.vacated) {
+          const leftDeckIds = (decks || [])
+            .filter(d => d.name && !d.name.endsWith(' (sentence mining)') && scopePre.wholeSource(d.name))
+            .map(d => d.id);
+          const stayingShared = (cards || []).filter(c => c.type !== 'grammar' && c.type !== 'sentence' && !cardMoves(c));
+          const leavePlan = leftDeckIds.length ? planDeckLeave(stayingShared, leftDeckIds, [originalRow.lemma]) : null;
+          if (leavePlan && !planIsEmpty(leavePlan)) {
+            applyCardDedupe({ uid: auth.currentUser?.uid, plan: leavePlan, updateCards, updateDecks })
+              .catch(e => console.error('Word Input: shared card deck leave failed', e));
+          }
         }
       }
 

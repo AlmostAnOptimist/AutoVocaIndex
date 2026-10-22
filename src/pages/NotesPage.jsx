@@ -8,10 +8,10 @@ import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
-import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { DEMO } from '../demo/demoConfig.js';
 import { stripHtml, sanitizePastedHtml } from '../utils/contentUtils.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
+import { TabRail, PendantFill } from '../components/Ornaments.jsx';
 
 const PRESET_TAGS = ['vocabulary', 'grammar', 'reading', 'listening', 'speaking', 'writing', 'culture', 'review', 'question'];
 const TAB_KEY = 'avi_notes_tab';
@@ -1630,7 +1630,9 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
             )}
 
             {/* Tabs */}
-<div style={{ display: 'flex', gap: '4px', marginBottom: '16px', background: C.cardBg || C.surface, border: `1px solid ${C.border}`, padding: '4px', borderRadius: '12px', width: 'fit-content', ...(isMobile ? { marginLeft: 'auto', marginRight: 'auto' } : {}) }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+            {isMobile && <TabRail side="left" />}
+<div style={{ display: 'flex', gap: '4px', background: C.cardBg || C.surface, border: `1px solid ${C.border}`, padding: '4px', borderRadius: '12px', width: 'fit-content', flexShrink: 0 }}>
               {TABS.map(t => (
                 <button key={t.id} onClick={() => switchTab(t.id)}
                   style={{
@@ -1644,6 +1646,8 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
                   {t.count > 0 && <span style={{ marginLeft: '5px', fontSize: '11px', opacity: 0.6 }}>{t.count}</span>}
                 </button>
               ))}
+            </div>
+            <TabRail />
             </div>
 
             {tab === 'corrections' ? (
@@ -1756,24 +1760,10 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
             flexShrink: 1,
             pointerEvents: 'none',
           }}>
-            {decoDividerSrc ? (
-              <img
-                src={decoDividerSrc}
-                alt=""
-                aria-hidden="true"
-                style={{
-                  position: 'absolute',
-                  top: 0, left: 0, right: 0, bottom: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  objectPosition: 'center center',
-                  opacity: 0.88,
-                }}
-              />
-            ) : (
-              <div style={{ ...decoBlockStyle(C), position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, opacity: 0.5 }} />
-            )}
+            {/* O1: opening pendant in place of the stained-glass image */}
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
+              <PendantFill variant="open" min={200} max={Infinity} top={0} bottom={28} scale={1.5} />
+            </div>
           </div>
         )}
 

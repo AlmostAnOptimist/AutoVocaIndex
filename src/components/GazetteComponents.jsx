@@ -263,7 +263,9 @@ export function DropCapLead({ text, columns = 2 }) {
 // Dispatches, Letters To The Editor. variant="warning" gives the
 // public-notice treatment (e.g. "Sources Gone Adrift").
 
-export function GazetteBox({ title, variant = 'default', children }) {
+// `fill` (O1) makes the box a flex column so a last child such as
+// PendantFill can take up the height left when a grid row stretches it.
+export function GazetteBox({ title, variant = 'default', fill = false, children }) {
   const { C } = useAppTheme();
   const warn = variant === 'warning';
   return (
@@ -271,6 +273,7 @@ export function GazetteBox({ title, variant = 'default', children }) {
       border: `${warn ? 2 : 1}px solid ${warn ? C.warning : C.borderB}`,
       background: warn ? `${C.warning}11` : C.surface,
       padding: '14px 16px',
+      ...(fill && { display: 'flex', flexDirection: 'column' }),
     }}>
       <div style={{
         fontFamily: SH.fb, fontWeight: 700, fontSize: '11px', letterSpacing: '0.13em', textTransform: 'uppercase',

@@ -20,6 +20,7 @@ import { useLibraryOverviewData } from '../hooks/useLibraryOverviewData.js';
 import { getLibraryLeadStory } from '../utils/headlineEngine.js';
 import { typeColor, getSourceStatus } from '../utils/contentUtils.js';
 import { ActivityHeatmap } from './ActivityHeatmap.jsx';
+import { PendantFill, blendHex } from './Ornaments.jsx';
 import {
   GazetteMasthead, GoldRule, BylineRule, GazetteKicker, GazetteHeadline,
   GazetteStandfirst, DropCapLead, GazetteBox, BoxRow, NoticeEntry,
@@ -261,20 +262,24 @@ export function ContentLibraryGazette(props) {
         </div>
       </div>
 
-      {/* Active | Adrift */}
+      {/* Active | Adrift. O1: each column ends in a PendantFill, so
+          whichever list is shorter gets a closing pendant in its spare
+          height (side by side only; stacked on phones there's none). */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '30px' }}>
-        <div>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
           <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '12px', letterSpacing: '0.1em', textTransform: 'uppercase', color: C.accent2, paddingBottom: '6px', borderBottom: `2px solid ${C.accent2}`, marginBottom: '4px' }}>Active</div>
           {activeSources.length === 0
             ? <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', padding: '9px 0' }}>Nothing active.</div>
             : activeSources.map(src => <LibrarySourceItem key={src.id} src={src} sectionsBySource={sectionsBySource} fmtDaysAgo={fmtDaysAgo} onNavigateToSource={onNavigateToSource} C={C} />)
           }
+          {!isMobile && <PendantFill />}
         </div>
-        <GazetteBox title="Sources Gone Adrift" variant={adriftSources.length > 0 ? 'warning' : 'default'}>
+        <GazetteBox title="Sources Gone Adrift" variant={adriftSources.length > 0 ? 'warning' : 'default'} fill>
           {adriftSources.length === 0
             ? <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>Nothing adrift.</div>
             : adriftSources.map(src => <LibrarySourceItem key={src.id} src={src} sectionsBySource={sectionsBySource} fmtDaysAgo={fmtDaysAgo} onNavigateToSource={onNavigateToSource} faded C={C} />)
           }
+          {!isMobile && <PendantFill ground={adriftSources.length > 0 ? blendHex(C.bg, C.warning, 0x11 / 255) : C.surface} />}
         </GazetteBox>
       </div>
 

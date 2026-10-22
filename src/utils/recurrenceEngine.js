@@ -1,4 +1,4 @@
-import { getLogicalToday, toDateStr, parseDate, getTaskDates } from './dateUtils.js';
+import { getLogicalToday, toDateStr, parseDate, getTaskDates, isPast, taskLastDate } from './dateUtils.js';
 
 // F1 GUARD: recurrence and multi-date due dates are mutually exclusive by
 // design, and push tasks are single-date. Recurring/push logic below only
@@ -134,6 +134,27 @@ function getNthWeekday(year, month, dow, n) {
   d.setDate(d.getDate() + (n - 1) * 7);
   if (d.getMonth() !== month) return null;
   return d;
+}
+
+// ── Overdue / Unscheduled membership ─────────────────────────
+// One definition shared by the Overdue page lists and the sidebar badge.
+// The badge used to count its own way: it left out recurring tasks still
+// inside their window (the page lists them) and counted persistent
+// dateless tasks (the page leaves them out).
+// today: the logical day as a Date (defaults to getLogicalToday(dsh)).
+export function isOverdueTask(t, dsh, today = getLogicalToday(dsh)) {
+  if (!t || t.completed) return false;
+  // Overdue = the LAST due date has passed (multi-date model).
+  const d = parseDate(taskLastDate(t));
+  if (!d || !isPast(d, dsh)) return false;
+  if (!t.recurrence || t.recurrence.type === 'none') return true;
+  if (t.recurrence.type === 'daily') return false;
+  const windowEnd = getWindowEnd(t);
+  return !!windowEnd && today <= windowEnd;
+}
+
+export function isUnscheduledTask(t) {
+  return !!t && getTaskDates(t).length === 0 && !t.persistent;
 }
 
 export function getWindowEnd(task) {

@@ -26,6 +26,7 @@ import {
 } from '../utils/aviUtils.js';
 import { planDeckLeave, planIsEmpty, applyCardDedupe } from '../utils/cardDedupe.js';
 import { refreshRenamedCardAudio } from '../utils/ttsUtils.js';
+import { TabRail } from '../components/Ornaments.jsx';
 
 // A8: cards renamed through updateLinkedCards get word audio for their new word.
 setRenamedCardsHandler(refreshRenamedCardAudio);
@@ -458,6 +459,7 @@ export function AVIPage({
             }}
           />
         )}
+        <TabRail />
       </div>
       )}
 

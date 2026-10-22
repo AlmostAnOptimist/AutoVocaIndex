@@ -9,6 +9,7 @@ import { useDragSort } from '../hooks/useDragSort.js';
 import { makeTaskSortComparator, applyDragOrder } from '../utils/dragSort.js';
 import { getNextOccurrence } from '../utils/recurrenceEngine.js';
 import { CATEGORIES } from '../constants.js';
+import { TabRail, PendantFill } from '../components/Ornaments.jsx';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -828,7 +829,8 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
 
   return (
     <div className="fade-up">
-      <div style={S.agendaTabs}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: S.agendaTabs.marginBottom }}>
+      <div style={{ ...S.agendaTabs, marginBottom: 0, flexShrink: 0 }}>
         {[
           { id: 'week',    l: 'This Week'  },
           { id: 'month',   l: 'This Month' },
@@ -843,13 +845,19 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
           </div>
         ))}
       </div>
+      <TabRail />
+      </div>
 
       {tab === 'month' ? (
         <MonthCalendar tasks={[...tasks, ...followUpVirtuals]} dsh={dsh} C={C} S={S} onEdit={onEdit} />
       ) : tab === 'planner' ? (
         <PlannerView tasks={[...tasks, ...followUpVirtuals]} clSources={clSources} clSections={clSections} dsh={dsh} C={C} S={S} onEdit={onEdit} onDirtyChange={(d) => { plannerDirtyRef.current = d; }} onPlannerCommit={onPlannerCommit} />
       ) : (
-        grouped.length === 0
+        // O1: desktop gets a 120px right margin holding a closing pendant
+        // that runs down beside the week.
+        <div style={{ display: 'flex', gap: '24px', alignItems: 'stretch' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+        {grouped.length === 0
           ? <div style={S.emptyState}>Nothing scheduled this week.</div>
           : grouped.map(([date, ts]) => (
             <div key={date} style={S.dayGroup}>
@@ -888,7 +896,14 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
                 ))}
               </div>
             </div>
-          ))
+          ))}
+        </div>
+        {!isMobile && (
+          <div style={{ width: '120px', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <PendantFill min={160} max={560} top={4} bottom={16} />
+          </div>
+        )}
+        </div>
       )}
 
       {pendingTab && (

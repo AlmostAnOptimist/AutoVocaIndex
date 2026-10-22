@@ -17,7 +17,9 @@ function daysBetween(fromStr, toStr) {
 
 // ── Content Library ──────────────────────────────────────────
 
-const ADRIFT_HEADLINE_THRESHOLD   = 3;
+// Any adrift source leads, ahead of the Queue Report (Oct 2026).
+// Was 3, which let a queue pick take the headline over one or two drifters.
+const ADRIFT_HEADLINE_THRESHOLD   = 1;
 const RECENT_MASTERY_WINDOW_DAYS  = 2;
 const OPEN_QUESTION_STALE_DAYS    = 14;
 const TIER_LABEL = { grammar: 'Study', mining: 'Mining', casual: 'Casual' };
@@ -104,18 +106,38 @@ export function getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries
     if (tierSpread.length > 1) {
       p2.push(`The drift spans ${tierSpread.map(x => `${x.n} in ${TIER_LABEL[x.tk]}`).join(', ')}.`);
     }
-    const withWriting = adriftSources.filter(s =>
-      (allNotes || []).some(n => n.linkedSourceId === s.id) ||
-      (correctionSessions || []).some(c => c.sourceId === s.id)).length;
-    p2.push(withWriting > 0
-      ? `${withWriting} of the ${adriftSources.length} already ${withWriting === 1 ? 'has' : 'have'} notes or corrections on file — a foothold for whichever picks back up first.`
-      : `None of the ${adriftSources.length} has any notes or corrections on file yet.`);
+    // With a single drifter, para1 already covers its notes/corrections.
+    if (adriftSources.length > 1) {
+      const withWriting = adriftSources.filter(s =>
+        (allNotes || []).some(n => n.linkedSourceId === s.id) ||
+        (correctionSessions || []).some(c => c.sourceId === s.id)).length;
+      p2.push(withWriting > 0
+        ? `${withWriting} of the ${adriftSources.length} already ${withWriting === 1 ? 'has' : 'have'} notes or corrections on file — a foothold for whichever picks back up first.`
+        : `None of the ${adriftSources.length} has any notes or corrections on file yet.`);
+    }
 
+    // The Queue comes after the drift: the front-runner if one matches the
+    // current level range, otherwise how many titles are waiting.
+    let queueFront = null;
+    for (const tk of ['grammar', 'mining', 'casual']) {
+      const exact = (queueByTier?.[tk] || []).find(s => s._exact);
+      if (exact) { queueFront = { src: exact, tk }; break; }
+    }
+    const queuedTotal = ['grammar', 'mining', 'casual'].reduce((n, tk) => n + (queueByTier?.[tk] || []).length, 0);
+    if (queueFront) {
+      p2.push(`Over in the Queue, "${queueFront.src.title}" leads the ${TIER_LABEL[queueFront.tk]} tier, matched to your current level range${queuedTotal > 1 ? `, with ${queuedTotal - 1} other ${queuedTotal - 1 === 1 ? 'title' : 'titles'} waiting behind it` : ''}.`);
+    } else if (queuedTotal > 0) {
+      p2.push(`Meanwhile, ${queuedTotal} ${queuedTotal === 1 ? 'title waits' : 'titles wait'} in the Queue.`);
+    }
+
+    const single = adriftSources.length === 1;
     return {
       kicker: 'Notices',
-      headline: `${adriftSources.length} Sources Gone Adrift`,
-      standfirst: 'No activity past the adrift threshold on several sources at once.',
-      leadParagraph: [para1, p2.join(' ')],
+      headline: single ? `${stalest.title} Has Gone Adrift` : `${adriftSources.length} Sources Gone Adrift`,
+      standfirst: single
+        ? 'No activity on this source past the adrift threshold.'
+        : 'No activity past the adrift threshold on several sources at once.',
+      leadParagraph: [para1, p2.join(' ')].filter(Boolean),
       subjects: namedSubjects.map(s => ({ id: s.id, title: s.title })),
     };
   }

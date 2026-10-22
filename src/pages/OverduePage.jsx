@@ -1,10 +1,11 @@
 import { useMemo } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { TaskItem } from '../components/TaskItem.jsx';
-import { parseDate, isPast, getLogicalToday, getLogicalDateStr, toDateStr, getTaskDates, taskAnchorDate, taskLastDate, isDateDone } from '../utils/dateUtils.js';
-import { getWindowEnd } from '../utils/recurrenceEngine.js';
+import { parseDate, getLogicalToday, getLogicalDateStr, toDateStr, getTaskDates, taskAnchorDate, isDateDone } from '../utils/dateUtils.js';
+import { isOverdueTask, isUnscheduledTask } from '../utils/recurrenceEngine.js';
 import { SH } from '../theme/buildStyles.js';
 import { compareByPriorityPushCategoryTitle } from '../utils/dragSort.js';
+import { PendantFill } from '../components/Ornaments.jsx';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -142,16 +143,8 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile }) {
   const logicalDayStr = getLogicalDateStr(dsh);
   const overdue = useMemo(() => {
     const today = parseDate(logicalDayStr);
-    return tasks.filter(t => {
-      if (t.completed) return false;
-      // Overdue = the LAST due date has passed (multi-date model).
-      const d = parseDate(taskLastDate(t));
-      if (!d || !isPast(d, dsh)) return false;
-      if (!t.recurrence || t.recurrence.type === 'none') return true;
-      if (t.recurrence.type === 'daily') return false;
-      const windowEnd = getWindowEnd(t);
-      return windowEnd && today <= windowEnd;
-    }).sort((a, b) => {
+    // Shared with the sidebar badge (recurrenceEngine) so the two agree.
+    return tasks.filter(t => isOverdueTask(t, dsh, today)).sort((a, b) => {
       // 1. Date ascending (oldest first)
       const da = parseDate(taskAnchorDate(a)), db = parseDate(taskAnchorDate(b));
       if (da && db && da.getTime() !== db.getTime()) return da - db;
@@ -161,7 +154,7 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile }) {
   }, [tasks, dsh, logicalDayStr]);
 
   const unscheduled = useMemo(() => {
-    return tasks.filter(t => getTaskDates(t).length === 0 && !t.persistent).sort(compareByPriorityPushCategoryTitle);
+    return tasks.filter(isUnscheduledTask).sort(compareByPriorityPushCategoryTitle);
   }, [tasks]);
 
 
@@ -224,8 +217,9 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile }) {
         </div>
       </div>
 
-      {/* RIGHT — Mini calendar */}
-      <div>
+      {/* RIGHT — Mini calendar. O1: stretched to the row so the closing
+          pendant under the calendar grows when the lists run long. */}
+      <div style={{ alignSelf: 'stretch', display: 'flex', flexDirection: 'column' }}>
         <div style={S.sectionHeader}>
           <div style={S.sectionTitle}>
             <div style={S.sectionAccent(C.accent)} />
@@ -240,6 +234,7 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile }) {
         }}>
           <MiniCalendar tasks={tasks} dsh={dsh} C={C} />
         </div>
+        <PendantFill reserve min={160} max={480} top={0} bottom={10} />
       </div>
 
     </div>

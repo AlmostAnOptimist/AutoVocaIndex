@@ -42,6 +42,7 @@ export function buildColors(theme) {
     text: '#e8e0d0', textS: '#b8a888', textM: '#8c4a1f',
     accent: '#F5B800', accentSoft: 'rgba(245,184,0,0.12)',
     accent2: '#1a5c5a', accent2Soft: 'rgba(26,92,90,0.20)',
+    accentText: '#2A1F00', // dark ink on bright yellow (white was hard to read)
     danger: '#c04838', success: '#4A9678', warning: '#d4920a',
     tL: '#2A7868', tLa: '#E0922E', tH: '#A89A3E', tF: '#B8762A',
     logoText: '#F5B800',
@@ -53,6 +54,7 @@ if (theme === 'hanok') return { ...sh,
     text: '#DBC5A0', textS: '#B8A888', textM: '#8C8275',
     accent: '#EBA955', accentSoft: 'rgba(235,169,85,0.18)',
     accent2: '#9E978D', accent2Soft: 'rgba(158,151,141,0.2)',
+    accentText: '#2A1F00', // dark ink on ginkgo gold (white was hard to read)
     danger: '#B8453A', success: '#5C8A6E', warning: '#D9963E',
     tL: '#7C9488', tLa: '#C4843A', tH: '#8A8040', tF: '#9C7A4A',
     logoText: '#EBA955',

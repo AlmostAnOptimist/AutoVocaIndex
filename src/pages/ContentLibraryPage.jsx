@@ -10,11 +10,11 @@ import { playSound } from '../utils/soundEngine.js';
 import { toDateStr, getLogicalToday, getLogicalDateStr } from '../utils/dateUtils.js';
 import { NotesPage } from './NotesPage.jsx';
 import { ContentLibraryGazette } from '../components/ContentLibraryGazette.jsx';
-import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
 import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded } from '../utils/contentUtils.js';
 import { DEMO } from '../demo/demoConfig.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
+import { TabRail, PendantFill } from '../components/Ornaments.jsx';
 
 // ── Family grouping (D1) ──────────────────────────────────────
 const FAMILY_ORDER    = ['grammar', 'reading', 'listening', 'reference'];
@@ -875,8 +875,14 @@ function SourceDetailPanel({
         ? { position: 'fixed', top: '74px', bottom: '56px', left: 0, right: 0, zIndex: 60, overflow: 'hidden', background: C.surface }
           : { position: 'relative', width: '600px', minWidth: '600px', height: '100%', overflow: 'hidden', borderLeft: `1px solid ${C.border}`, background: C.surface }}>
 
-      {/* ── Header — fixed behind sections (z-index 1) ── */}
-      <div ref={headerRef} style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1, background: C.surface, borderBottom: `1px solid ${C.border}`, padding: '16px 18px 12px' }}>
+      {/* Scroll area — holds the sticky header and the sections, under the
+          footer (z-index 3). The header sticks at the top and the sections
+          slide up over it. It used to sit behind a pointer-events:none
+          scroll layer, which iOS would not touch-scroll. */}
+      <div className="cl-scroll-area" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflowY: 'auto', zIndex: 2, scrollPaddingBottom: footerH, scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
+
+      {/* ── Header — sticks behind sections (z-index 1) ── */}
+      <div ref={headerRef} style={{ position: 'sticky', top: 0, zIndex: 1, background: C.surface, borderBottom: `1px solid ${C.border}`, padding: '16px 18px 12px' }}>
 
         {/* Title row */}
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '10px' }}>
@@ -1096,9 +1102,8 @@ function SourceDetailPanel({
           )}
         </div>
 
-      {/* Scroll area — over header (z-index 2), under footer (z-index 3) */}
-      <div className="cl-scroll-area" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflowY: 'auto', zIndex: 2, paddingTop: headerH, paddingBottom: footerH, pointerEvents: 'none', scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
-        <div style={{ background: C.surface, minHeight: '100%', pointerEvents: 'auto' }}>
+        {/* Sections — slide over the sticky header (z-index 2) */}
+        <div style={{ position: 'relative', zIndex: 2, background: C.surface, minHeight: `calc(100% - ${headerH}px)` }}>
 
         {/* Grammar — collapsible, scrolls with sections */}
         {grammarTerms.length > 0 && (
@@ -1232,6 +1237,10 @@ function SourceDetailPanel({
             </div>
           )}
         </div>
+
+        {/* Footer clearance — a real spacer, since iOS ignores padding-bottom
+            on scroll containers */}
+        <div aria-hidden="true" style={{ height: footerH }} />
 
       </div>
       </div>
@@ -2719,8 +2728,9 @@ export function ContentLibraryPage({
       `}</style>
 
       {/* Tab bar */}
-      <div ref={tabBarRef} style={{ marginBottom: '8px', display: 'flex', justifyContent: isMobile ? 'center' : 'flex-start' }}>
-        <div style={{ display: 'flex', gap: '4px', background: C.cardBg || C.surface, border: `1px solid ${C.border}`, padding: '4px', borderRadius: '12px', width: 'fit-content' }}>
+      <div ref={tabBarRef} style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', justifyContent: isMobile ? 'center' : 'flex-start' }}>
+        {isMobile && <TabRail side="left" />}
+        <div style={{ display: 'flex', gap: '4px', background: C.cardBg || C.surface, border: `1px solid ${C.border}`, padding: '4px', borderRadius: '12px', width: 'fit-content', flexShrink: 0 }}>
           {['overview', 'library', 'notes', 'archive'].map(t => {
             const active = activeTab === t;
             return (
@@ -2734,6 +2744,7 @@ export function ContentLibraryPage({
             );
           })}
         </div>
+        <TabRail />
       </div>
 
       {activeTab === 'library' && (
@@ -2793,9 +2804,10 @@ export function ContentLibraryPage({
                 current sidebar width (E1: reactive, sidebar-aware) */}
             {showDecoPanel && (
               <div style={{ flex: 1, position: 'relative', overflow: 'hidden', pointerEvents: 'none', flexShrink: 1, minWidth: 0 }}>
-                {decoDividerSrc
-                  ? <img src={decoDividerSrc} alt="" aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center center', opacity: 0.88 }} />
-                  : <div style={{ ...decoBlockStyle(C), position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, opacity: 0.5 }} />}
+                {/* O1: opening pendant in place of the stained-glass image */}
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
+                  <PendantFill variant="open" min={200} max={Infinity} top={0} bottom={28} scale={1.5} />
+                </div>
               </div>
             )}
 
@@ -2959,9 +2971,10 @@ export function ContentLibraryPage({
             </div>
             {showDecoPanel && (
               <div style={{ flex: 1, position: 'relative', overflow: 'hidden', pointerEvents: 'none', flexShrink: 1, minWidth: 0 }}>
-                {decoDividerSrc
-                  ? <img src={decoDividerSrc} alt="" aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center center', opacity: 0.88 }} />
-                  : <div style={{ ...decoBlockStyle(C), position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, opacity: 0.5 }} />}
+                {/* O1: opening pendant in place of the stained-glass image */}
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
+                  <PendantFill variant="open" min={200} max={Infinity} top={0} bottom={28} scale={1.5} />
+                </div>
               </div>
             )}
             {selectedSource ? (

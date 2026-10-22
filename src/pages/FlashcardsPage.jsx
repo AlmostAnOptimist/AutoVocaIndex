@@ -15,7 +15,8 @@ import {
 } from '../utils/fsrs.js';
 import { playSound } from '../utils/soundEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
-import { planCardDedupe } from '../utils/cardDedupe.js';
+import { planCardDedupe, mergeSameNameDecks, planSeriesShare, applySeriesShare } from '../utils/cardDedupe.js';
+import { buildSeriesGroups, wordSeries, sentenceSeries, isSeriesToken, SENTENCE_DECK_SUFFIX } from '../utils/seriesDecks.js';
 import { getLogicalDateStr } from '../utils/dateUtils.js';
 import { queueWrite, isNotFound } from '../utils/queuedWrite.js';
 import { runSpikeForecast, DAILY_CAP } from '../utils/srsEngine.js';
@@ -25,6 +26,7 @@ import { GazetteBox, BoxRow, GazetteMasthead, GoldRule, BylineRule, RecordsStrip
 import { Icons } from '../components/Icons.jsx';
 import { playCardAudio, playAudioUrl, generateGrammarCardAudio } from '../utils/ttsUtils.js';
 import { GrammarCardPicker } from '../components/GrammarCardPicker.jsx';
+import { SessionIntro, Medallion, MiniRule, Pendant } from '../components/Ornaments.jsx';
 import { GRAMMAR_MASTERY } from '../constants.js';
 import { DEMO } from '../demo/demoConfig.js';
 
@@ -90,6 +92,14 @@ function renderSentenceHighlight(sentence, inputForm, C) {
   );
 }
 
+// SD-D2: of two cards for one word, a series deck shows the more overdue
+// one: a reviewed card before a new one, then the earlier due date.
+function moreOverdue(a, b) {
+  const an = isNewCard(a), bn = isNewCard(b);
+  if (an !== bn) return !an;
+  return (getDueDateStr(a) || '9999') < (getDueDateStr(b) || '9999');
+}
+
 function deckType(deck) {
   if (!deck || deck.id === 'deck_grammar') return 'grammar';
   if (deck.id === 'all' || deck.id === 'all_words' || deck.id === 'all_sentences') return 'virtual';
@@ -122,7 +132,10 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 
   const initialPhase = manualCards.length > 0 ? 'manual' : dueCards.length > 0 ? 'due' : 'opening_boundary';
   const [phase,            setPhase]            = useState(initialPhase);
-  const [queue,            setQueue]            = useState(() => manualCards.length > 0 ? [...manualCards] : dueCards.length > 0 ? [...dueCards] : []);
+  // O1: opening bookend. Shown once when a session starts straight into
+  // cards; 'Nothing due today' has its own screen, so it skips this.
+  const [introOpen,        setIntroOpen]        = useState(initialPhase === 'manual' || initialPhase === 'due');
+  const [queue,           setQueue]            = useState(() => manualCards.length > 0 ? [...manualCards] : dueCards.length > 0 ? [...dueCards] : []);
   const [againCounts,      setAgainCounts]      = useState({}); // cardId -> Again count this phase
   const [revealed,         setRevealed]         = useState(false);
   const [revealedSections, setRevealedSections] = useState({});
@@ -282,7 +295,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     setRevealed(true);
   }, [revealed]);
 
-  const inReview = !!card && ['manual', 'due', 'new', 'extra'].includes(phase);
+  const inReview = !introOpen && !!card && ['manual', 'due', 'new', 'extra'].includes(phase);
 
   useKeyShortcuts(
     {
@@ -414,7 +427,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onCancel);
     };
-  }, [phase]);
+  }, [phase, introOpen]); // O1: the first card mounts when the intro closes
 
   // Clear any fling transform once the next card mounts, so it appears centred
   // (paired with the swipe fling in onEnd above). No-op for non-swipe advances,
@@ -427,27 +440,50 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     el.style.opacity = '';
   }, [cardId, turn]);
 
-  // ── Finished ─────────────────────────────────────────────
+  // ── Opening bookend (O1) ─────────────────────────────────
+  if (introOpen) {
+    const detail = phase === 'manual'
+      ? `${manualCards.length} selected`
+      : `${dueCards.length} due${newCards.length > 0 ? ` · ${newCards.length} new` : ''}`;
+    return (
+      <SessionIntro
+        kind="medallion"
+        korean="복습"
+        title="Review Session"
+        detail={detail}
+        sub={reversed ? 'Reversed' : null}
+        onBegin={() => setIntroOpen(false)}
+        onExit={onEnd}
+      />
+    );
+  }
+
+  // ── Finished (O1: closing bookend) ───────────────────────
   if (phase === 'finished') {
     const total = successCount + carriedOver;
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', gap: '20px' }} className="fade-up">
-        <div style={{ fontFamily: SH.fd, fontSize: '28px', color: C.text }}>Session complete</div>
-        <div style={{ display: 'flex', gap: '24px' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontFamily: SH.fm, fontSize: '24px', color: C.accent }}>{successCount}</div>
-            <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>reviewed</div>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px' }} className="fade-up">
+        <Medallion>
+          <div style={{ fontFamily: SH.fk, fontSize: '34px', fontWeight: 700, color: C.accent, lineHeight: 1 }}>완료</div>
+          <div style={{ fontFamily: SH.fd, fontSize: '18px', color: C.text }}>Session complete</div>
+          <MiniRule />
+          <div style={{ display: 'flex', gap: '14px', marginTop: '2px' }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.accent }}>{successCount}</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>reviewed</div>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.danger }}>{againTotal}</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>again</div>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontFamily: SH.fm, fontSize: '22px', color: C.textM }}>{carriedOver}</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px', whiteSpace: 'nowrap' }}>carried over</div>
+            </div>
           </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontFamily: SH.fm, fontSize: '24px', color: C.danger }}>{againTotal}</div>
-            <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>again</div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontFamily: SH.fm, fontSize: '24px', color: C.textM }}>{carriedOver}</div>
-            <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>carried over</div>
-          </div>
-        </div>
-        <button style={S.btnPrimary} onClick={onEnd}>Done</button>
+        </Medallion>
+        <Pendant variant="close" style={{ marginTop: '-1px' }} />
+        <button style={{ ...S.btnPrimary, marginTop: '28px' }} onClick={onEnd}>Done</button>
       </div>
     );
   }
@@ -463,6 +499,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     }
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', gap: '16px', maxWidth: '480px', margin: '0 auto' }} className="fade-up">
+        <Pendant variant="open" height={110} />
         <div style={{ fontFamily: SH.fd, fontSize: '22px', color: C.text, textAlign: 'center' }}>
           Nothing due today
         </div>
@@ -962,7 +999,7 @@ function DeckManager({ decks, cards, onDelete, onClose, C, S }) {
 
 // ── Main page ─────────────────────────────────────────────────
 // onEchoDeck(deckId) (X3): opens the Echo setup on the Quizzes page with that deck chosen.
-export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {}, onEchoDeck = null, onNotice = null }) {
+export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {}, onEchoDeck = null, onNotice = null, aviSources = [] }) {
   const { C, S } = useAppTheme();
   const [session,           setSession]           = useState(null);
   const [managing,          setManaging]          = useState(false);
@@ -1144,6 +1181,53 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   // T4: todayStr so due counts move on when the day flips with the page open.
   }, [enrichedCards, dsh, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Series decks (SD-D1–SD-D4) ────────────────────────────
+  // Virtual decks pooling the cards of a Content Library series' books: no
+  // deck doc, the books' own cards, so a review here or in a book's deck
+  // moves the same card. A word shared by two books is one card (SD-D8); a
+  // word still carded separately in each shows once, the more overdue copy.
+  const seriesGroups = useMemo(() => buildSeriesGroups(aviSources, decks), [aviSources, decks]);
+  const seriesDecks = useMemo(() => {
+    const word = new Set(wordSeries(seriesGroups).map(g => g.name));
+    const sent = new Set(sentenceSeries(seriesGroups).map(g => g.name));
+    const out = [];
+    for (const g of seriesGroups) {
+      if (word.has(g.name)) out.push({ id: g.wordId, name: g.name, memberIds: g.wordDeckIds });
+      if (sent.has(g.name)) out.push({ id: g.sentenceId, name: g.name + SENTENCE_DECK_SUFFIX, memberIds: g.sentenceDeckIds });
+    }
+    return out;
+  }, [seriesGroups]);
+
+  const seriesPool = useCallback((sd) => {
+    if (!enrichedCards || !sd) return [];
+    const members = new Set(sd.memberIds);
+    const best = new Map();
+    for (const c of enrichedCards) {
+      if (c.type === 'grammar' || isCardPaused(c)) continue;
+      if (!(c.deckIds || []).some(id => members.has(id))) continue;
+      const key = c.type === 'sentence'
+        ? `s\u0000${normalizeLemma(c.lemma || '')}\u0000${(c.sentence || c.front || '').normalize('NFC')}`
+        : `w\u0000${normalizeLemma(c.lemma || c.front || '')}`;
+      const cur = best.get(key);
+      if (!cur || moreOverdue(c, cur)) best.set(key, c);
+    }
+    return [...best.values()];
+  }, [enrichedCards, isCardPaused]);
+
+  const seriesStats = useMemo(() => {
+    const out = {};
+    for (const sd of seriesDecks) {
+      const pool = seriesPool(sd);
+      out[sd.id] = {
+        total: pool.length,
+        due:   pool.filter(c => isDueToday(c, dsh ?? 3)).length,
+        new:   pool.filter(c => isNewCard(c)).length,
+      };
+    }
+    return out;
+  // todayStr: due counts move on when the day flips with the page open.
+  }, [seriesDecks, seriesPool, dsh, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Recently studied decks (up to 4, sorted by lastStudied desc) ─
   const recentDecks = useMemo(() => {
     return [...decks]
@@ -1202,6 +1286,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     if (deckId === 'all')            pool = enrichedCards.filter(c => c.type !== 'grammar' && !isCardPaused(c));
     else if (deckId === 'all_words') pool = enrichedCards.filter(c => c.type === 'vocab' && !isCardPaused(c));
     else if (deckId === 'all_sentences') pool = enrichedCards.filter(c => c.type === 'sentence' && !isCardPaused(c));
+    else if (isSeriesToken(deckId))  pool = seriesPool(seriesDecks.find(sd => sd.id === deckId));
     else                             pool = enrichedCards.filter(c => (c.deckIds || []).includes(deckId) && c.type !== 'grammar');
 
     if (!pool.length) return;
@@ -1236,7 +1321,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     const reversed = deckObj?.reversed === true && deckType(deckObj) === 'word';
 
     setSession({ deckId, dueCards: due, newCards, extraCards: extra, nextDueDate, reversed });
-  }, [enrichedCards, dsh, decks, isCardPaused]);
+  }, [enrichedCards, dsh, decks, isCardPaused, seriesPool, seriesDecks]);
 
   // ── Start a manual Grammar Deck session from a picked, ordered set of cardIds ─
   // Used by "View Card" (single card) and the Grammar Deck picker (multiple).
@@ -1319,7 +1404,8 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   // Firestore with due=past (from when Again was pressed), so they surface first
   // at the next session start with no additional writes needed.
   const handleEndSession = useCallback(async () => {
-    if (!DEMO && uid && session?.deckId && !['all', 'all_words', 'all_sentences'].includes(session.deckId)) {
+    // Series decks are virtual (no deck doc to stamp).
+    if (!DEMO && uid && session?.deckId && !['all', 'all_words', 'all_sentences'].includes(session.deckId) && !isSeriesToken(session.deckId)) {
       const now = new Date().toISOString();
       // S6: queued, so ending a session never waits on the network.
       const deckId = session.deckId;
@@ -1404,10 +1490,24 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   const handleCleanup = useCallback(async () => {
     if (!uid) return;
 
+    // Decks sharing one name (a rename onto a title that already had a
+    // deck) are merged first, so the passes below see one deck per source.
+    let mergeNote = null;
+    try {
+      const merged = await mergeSameNameDecks({ uid, updateCards, updateDecks });
+      if (merged?.merges?.length) {
+        const names = merged.merges.map(m => `“${m.name}”`).join(', ');
+        mergeNote = `Merged duplicate deck${merged.merges.length !== 1 ? 's' : ''} ${names} (${merged.moved} card${merged.moved !== 1 ? 's' : ''} moved in`
+          + (merged.duplicates ? `, ${merged.duplicates} duplicate${merged.duplicates !== 1 ? 's' : ''} removed)` : ')');
+      }
+    } catch (e) {
+      console.error('Flashcards: duplicate deck merge failed', e);
+    }
+
     // S5: decks are read fresh along with the cards. The in-memory list can
     // miss a deck made on another device since the last refresh, and every
     // card in it then looked "orphaned" and was deleted.
-    let allCardsForCleanup, deckIdSet;
+    let allCardsForCleanup, deckIdSet, freshDecks;
     try {
       const [snap, deckSnap] = await Promise.all([
         getDocs(collection(db, 'users', uid, 'flashcards')),
@@ -1415,9 +1515,29 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       ]);
       allCardsForCleanup = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       deckIdSet = new Set([...deckSnap.docs.map(d => d.id), ...decks.map(d => d.id)]);
+      freshDecks = deckSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     } catch (e) {
       console.error('Flashcards: cleanup read failed', e);
       return;
+    }
+
+    // SD-D8: a word carded separately in two books of one series becomes
+    // one card in both decks (the one with more review history). Backless
+    // cards are left to the pass below.
+    let shareNote = null;
+    try {
+      const sharePlan = planSeriesShare(allCardsForCleanup.filter(c => c.back), buildSeriesGroups(aviSources, freshDecks));
+      if (sharePlan.deletes.length || sharePlan.cardUpdates.length) {
+        await applySeriesShare({ uid, plan: sharePlan, updateCards, updateDecks });
+        const shareDeleted = new Set(sharePlan.deletes);
+        const shareMoved   = new Map(sharePlan.cardUpdates.map(u => [u.id, u.deckIds]));
+        allCardsForCleanup = allCardsForCleanup
+          .filter(c => !shareDeleted.has(c.id))
+          .map(c => shareMoved.has(c.id) ? { ...c, deckIds: shareMoved.get(c.id) } : c);
+        shareNote = `${sharePlan.words} word${sharePlan.words !== 1 ? 's' : ''} now shared across a series`;
+      }
+    } catch (e) {
+      console.error('Flashcards: series card share failed', e);
     }
 
     const toDelete = allCardsForCleanup.filter(c => {
@@ -1481,7 +1601,8 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     }
 
     if (!toDelete.length && !resyncPairs.length && !deckLeaves.length) {
-      setCleanupResult('Nothing to clean up.');
+      const earlyNotes = [mergeNote, shareNote].filter(Boolean);
+      setCleanupResult(earlyNotes.length ? `${earlyNotes.join(' · ')}.` : 'Nothing to clean up.');
       setTimeout(() => setCleanupResult(null), 5000);
       return;
     }
@@ -1533,13 +1654,13 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
           : d
       ));
     }
-    const doneParts = [];
+    const doneParts = [mergeNote, shareNote].filter(Boolean);
     if (toDelete.length)    doneParts.push(`${toDelete.length} card${toDelete.length !== 1 ? 's' : ''} removed`);
     if (deckLeaves.length)  doneParts.push(`${deckLeaves.length} duplicate${deckLeaves.length !== 1 ? 's' : ''} taken out of a deck`);
     if (resyncPairs.length) doneParts.push(`${resyncPairs.length} back${resyncPairs.length !== 1 ? 's' : ''} resynced`);
     setCleanupResult(doneParts.join(' · ') + '.');
     setTimeout(() => setCleanupResult(null), 5000);
-  }, [uid, decks, updateCards, updateDecks]);
+  }, [uid, decks, updateCards, updateDecks, aviSources]);
 
   // ── Resync Grammar ─────────────────────────────────────────
   // Re-pushes explanation/examples from each grammar entry to its linked card
@@ -1806,6 +1927,31 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
           </div>
         );
       })()}
+
+      {/* Series decks (SD-D3): above the books' own decks */}
+      {seriesDecks.length > 0 && (
+        <div style={{ marginBottom: '28px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textM, marginBottom: '12px' }}>
+            Series
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, 220px)', justifyContent: 'center', gap: '12px' }}>
+            {seriesDecks.map(sd => (
+              <DeckCard
+                key={sd.id}
+                deck={sd}
+                totalCount={cardsLoaded ? (seriesStats[sd.id]?.total ?? 0) : null}
+                dueCount={cardsLoaded ? (seriesStats[sd.id]?.due ?? 0) : null}
+                newCount={cardsLoaded ? (seriesStats[sd.id]?.new ?? 0) : null}
+                masteryBreakdown={null}
+                lastStudied={null}
+                onClick={() => cardsLoaded ? startSession(sd.id) : null}
+                onEcho={onEchoDeck ? (d) => onEchoDeck(d.id) : null}
+                C={C} S={S}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Named decks */}
       {decks.filter(d => d.id !== 'deck_grammar').length > 0 && (

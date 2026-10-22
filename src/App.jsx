@@ -34,10 +34,11 @@ import { DevDashboard } from './pages/DevDashboard.jsx';
 
 import { birbSrc, decoBlockStyle } from './utils/decoAssets.js';
 
-import { uid, parseDate, isPast, toDateStr, getLogicalToday, getLogicalDateStr, getTaskDates, taskOccursOn, taskLastDate, isDateDone } from './utils/dateUtils.js';
+import { uid, parseDate, toDateStr, getLogicalToday, getLogicalDateStr, getTaskDates, taskOccursOn, isDateDone } from './utils/dateUtils.js';
 import { runDailyPipeline, DAILY_CAP } from './utils/srsEngine.js';
 import { isDueToday } from './utils/fsrs.js';
-import { runRecurrenceEngine, nextDueAfterCompletion } from './utils/recurrenceEngine.js';
+import { runRecurrenceEngine, nextDueAfterCompletion, isOverdueTask, isUnscheduledTask } from './utils/recurrenceEngine.js';
+import { mergeSameNameDecks } from './utils/cardDedupe.js';
 import { getOrderedSectionsForSource, sectionDoneWrites } from './utils/contentUtils.js';
 import { loadState, saveState, createInitialTasks } from './utils/storage.js';
 import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow, mergeRemoteData, planRemoteRefresh } from './hooks/useFirestore.js';
@@ -706,7 +707,7 @@ updateCards={updateCards} updateDecks={updateDecks} onSourceCascadeComplete={onS
 triggerAddSource={clTriggerAddSource} triggerAddQuestion={clTriggerAddQuestion}
 triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection}
 onDeleteTask={deleteTask} />}
-{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} onNotice={showToast} />}
+{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} onNotice={showToast} aviSources={aviSources} />}
 {page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} wordInputs={aviWordInputs} aviSources={aviSources} aviSections={aviSections} echoDeckTarget={echoDeckTarget} onEchoDeckTargetUsed={() => setEchoDeckTarget(null)} onNotice={showToast} />}
 {page === 'avi' && (
   <AVIPage
@@ -1202,6 +1203,14 @@ export default function App() {
         if (d.name === oldTitle + ' (sentence mining)') return { ...d, name: newTitle + ' (sentence mining)' };
         return d;
       }));
+
+      // A rename onto a title that already had a deck leaves two decks with
+      // one name, splitting the source's cards. Fold them into one.
+      try {
+        await mergeSameNameDecks({ uid, names: [newTitle, newTitle + ' (sentence mining)'], updateCards, updateDecks });
+      } catch (e) {
+        console.error('Source rename: duplicate deck merge failed', e);
+      }
     }
 
     // 3. Batch-update wordInputs and sentenceInputs in Firestore
@@ -1246,7 +1255,7 @@ export default function App() {
     } catch (e) {
       console.error('Source rename: AVI entry update failed', e);
     }
-  }, [user, decks, updateDecks, aviWordInputs, aviSentenceInputs]);
+  }, [user, decks, updateDecks, updateCards, aviWordInputs, aviSentenceInputs]);
 
   // ── Phase D3: after a source cascade, reset the AVI selector if it pointed
   //    at the deleted source, then re-sync AVI entries + counts from Firestore ──
@@ -2156,11 +2165,8 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
 
   const todayBadgeStr = toDateStr(getLogicalToday(dsh));
   const todayCount   = tasks.filter(t => taskOccursOn(t, todayBadgeStr) && !isDateDone(t, todayBadgeStr)).length;
-  const overdueCount = tasks.filter(t => {
-    if (t.completed) return false;
-    const last = taskLastDate(t);
-    return (last && isPast(parseDate(last), dsh) && (!t.recurrence || t.recurrence.type === 'none')) || !last;
-  }).length;
+  // Same two lists the Overdue page shows: overdue + unscheduled.
+  const overdueCount = tasks.filter(t => isOverdueTask(t, dsh) || isUnscheduledTask(t)).length;
 
   // ── Auth loading splash ───────────────────────────────────────
   // Show nothing while Firebase resolves auth state on first load (usually <300ms)
