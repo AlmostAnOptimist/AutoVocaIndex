@@ -50,7 +50,7 @@ A theme is one return branch in `buildColors(theme)` — a flat object of tokens
 | `tL`, `tLa`, `tH`, `tF` | Category color tokens — `tLa` is the language category's color; the others are spares kept for category re-expansion (see below) |
 | `logoText` | The wordmark text color (the logo *mark* itself is fixed-palette by design — see the gotchas guide) |
 
-Two tokens are optional and consumed through fallbacks: `accentText` (readable text placed *on* the accent — only themes whose accent is light enough to need it, like Baroque, define it) and `cardBg` (an alternate card fill; every consumer reads `C.cardBg || C.surface`). If you add an optional token of your own, follow that pattern — always consume it with a fallback so the other seven themes don't break.
+Two tokens are optional and consumed through fallbacks: `accentText` (readable text placed *on* the accent — only themes whose accent is light enough to need it, like Baroque, Hanok Dusk and Feather, define it) and `cardBg` (an alternate card fill; every consumer reads `C.cardBg || C.surface`). If you add an optional token of your own, follow that pattern — always consume it with a fallback so the other seven themes don't break.
 
 Keep the pairs honest when editing: each `*Soft` should be an `rgba` of its solid partner, and `text` must stay readable on all three elevation steps.
 
@@ -94,7 +94,17 @@ Two pairing rules when applying a frame to a new element, both from the builders
 
 **The template repository commits no image assets.** Decorative art is resolved through `import.meta.glob` in `decoAssets.js`, so the build succeeds with the files absent — each export is a URL string or `null`. Render sites follow the never-collapse rule: where an image would sit, they reserve the same layout space and render `decoBlockStyle(C)` — a themed diagonal-hatch block — instead. Missing art degrades to deliberate texture, never to collapsed layout.
 
-To supply your own art, drop PNGs into `src/assets/` under the filenames `decoAssets.js` picks (`birbs.png`, `perched_crow_Deco.png`, `DecoDividerPanel_gold.png`), or extend the file with your own globbed exports following the same null-safe pattern. It's a leaf module — it imports nothing — keep it that way.
+To supply your own art, drop PNGs into `src/assets/` under the filenames `decoAssets.js` picks (`birbs.png`, `perched_crow_Deco.png`; `DecoDividerPanel_gold.png` is still picked but no page shows it now that ornaments fill those panels), or extend the file with your own globbed exports following the same null-safe pattern. It's a leaf module — it imports nothing — keep it that way.
+
+## Ornaments
+
+The Art Deco page ornaments are drawn in code, not shipped as images, so they recolor with every theme and need no assets (`src/components/Ornaments.jsx`, a leaf). They use four color roles: line = `accent`, thread = `accent2` (Hanok, Feather and Koi use `tL`), jewel = `tLa` (Hanok and Baroque use `danger`), plate = `cardBg || surface`; the ground is whatever the piece sits on, passed in where it isn't the page background. The pieces:
+
+- **Session bookends** (`SessionIntro`, `Medallion`, `CornerFrame`, `Rail`, `ScorePlate`): flashcard sessions open with a pendant into a medallion and quizzes with a corner frame and a 시작 rail; finish screens close with the bottom half (완료 medallion, or a score plate and 끝 rail). An opening screen never costs a tap: it starts the session after about 1.6 s, or on tap, Enter or Space (Esc ends a flashcard session). Echo restarts skip it.
+- **Tab rails** (`TabRail`): carry the line from a tab menu to the page edge (Content Library, Notes, Upcoming, AVI on desktop); centered phone menus get one on the left too. A rail shrinks to nothing when there's no room.
+- **Pendants** (`Pendant`, `PendantFill`): `PendantFill` hangs a pendant in spare height and only shows when there's enough room (`min`), stretching up to `max`. Used under the shorter of Active / Adrift on the Library overview (desktop), under the This Month calendar on Overdue, in a 120 px margin beside This Week on Upcoming (desktop), and in place of the old stained-glass panel in the Library and Archive tabs and Notes.
+
+To change a color role, change the theme token; to retire an ornament, remove its render site — nothing else depends on them.
 
 ## The Gazette and its plates
 

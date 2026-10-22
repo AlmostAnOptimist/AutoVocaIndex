@@ -23,7 +23,8 @@ src/
   pages/             one file per screen (TodayPage, AVIPage, FlashcardsPage,
                      QuizzesPage, ContentLibraryPage, GrammarIndexPage, ...)
   components/        shared UI — modals, pickers, nav, DatePicker, Icons,
-                     AVILogo, Gazette components
+                     AVILogo, Gazette components, Ornaments (the Art Deco
+                     page ornaments, drawn from theme tokens)
   hooks/             useFirestore, useAVIData, useLemmaSearch, useSearchAssist,
                      useAppTheme, useDragSort, useLogicalDay,
                      keyboard/pagination helpers
@@ -33,6 +34,7 @@ src/
                      lemmaSuggest, wordStaging, wordRowUpdater, wordSkip,
                      aviRowMerge, nuanceCleanup, echoEngine, quizStateEngine,
                      contentUtils, ttsUtils, taskEdit, apptPromotion,
+                     seriesDecks,
                      queuedWrite, keyUtils, scrollUtils, dateUtils, ...
   theme/             buildColors, buildStyles, decoAssets, ThemeContext
   assets/            decorative art and gazette-plates/library/ — globbed,

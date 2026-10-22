@@ -126,6 +126,10 @@ Where: `recurrenceEngine.js`.
 A drag on Today or Upcoming stamps `sortOrder` with `sortOrderDate`; the rank applies only on that day, and a drop onto another day's row does nothing. An order without a day (from before this rule) is ignored. Overdue and Unscheduled sort by date and priority and don't drag.
 Where: `dragSort.js`, `useDragSort.js`.
 
+**The Overdue badge counts exactly what the Overdue page lists** *(decision)*.
+The badge is overdue plus unscheduled: both the page and the badge use `isOverdueTask(t, dsh, today)` and `isUnscheduledTask(t)` from `recurrenceEngine.js`, so recurring tasks still inside their window count and Always On (persistent) tasks don't. Add any new overdue rule there, never in one place only.
+Where: `recurrenceEngine.js`, `OverduePage.jsx`, the badge in `App.jsx`.
+
 **Grammar cards live outside FSRS entirely** *(decision)*.
 Grammar patterns aren't discrete recall facts, so interval math fits them poorly. Grading a grammar card writes only `{ due: null, lastReview, lastGrade, reps, gapEvents }` — no stability, no interval — and grammar reviews are excluded from `reviewLog`, `reviewStats`, the daily pipeline's triage, and the due snapshot. The Grammar Deck is a browse-and-refresh surface driven by mastery levels, not a scheduler.
 Where: the type branch in `FlashcardsPage.handleGrade`; `type === 'grammar'` exclusions in `srsEngine.js`.

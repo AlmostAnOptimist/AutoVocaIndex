@@ -122,7 +122,7 @@ One document per study material (a novel, a drama, a textbook). Firestore auto-I
 | `url`, `origin` | string | |
 | `levelMin`, `levelMax` | string \| null | |
 | `studyIntent` | string \| null | `'mining'` exempts a source from the passive-media exclusion in stats |
-| `series`, `seriesOrder` | null | Created as `null` |
+| `series`, `seriesOrder` | string \| null, number \| null | Created as `null`; set from the source's detail panel. Sources sharing a `series` name, in `seriesOrder`, form a series (series decks, below) |
 | `sourceStatus` | string | `'Not started'`, `'In Progress'`, `'Done'`, ... Read through `getSourceStatus()`, which falls back to the legacy `watchStatus` field on old documents |
 | `lastActivityAt` | string \| null | ISO timestamp, bumped by section activity — a section marked Done or In Progress or scheduled, wherever that happens (Library, Today, Appointments, Planner; `sectionDoneWrites` in `contentUtils.js`) |
 | `createdAt` | string | |
@@ -220,6 +220,12 @@ Flashcards link back here via `linkedAVILemmaId` (= `lemmaID`). The cascade help
 | `paused` | boolean | Paused decks are held out of triage, due counts, and the spike forecast; a card only counts as paused if *every* deck it belongs to is paused |
 
 The Grammar deck uses the fixed ID `deck_grammar`. The Flashcards page also presents virtual collections (`all`, `all_words`, `all_sentences`) — these are UI-only deck IDs and are never stored.
+
+**Series decks are virtual too.** For each Content Library series, `buildSeriesGroups` (`seriesDecks.js`) matches its sources' decks by title and offers a word series deck and a "(sentence mining)" series deck once at least two books have a deck of that kind. Nothing is stored: a series session pools the books' own cards (one per word, the most overdue; cards paused in every deck skipped) and writes no `lastStudied`. Quizzes select a series with the tokens `series:<name>` / `series-sm:<name>`, expanded to the books' deck ids at start (`expandDeckSelection`); pause and reverse stay per book.
+
+**One word card per series.** A new word row in a series book whose word already has a card in another book of that series joins that card (the book's deck is added to its `deckIds`, the deck's `totalCards` goes up) instead of creating a second card, so review history carries across books (`findSeriesCard` / `joinCardToDeck` in `cardFactory.js`; vocab only, sentence cards stay per book). Flashcards Clean up merges words carded separately before this rule: the card with more history survives (`compareHistorySurvivor`: reviewed over new, then more reps, then earliest `createdAt`) and the others leave the series' decks (`planSeriesShare` in `cardDedupe.js`).
+
+**Decks are found by name, so two decks with one name split a source's cards.** Clean up cards first merges same-name decks (`mergeSameNameDecks`): the deck with the most cards survives (then the earliest `createdAt`, then id), the others' cards move in, one card per word per deck is restored, emptied decks are deleted, and the survivor's `totalCards` is recounted and its `linkedSourceId` pointed at the live source of that title. A source rename onto a title that already has a deck runs the same merge.
 
 Deleting a deck deletes the cards that are in no other deck; a card also in a deck you keep only leaves the deleted one, with its review history.
 
