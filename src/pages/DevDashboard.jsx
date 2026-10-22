@@ -2,7 +2,7 @@
 // Accessed via window.location.hash === '#dev'
 // Not linked from main app's navigation UI
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, Children } from 'react';
 import {
   collection, getDocs, getDoc, addDoc, updateDoc, deleteDoc, setDoc,
   doc, serverTimestamp, writeBatch,
@@ -29,10 +29,10 @@ const KANBAN_COLS = [
   { id: 'done',         label: 'Done'        },
 ];
 
-// ── Gazette ad pools — discovered from the filesystem at build time, not
-// listed by hand. Aliases (Library only) live in Firestore instead, edited
-// below; new images become available just by dropping the file in and
-// deploying, no code change needed either way. ─────────────────────────
+// ── Gazette plate pool — discovered from the filesystem at build time, not
+// listed by hand. Aliases live in Firestore instead, edited below; new
+// images become available just by dropping the file in and deploying, no
+// code change needed either way. ──────────────────────────────────────────
 const libraryAdModules = import.meta.glob('../assets/gazette-plates/library/*.{png,jpg,jpeg,PNG,JPG,JPEG}', { eager: true, query: '?url', import: 'default' });
 
 function globToFileList(modules) {
@@ -88,14 +88,121 @@ const scoreChipSt = (active, col) => ({
 });
 
 // ── Badge ─────────────────────────────────────────────────────
+// Ledger-style tag: small caps on a tinted ground (also the action kind tag).
 function Badge({ label, color }) {
   return (
     <span style={{
-      fontSize: '10px', fontWeight: 600, padding: '2px 7px', borderRadius: '10px',
-      letterSpacing: '0.04em', textTransform: 'capitalize', color,
-      background: `${color}22`, border: `1px solid ${color}44`,
-      fontFamily: SH.fm, whiteSpace: 'nowrap',
+      display: 'inline-block', fontSize: '10.5px', fontWeight: 500, padding: '1px 7px', borderRadius: '4px',
+      letterSpacing: '0.06em', textTransform: 'uppercase', color,
+      background: `${color}1f`, fontFamily: SH.fm, whiteSpace: 'nowrap', lineHeight: 1.6,
     }}>{label}</span>
+  );
+}
+
+// ── Dev Dash layout pieces ────────────────────────────────────
+// Shared by both tabs: a Poiret One heading over a fading accent rule, and
+// ledger rows (name, kind tag, description and last run on the left,
+// controls on the right, results underneath).
+const ACTION_NAMES = {
+  aviScan: 'Scan AVI data', aviNfc: 'NFC repair', aviDef2: 'Def2 resync',
+  aviNuance: '동의어 cleanup', aviRetag: 'Source and section re-tag',
+  reviewStats: 'Recompute review stats', cardAudio: 'Update card audio',
+  grammarCheck: 'Grammar Index check', grammarDeadLinks: 'Remove dead links',
+};
+const KIND_LABEL = { read: 'Read-only', write: 'Writes', audio: 'Re-records audio' };
+const kindColor  = (kind, C) => ({ read: C.success, write: C.warning, audio: C.accent2 || C.tL }[kind] || C.textM);
+
+function fmtRunDate(iso, withTime = true) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  const opts = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  const day = d.toLocaleDateString('en-US', opts);
+  return withTime ? `${day}, ${d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : day;
+}
+
+function SectionHead({ title, count, note, right, size = 22, C }) {
+  return (
+    <div style={{ marginBottom: '4px' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ fontFamily: SH.fp, fontSize: `${size}px`, color: C.text, letterSpacing: '0.02em', lineHeight: 1.2 }}>{title}</div>
+        {count != null && <span style={{ fontFamily: SH.fm, fontSize: '11px', color: C.textM }}>{count}</span>}
+        {right && <div style={{ marginLeft: 'auto', alignSelf: 'center' }}>{right}</div>}
+      </div>
+      <div style={{ height: '1px', background: `linear-gradient(90deg, ${C.accent}, transparent)`, margin: '6px 0 8px' }} />
+      {note && <div style={{ fontSize: '12.5px', color: C.textS, lineHeight: 1.55, maxWidth: '68ch', marginBottom: '4px' }}>{note}</div>}
+    </div>
+  );
+}
+
+// lastRun: undefined hides the line (untracked); null shows "no run recorded".
+function ActionRow({ name, kind, desc, lastRun, controls, children, C }) {
+  const when = fmtRunDate(lastRun);
+  const kids = Children.toArray(children);
+  return (
+    <div style={{ padding: '14px 0', borderBottom: `1px solid ${C.border}` }}>
+      <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 320px', minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '14px', fontWeight: 600, color: C.text }}>{name}</span>
+            {kind && <Badge label={KIND_LABEL[kind] || kind} color={kindColor(kind, C)} />}
+          </div>
+          {desc && <div style={{ fontSize: '12.5px', color: C.textS, lineHeight: 1.55, marginTop: '3px', maxWidth: '68ch' }}>{desc}</div>}
+          {lastRun !== undefined && (
+            <div style={{ fontSize: '11px', fontFamily: SH.fm, color: C.textM, marginTop: '5px' }}>
+              {when ? `Last run ${when}` : 'No run recorded yet'}
+            </div>
+          )}
+        </div>
+        {controls && (
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end' }}>
+            {controls}
+          </div>
+        )}
+      </div>
+      {kids.length > 0 && <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>{kids}</div>}
+    </div>
+  );
+}
+
+function ResultBox({ C, children }) {
+  return (
+    <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '8px', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+      {children}
+    </div>
+  );
+}
+
+function ActionGroup({ title, note, open = true, onToggle, C, children }) {
+  return (
+    <section>
+      <SectionHead
+        title={title}
+        note={open ? note : null}
+        right={onToggle && (
+          <button onClick={onToggle} style={{
+            fontSize: '12px', padding: '3px 10px', borderRadius: '5px', cursor: 'pointer',
+            border: `1px solid ${C.border}`, background: 'transparent', color: C.textS,
+          }}>{open ? 'Hide' : 'Show'}</button>
+        )}
+        C={C}
+      />
+      {open && <div style={{ borderTop: `1px solid ${C.border}` }}>{children}</div>}
+    </section>
+  );
+}
+
+function StatStrip({ stats, C }) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', margin: '20px 0 4px' }}>
+      {stats.map(s => (
+        <div key={s.label} style={{ borderTop: `2px solid ${C.accent}`, paddingTop: '8px', minWidth: 0 }}>
+          <b style={{ display: 'block', fontFamily: SH.fm, fontSize: '22px', fontWeight: 500, color: C.text, fontVariantNumeric: 'tabular-nums' }}>{s.value}</b>
+          <span style={{ fontSize: '12.5px', color: C.textM }}>{s.label}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -224,6 +331,68 @@ function DevCard({ item, C, onEdit, onDelete }) {
           WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
         }}>{item.notes}</div>
       )}
+    </div>
+  );
+}
+
+// ── DevRow (list view ledger line) ────────────────────────────
+// Score column on the left (G × N, with the two parts underneath), title,
+// tags and notes in the middle, Edit / Delete on the right.
+function DevRow({ item, C, onEdit, onDelete }) {
+  const s      = calcScore(item);
+  const isDone = item.status === 'done';
+  const smallBtn = (col) => ({
+    fontSize: '11.5px', color: col, padding: '3px 9px', borderRadius: '5px',
+    border: `1px solid ${col === C.danger ? C.danger + '44' : C.border}`, background: 'transparent', cursor: 'pointer',
+  });
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '48px minmax(0, 1fr) auto', gap: '12px',
+      padding: '12px 0', borderBottom: `1px solid ${C.border}`, alignItems: 'start',
+      opacity: isDone ? 0.45 : 1,
+    }}>
+      <div style={{ fontFamily: SH.fm, paddingTop: '1px' }}>
+        <div style={{ fontSize: '16px', color: s === null ? C.textM : C.text, lineHeight: 1.2 }}>{s === null ? '—' : s}</div>
+        {s !== null && (
+          <div style={{ fontSize: '10px', color: C.textM, marginTop: '2px', whiteSpace: 'nowrap' }}>G{item.gratification} · N{item.necessity}</div>
+        )}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          fontSize: '14px', fontWeight: 600, color: C.text, lineHeight: 1.4, wordBreak: 'break-word',
+          textDecoration: isDone ? 'line-through' : 'none',
+        }}>{item.title}</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginTop: '5px', alignItems: 'center' }}>
+          {item.category && <Badge label={item.category} color={catColor(item.category, C)} />}
+          {item.type     && <Badge label={item.type}     color={typeColor(item.type, C)} />}
+          {item.effort   && <Badge label={item.effort}   color={effColor(item.effort, C)} />}
+          {item.status && !['inbox', 'todo'].includes(item.status) && (
+            <Badge
+              label={item.status}
+              color={
+                item.status === 'blocked'     ? C.danger  :
+                item.status === 'done'        ? C.textM   :
+                item.status === 'in-progress' ? C.warning : C.textS
+              }
+            />
+          )}
+          {item.docNeeded   && <Badge label="doc needed" color={C.accent2 || C.tL} />}
+          {item.subcategory && <span style={{ fontSize: '11.5px', color: C.textM, fontStyle: 'italic' }}>{item.subcategory}</span>}
+        </div>
+        {item.blockedBy && (
+          <div style={{ marginTop: '5px', fontSize: '12px', color: C.danger }}>Blocked by: {item.blockedBy}</div>
+        )}
+        {item.notes && (
+          <div style={{
+            marginTop: '5px', fontSize: '12.5px', color: C.textS, lineHeight: 1.5,
+            overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+          }}>{item.notes}</div>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: '5px' }}>
+        <button onClick={() => onEdit(item)} style={smallBtn(C.textS)}>Edit</button>
+        <button onClick={() => onDelete(item)} style={smallBtn(C.danger)}>Delete</button>
+      </div>
     </div>
   );
 }
@@ -448,12 +617,12 @@ function TodoForm({ item, onSave, onCancel, C }) {
 // ── Filter Pill ───────────────────────────────────────────────
 function FilterPill({ label, active, onClick, C }) {
   return (
-    <button onClick={onClick} style={{
-      padding: '4px 10px', borderRadius: '12px', fontSize: '11px',
-      fontWeight: active ? 600 : 400,
-      background: active ? C.accentSoft : 'transparent',
-      color: active ? C.accent : C.textS,
-      border: `1px solid ${active ? C.accent + '55' : C.border}`,
+    <button onClick={onClick} aria-pressed={!!active} style={{
+      padding: '3px 10px', borderRadius: '99px', fontSize: '12.5px',
+      fontWeight: active ? 500 : 400,
+      background: active ? C.text : 'transparent',
+      color: active ? C.bg : C.textS,
+      border: `1px solid ${active ? C.text : C.border}`,
       cursor: 'pointer', textTransform: 'capitalize', transition: 'all 0.12s', whiteSpace: 'nowrap',
     }}>{label}</button>
   );
@@ -487,8 +656,6 @@ function ListView({ items, C, onEdit, onDelete, onReorder }) {
     ].filter(g => g.items.length > 0);
   }, [activeItems, doneItems]);
 
-  const tierAccent = { high: C.accent, medium: C.borderB, low: C.border, inbox: C.accent2 || C.tL, done: C.textM };
-
   function handleDrop(groupItems) {
     if (!dragId || !dragOverId || dragId === dragOverId) {
       setDragId(null); setDragOverId(null); return;
@@ -504,26 +671,17 @@ function ListView({ items, C, onEdit, onDelete, onReorder }) {
   }
 
   return (
-    <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
       {groups.map(group => (
-        <div key={group.id} style={{ marginBottom: '28px' }}>
-          {/* Group header */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-            <div style={{
-              width: '3px', height: '14px', borderRadius: '2px',
-              background: tierAccent[group.tier] || C.textM, flexShrink: 0,
-            }} />
-            <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textM }}>
-              {group.label}
-            </span>
-            <span style={{ fontSize: '10px', fontFamily: SH.fm, color: C.textM, opacity: 0.5 }}>
-              {group.items.length}
-            </span>
-            <div style={{ flex: 1, height: '1px', background: C.border }} />
-          </div>
+        <section key={group.id}>
+          <SectionHead title={group.label} count={group.items.length} size={19} C={C} />
 
-          {/* Draggable items */}
-          <div onDragOver={e => e.preventDefault()} onDrop={() => handleDrop(group.items)}>
+          {/* Draggable rows — drag to reorder within a group */}
+          <div
+            onDragOver={e => e.preventDefault()}
+            onDrop={() => handleDrop(group.items)}
+            style={{ borderTop: `1px solid ${C.border}` }}
+          >
             {group.items.map(item => (
               <div
                 key={item.id}
@@ -532,23 +690,21 @@ function ListView({ items, C, onEdit, onDelete, onReorder }) {
                 onDragOver={e => { e.preventDefault(); if (item.id !== dragId) setDragOverId(item.id); }}
                 onDragEnd={() => { setDragId(null); setDragOverId(null); }}
                 style={{
-                  outline: dragOverId === item.id ? `2px solid ${C.accent}66` : 'none',
-                  borderRadius: '10px',
+                  boxShadow: dragOverId === item.id ? `inset 0 2px 0 ${C.accent}` : 'none',
                   opacity: dragId === item.id ? 0.35 : 1,
                   transition: 'opacity 0.12s',
                   cursor: 'grab',
-                  marginBottom: '8px',
                 }}
               >
-                <DevCard item={item} C={C} onEdit={onEdit} onDelete={onDelete} />
+                <DevRow item={item} C={C} onEdit={onEdit} onDelete={onDelete} />
               </div>
             ))}
           </div>
-        </div>
+        </section>
       ))}
 
       {groups.length === 0 && (
-        <div style={{ textAlign: 'center', color: C.textM, paddingTop: '60px', fontSize: '14px' }}>
+        <div style={{ textAlign: 'center', color: C.textM, paddingTop: '40px', fontSize: '14px' }}>
           No items match the current filters.
         </div>
       )}
@@ -569,7 +725,7 @@ function KanbanView({ items, C, onEdit, onDelete, showArchived }) {
   }[id] || C.textM);
 
   return (
-    <div style={{ display: 'flex', gap: '14px', height: '100%', alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start', overflowX: 'auto', paddingBottom: '12px' }}>
       {cols.map(col => {
         const colItems = items
           .filter(i => i.status === col.id)
@@ -582,19 +738,14 @@ function KanbanView({ items, C, onEdit, onDelete, showArchived }) {
             flex: '0 0 270px',
             background: C.surface,
             border: `1px solid ${C.border}`,
-            borderTop: `3px solid ${colAccent(col.id)}`,
-            borderRadius: '10px',
-            padding: '14px',
+            borderTop: `2px solid ${colAccent(col.id)}`,
+            borderRadius: '8px',
+            padding: '12px 14px 14px',
             minHeight: '200px',
-            maxHeight: 'calc(100vh - 160px)',
-            overflowY: 'auto',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <span style={{
-                fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em',
-                textTransform: 'uppercase', color: colAccent(col.id),
-              }}>{col.label}</span>
-              <span style={{ fontSize: '10px', fontFamily: SH.fm, color: C.textM, opacity: 0.55 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '12px' }}>
+              <span style={{ fontFamily: SH.fp, fontSize: '18px', color: C.text, letterSpacing: '0.02em' }}>{col.label}</span>
+              <span style={{ fontSize: '11px', fontFamily: SH.fm, color: C.textM }}>
                 {colItems.length}
               </span>
             </div>
@@ -648,7 +799,20 @@ function AdAliasRow({ file, value, onSave, saved, C }) {
 function GazetteAdsPanel({ adAliases, onSaveAlias, savedFlash, C }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '720px' }}>
+      <div>
+        <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '13px', color: C.text, marginBottom: '4px' }}>
+          Library plates — {libraryAdFiles.length} file{libraryAdFiles.length === 1 ? '' : 's'}
+        </div>
+        <div style={{ fontSize: '11px', color: C.textM, marginBottom: '10px' }}>
+          Comma-separated aliases, matched against source titles leniently (case/punctuation/whitespace don't need to match exactly). Untagged files still appear in random rotation.
+        </div>
+        {libraryAdFiles.length === 0 ? (
+          <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>No files in src/assets/gazette-plates/library/ yet.</div>
+        ) : libraryAdFiles.map(f => (
+          <AdAliasRow key={f.filename} file={f} value={adAliases[f.filename]} onSave={onSaveAlias} saved={savedFlash === f.filename} C={C} />
+        ))}
       </div>
+    </div>
   );
 }
 
@@ -672,10 +836,11 @@ function GazetteAdsPanel({ adAliases, onSaveAlias, savedFlash, C }) {
 // S4: AVIPage saves rows field by field (a repair is no longer written back
 // over) and re-reads them once the main app has been away for a minute or
 // more; reload the main app to see a repair right away.
-function AVIMaintenancePanel({ uid, C }) {
+function AVIMaintenancePanel({ uid, C, runs, markRun }) {
   const [status,   setStatus]   = useState('idle'); // idle | scanning | ready | applying
   const [report,   setReport]   = useState(null);
   const [applyMsg, setApplyMsg] = useState('');
+  const [msgKey,   setMsgKey]   = useState('');   // which row the message belongs to
 
   const btnSt = (disabled) => ({
     padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
@@ -686,7 +851,7 @@ function AVIMaintenancePanel({ uid, C }) {
 
   const scan = async () => {
     if (status === 'scanning' || status === 'applying') return;
-    setStatus('scanning'); setApplyMsg('');
+    setStatus('scanning'); setApplyMsg(''); setMsgKey('scan');
     try {
       const [lmSnap, wSnap, sSnap, cardSnap, srcSnap, secSnap, deckSnap] = await Promise.all([
         getDocs(collection(db, 'users', uid, 'lemmaMaster')),
@@ -836,6 +1001,7 @@ function AVIMaintenancePanel({ uid, C }) {
         sectionsBySrc, nuance,
       });
       setStatus('ready');
+      markRun('aviScan');
     } catch (e) {
       console.error('AVI maintenance scan failed', e);
       setApplyMsg('Scan failed — check console.');
@@ -856,11 +1022,12 @@ function AVIMaintenancePanel({ uid, C }) {
 
   const applyNfc = async () => {
     if (!report || status === 'applying' || report.nfcUpdates.length === 0) return;
-    setStatus('applying');
+    setStatus('applying'); setMsgKey('nfc');
     try {
       await applyBatch(report.nfcUpdates);
       setApplyMsg(`NFC repair: ${report.nfcUpdates.length} doc${report.nfcUpdates.length === 1 ? '' : 's'} updated. Reload the main app before further AVI edits.`);
       setReport(r => ({ ...r, nfcUpdates: [] }));
+      markRun('aviNfc');
     } catch (e) {
       console.error('NFC repair failed', e);
       setApplyMsg('NFC repair failed — check console.');
@@ -872,11 +1039,12 @@ function AVIMaintenancePanel({ uid, C }) {
     if (!report || status === 'applying') return;
     const updates = [...report.def2Updates, ...report.cardBackUpdates];
     if (updates.length === 0) return;
-    setStatus('applying');
+    setStatus('applying'); setMsgKey('def2');
     try {
       await applyBatch(updates);
       setApplyMsg(`Def2 resync: ${report.def2Updates.length} row${report.def2Updates.length === 1 ? '' : 's'}, ${report.cardBackUpdates.length} card back${report.cardBackUpdates.length === 1 ? '' : 's'} updated. Reload the main app before further AVI edits.`);
       setReport(r => ({ ...r, def2Updates: [], cardBackUpdates: [] }));
+      markRun('aviDef2');
     } catch (e) {
       console.error('Def2 resync failed', e);
       setApplyMsg('Def2 resync failed — check console.');
@@ -886,7 +1054,7 @@ function AVIMaintenancePanel({ uid, C }) {
 
   const applyNuance = async () => {
     if (!report || status === 'applying' || nuanceCount(report.nuance) === 0) return;
-    setStatus('applying');
+    setStatus('applying'); setMsgKey('nuance');
     const n = report.nuance;
     try {
       await applyBatch(n.relationUpdates);
@@ -901,6 +1069,7 @@ function AVIMaintenancePanel({ uid, C }) {
       await applyCardDedupe({ uid, plan: n.cardPlan });
       setApplyMsg(`동의어 cleanup: ${n.relationUpdates.length} lemma${n.relationUpdates.length === 1 ? '' : 's'}, ${n.rowDeletes.length} row${n.rowDeletes.length === 1 ? '' : 's'}, ${n.cardPlan.deletes.length + n.cardPlan.deckUpdates.length} card${n.cardPlan.deletes.length + n.cardPlan.deckUpdates.length === 1 ? '' : 's'}. Reload the main app before further AVI edits.`);
       setReport(r => ({ ...r, nuance: { ...r.nuance, relationUpdates: [], rowDeletes: [], cardPlan: { deletes: [], deckUpdates: [], decrements: new Map(), keeps: [] }, cardLabels: [] } }));
+      markRun('aviNuance');
     } catch (e) {
       console.error('동의어 cleanup failed', e);
       setApplyMsg('동의어 cleanup failed — check console.');
@@ -910,7 +1079,7 @@ function AVIMaintenancePanel({ uid, C }) {
 
 const applyRetag = async (group, choice) => {
     if (!report || status === 'applying') return;
-    setStatus('applying');
+    setStatus('applying'); setMsgKey('retag');
     try {
       const fields = group.missingSource
         ? { source: 'Sourceless', section: null }
@@ -918,6 +1087,7 @@ const applyRetag = async (group, choice) => {
       await applyBatch(group.refs.map(ref => ({ ref, fields })));
       setApplyMsg(`Re-tagged ${group.refs.length} row${group.refs.length === 1 ? '' : 's'}. Reload the main app before further AVI edits.`);
       setReport(r => ({ ...r, sectionGroups: r.sectionGroups.filter(x => x !== group) }));
+      markRun('aviRetag');
     } catch (e) {
       console.error('Section re-tag failed', e);
       setApplyMsg('Re-tag failed — check console.');
@@ -933,93 +1103,148 @@ const applyRetag = async (group, choice) => {
 
   const lineSt = { fontSize: '12px', color: C.textS, lineHeight: 1.6 };
   const numSt  = { color: C.text, fontWeight: 600 };
+  const busy   = status === 'scanning' || status === 'applying';
+  const msgFor = (k) => applyMsg && msgKey === k
+    ? <div style={{ fontSize: '11.5px', color: C.textM }}>{applyMsg}</div>
+    : null;
+  const nNfc    = report ? report.nfcUpdates.length : 0;
+  const nDef2   = report ? report.def2Updates.length + report.cardBackUpdates.length : 0;
+  const nNuance = report ? nuanceCount(report.nuance) : 0;
+  const allClean = report &&
+    report.nfcUpdates.length === 0 && report.lmDuplicates.length === 0 &&
+    report.def2Updates.length === 0 && report.def2NoCanon.length === 0 &&
+    report.cardBackUpdates.length === 0 && nuanceCount(report.nuance) === 0 &&
+    report.sentBackReview.length === 0 && report.sectionGroups.length === 0;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '760px' }}>
-      <div style={{ fontSize: '11.5px', color: C.textM, lineHeight: 1.6 }}>
-        Scan is read-only. Apply buttons write field-level repairs to Firestore.
-        The main app picks repairs up once it has been in the background for a minute or more; reload it to see them right away.
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-        <button onClick={scan} disabled={status === 'scanning' || status === 'applying'} style={btnSt(status === 'scanning' || status === 'applying')}>
-          {status === 'scanning' ? 'Scanning…' : 'Scan AVI Data'}
-        </button>
+    <>
+      <ActionRow
+        name="Scan AVI data" kind="read" lastRun={runs.aviScan ?? null} C={C}
+        desc="Reads every Lemma Master entry, word row, sentence row and card, and works out what each repair below would change. Nothing is written."
+        controls={
+          <button onClick={scan} disabled={busy} style={btnSt(busy)}>
+            {status === 'scanning' ? 'Scanning…' : 'Scan AVI data'}
+          </button>
+        }
+      >
         {report && (
-          <>
-            <button onClick={applyNfc} disabled={status === 'applying' || report.nfcUpdates.length === 0} style={btnSt(status === 'applying' || report.nfcUpdates.length === 0)}>
-              Apply NFC Repair ({report.nfcUpdates.length})
-            </button>
-            <button onClick={applyDef2} disabled={status === 'applying' || (report.def2Updates.length + report.cardBackUpdates.length === 0)} style={btnSt(status === 'applying' || (report.def2Updates.length + report.cardBackUpdates.length === 0))}>
-              Apply Def2 Resync ({report.def2Updates.length + report.cardBackUpdates.length})
-            </button>
-            <button onClick={applyNuance} disabled={status === 'applying' || nuanceCount(report.nuance) === 0} style={btnSt(status === 'applying' || nuanceCount(report.nuance) === 0)}>
-              Apply 동의어 Cleanup ({nuanceCount(report.nuance)})
-            </button>
-          </>
+          <ResultBox C={C}>
+            <div style={lineSt}>
+              Scanned <span style={numSt}>{report.counts.lm}</span> lemmas, <span style={numSt}>{report.counts.words}</span> word rows, <span style={numSt}>{report.counts.sents}</span> sentence rows, <span style={numSt}>{report.counts.cards}</span> cards.
+            </div>
+            {allClean && <div style={{ ...lineSt, color: C.success || C.textS }}>All clean — nothing to repair.</div>}
+          </ResultBox>
         )}
-        {applyMsg && <span style={{ fontSize: '11px', color: C.textM }}>{applyMsg}</span>}
-      </div>
-      {report && (
-        <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '8px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <div style={lineSt}>
-            Scanned <span style={numSt}>{report.counts.lm}</span> lemmas, <span style={numSt}>{report.counts.words}</span> word rows, <span style={numSt}>{report.counts.sents}</span> sentence rows, <span style={numSt}>{report.counts.cards}</span> cards.
-          </div>
-          <div style={lineSt}>
-            NFC repair needed: <span style={numSt}>{report.nfcUpdates.length}</span> doc{report.nfcUpdates.length === 1 ? '' : 's'}.
-          </div>
-          {report.lmDuplicates.length > 0 && (
-            <div style={{ ...lineSt, color: C.warning || C.textS }}>
-              Duplicate Lemma Master entries (merge manually in Lemma Master): {listPreview(report.lmDuplicates)}
-            </div>
-          )}
-          <div style={lineSt}>
-            Def2 out of sync: <span style={numSt}>{report.def2Updates.length}</span> word row{report.def2Updates.length === 1 ? '' : 's'}
-            {report.def2Updates.length > 0 && <> — {listPreview(report.def2Updates.map(u => u.label))}</>}
-            ; <span style={numSt}>{report.cardBackUpdates.length}</span> card back{report.cardBackUpdates.length === 1 ? '' : 's'}
-            {report.cardBackUpdates.length > 0 && <> — {listPreview(report.cardBackUpdates.map(u => u.label))}</>}.
-          </div>
-          {report.def2NoCanon.length > 0 && (
+        {msgFor('scan')}
+      </ActionRow>
+
+      <ActionRow
+        name="NFC repair" kind="write" lastRun={runs.aviNfc ?? null} C={C}
+        desc="Re-normalizes Korean text on lemmas, rows and cards and recomputes cleaned lemmas. Duplicate Lemma Master entries it turns up are listed for you to merge by hand, never merged automatically."
+        controls={
+          <button onClick={applyNfc} disabled={busy || nNfc === 0} style={btnSt(busy || nNfc === 0)}>
+            Apply{report ? ` (${nNfc})` : ''}
+          </button>
+        }
+      >
+        {report && (
+          <ResultBox C={C}>
             <div style={lineSt}>
-              Rows with a def2 whose Lemma Master entry has none (not auto-erased — re-enter the def2 on the row to restore the cascade): {listPreview(report.def2NoCanon)}
+              NFC repair needed: <span style={numSt}>{report.nfcUpdates.length}</span> doc{report.nfcUpdates.length === 1 ? '' : 's'}.
             </div>
-          )}
-          {report.sentBackReview.length > 0 && (
+            {report.lmDuplicates.length > 0 && (
+              <div style={{ ...lineSt, color: C.warning || C.textS }}>
+                Duplicate Lemma Master entries (merge manually in Lemma Master): {listPreview(report.lmDuplicates)}
+              </div>
+            )}
+          </ResultBox>
+        )}
+        {msgFor('nfc')}
+      </ActionRow>
+
+      <ActionRow
+        name="Def2 resync" kind="write" lastRun={runs.aviDef2 ?? null} C={C}
+        desc="Word rows and card backs adopt their Lemma Master entry's def2 where they differ. Rows whose entry has no def2, and sentence card backs that look hand-edited, are listed but left alone."
+        controls={
+          <button onClick={applyDef2} disabled={busy || nDef2 === 0} style={btnSt(busy || nDef2 === 0)}>
+            Apply{report ? ` (${nDef2})` : ''}
+          </button>
+        }
+      >
+        {report && (
+          <ResultBox C={C}>
             <div style={lineSt}>
-              Sentence card backs matching neither def2 nor def1 (possibly hand-edited, not auto-fixed): {listPreview(report.sentBackReview)}
+              Def2 out of sync: <span style={numSt}>{report.def2Updates.length}</span> word row{report.def2Updates.length === 1 ? '' : 's'}
+              {report.def2Updates.length > 0 && <> — {listPreview(report.def2Updates.map(u => u.label))}</>}
+              ; <span style={numSt}>{report.cardBackUpdates.length}</span> card back{report.cardBackUpdates.length === 1 ? '' : 's'}
+              {report.cardBackUpdates.length > 0 && <> — {listPreview(report.cardBackUpdates.map(u => u.label))}</>}.
             </div>
-          )}
-          <div style={lineSt}>
-            동의어 cleanup: <span style={numSt}>{report.nuance.relationUpdates.length}</span> lemma{report.nuance.relationUpdates.length === 1 ? '' : 's'} linking to deleted entries
-            {report.nuance.relationUpdates.length > 0 && <> — {listPreview(report.nuance.relationUpdates.map(u => u.label))}</>}
-            ; <span style={numSt}>{report.nuance.rowDeletes.length}</span> row{report.nuance.rowDeletes.length === 1 ? '' : 's'} with no synonym left
-            {report.nuance.rowDeletes.length > 0 && <> — {listPreview(report.nuance.rowDeletes.map(u => u.label))}</>}
-            ; <span style={numSt}>{report.nuance.cardLabels.length}</span> card{report.nuance.cardLabels.length === 1 ? '' : 's'} to take out of the deck
-            {report.nuance.cardLabels.length > 0 && <> — {listPreview(report.nuance.cardLabels)}</>}.
-          </div>
-          {report.sectionGroups.length > 0 && (
+            {report.def2NoCanon.length > 0 && (
+              <div style={lineSt}>
+                Rows with a def2 whose Lemma Master entry has none (not auto-erased — re-enter the def2 on the row to restore the cascade): {listPreview(report.def2NoCanon)}
+              </div>
+            )}
+            {report.sentBackReview.length > 0 && (
+              <div style={lineSt}>
+                Sentence card backs matching neither def2 nor def1 (possibly hand-edited, not auto-fixed): {listPreview(report.sentBackReview)}
+              </div>
+            )}
+          </ResultBox>
+        )}
+        {msgFor('def2')}
+      </ActionRow>
+
+      <ActionRow
+        name="동의어 cleanup" kind="write" lastRun={runs.aviNuance ?? null} C={C}
+        desc="Removes synonym links that point at deleted Lemma Master entries, drops 동의어 rows left with no synonym, and takes their cards out of the 동의어 deck (a card is deleted only when that was its only deck)."
+        controls={
+          <button onClick={applyNuance} disabled={busy || nNuance === 0} style={btnSt(busy || nNuance === 0)}>
+            Apply{report ? ` (${nNuance})` : ''}
+          </button>
+        }
+      >
+        {report && (
+          <ResultBox C={C}>
             <div style={lineSt}>
-              Source / section issues:
-              {report.sectionGroups.map(g => (
-                <SectionRetagRow
-                  key={`${g.missingSource ? 'missing' : 'sec'}|${g.source}|${g.storedSection || ''}`}
-                  group={g}
-                  sectionsBySrc={report.sectionsBySrc}
-                  onApply={applyRetag}
-                  busy={status === 'applying'}
-                  C={C}
-                />
-              ))}
+              <span style={numSt}>{report.nuance.relationUpdates.length}</span> lemma{report.nuance.relationUpdates.length === 1 ? '' : 's'} linking to deleted entries
+              {report.nuance.relationUpdates.length > 0 && <> — {listPreview(report.nuance.relationUpdates.map(u => u.label))}</>}
+              ; <span style={numSt}>{report.nuance.rowDeletes.length}</span> row{report.nuance.rowDeletes.length === 1 ? '' : 's'} with no synonym left
+              {report.nuance.rowDeletes.length > 0 && <> — {listPreview(report.nuance.rowDeletes.map(u => u.label))}</>}
+              ; <span style={numSt}>{report.nuance.cardLabels.length}</span> card{report.nuance.cardLabels.length === 1 ? '' : 's'} to take out of the deck
+              {report.nuance.cardLabels.length > 0 && <> — {listPreview(report.nuance.cardLabels)}</>}.
             </div>
-          )}
-          {report.nfcUpdates.length === 0 && report.lmDuplicates.length === 0 &&
-           report.def2Updates.length === 0 && report.def2NoCanon.length === 0 &&
-           report.cardBackUpdates.length === 0 && nuanceCount(report.nuance) === 0 &&
-           report.sentBackReview.length === 0 && report.sectionGroups.length === 0 && (
-            <div style={{ ...lineSt, color: C.success || C.textS }}>All clean — nothing to repair.</div>
-          )}
-        </div>
-      )}
-    </div>
+          </ResultBox>
+        )}
+        {msgFor('nuance')}
+      </ActionRow>
+
+      <ActionRow
+        name="Source and section re-tag" kind="write" lastRun={runs.aviRetag ?? null} C={C}
+        desc="Fixes rows whose source or section no longer exists in the Content Library. Missing sources move to Sourceless; stale sections pick one of the source's current sections, or clear. Each group is applied on its own."
+      >
+        {report && (
+          <ResultBox C={C}>
+            {report.sectionGroups.length === 0 ? (
+              <div style={lineSt}>No source or section issues.</div>
+            ) : (
+              <div style={lineSt}>
+                {report.sectionGroups.map(g => (
+                  <SectionRetagRow
+                    key={`${g.missingSource ? 'missing' : 'sec'}|${g.source}|${g.storedSection || ''}`}
+                    group={g}
+                    sectionsBySrc={report.sectionsBySrc}
+                    onApply={applyRetag}
+                    busy={status === 'applying'}
+                    C={C}
+                  />
+                ))}
+              </div>
+            )}
+          </ResultBox>
+        )}
+        {msgFor('retag')}
+      </ActionRow>
+    </>
   );
 }
 
@@ -1076,7 +1301,7 @@ function SectionRetagRow({ group, sectionsBySrc, onApply, busy, C }) {
 // spoken form ((주먹을) 날리다 → "주먹을 날리다"; 보장하다 / 보장되다 → both
 // words). Grammar cards and sentence audio are untouched. Reload the main
 // app afterwards so open pages pick up the new audio.
-function CardAudioRefreshPanel({ uid, C }) {
+function CardAudioRefreshPanel({ uid, C, runs, markRun }) {
   const [status,  setStatus]  = useState('idle');   // idle | scanning | ready | running | done
   const [targets, setTargets] = useState([]);
   const [prog,    setProg]    = useState({ done: 0, failed: 0 });
@@ -1128,27 +1353,29 @@ function CardAudioRefreshPanel({ uid, C }) {
       await new Promise(r => setTimeout(r, 150));   // same pacing as the audio backfill
     }
     setStatus('done');
+    if (done > 0) markRun('cardAudio');
   };
 
   return (
-    <div style={{ marginTop: '18px', paddingTop: '14px', borderTop: `1px solid ${C.border}` }}>
-      <div style={{ fontSize: '13px', fontWeight: 600, color: C.text, marginBottom: '4px' }}>Update card audio</div>
-      <div style={{ fontSize: '12px', color: C.textM, marginBottom: '10px', lineHeight: 1.5 }}>
-        Re-records the word audio on cards whose word has parentheses or a slash, so it says the spoken form, and on cards whose audio says a different word (renamed before renames re-recorded it). Reload the app afterwards.
-      </div>
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-        <button onClick={scan} disabled={status === 'scanning' || status === 'running'} style={btnSt(status === 'scanning' || status === 'running')}>
-          {status === 'scanning' ? 'Scanning…' : 'Scan cards'}
-        </button>
-        {status === 'ready' && targets.length > 0 && (
-          <button onClick={run} style={btnSt(false)}>Update audio ({targets.length})</button>
-        )}
-        {status === 'running' && (
-          <button onClick={() => { stopRef.current = true; }} style={btnSt(false)}>Stop</button>
-        )}
-      </div>
+    <ActionRow
+      name="Update card audio" kind="audio" lastRun={runs.cardAudio ?? null} C={C}
+      desc="Re-records the word audio on cards whose word has parentheses or a slash, so it says the spoken form, and on cards whose audio says a different word (renamed before renames re-recorded it). Scan first; reload the app afterwards."
+      controls={
+        <>
+          <button onClick={scan} disabled={status === 'scanning' || status === 'running'} style={btnSt(status === 'scanning' || status === 'running')}>
+            {status === 'scanning' ? 'Scanning…' : 'Scan cards'}
+          </button>
+          {status === 'ready' && targets.length > 0 && (
+            <button onClick={run} style={btnSt(false)}>Update audio ({targets.length})</button>
+          )}
+          {status === 'running' && (
+            <button onClick={() => { stopRef.current = true; }} style={btnSt(false)}>Stop</button>
+          )}
+        </>
+      }
+    >
       {status === 'ready' && (
-        <div style={{ fontSize: '12px', color: C.textS, marginTop: '10px' }}>
+        <div style={{ fontSize: '12px', color: C.textS }}>
           {targets.length === 0 ? 'No cards need updating.' : (
             <>
               <div style={{ marginBottom: '4px' }}>{targets.length} card{targets.length === 1 ? '' : 's'} to update, for example:</div>
@@ -1160,12 +1387,12 @@ function CardAudioRefreshPanel({ uid, C }) {
         </div>
       )}
       {(status === 'running' || status === 'done') && (
-        <div style={{ fontSize: '12px', color: C.textS, marginTop: '10px' }}>
+        <div style={{ fontSize: '12px', color: C.textS }}>
           {status === 'running' ? 'Updating' : 'Updated'} {prog.done} of {targets.length}{prog.failed ? ` · ${prog.failed} failed` : ''}.
           {status === 'done' && ' Reload the app so open pages pick up the new audio.'}
         </div>
       )}
-    </div>
+    </ActionRow>
   );
 }
 
@@ -1180,7 +1407,7 @@ function CardAudioRefreshPanel({ uid, C }) {
 // Bug sweep G2: it also lists grammar links on sections, section-less
 // sources and notes that point at deleted entries (deletes left them before
 // the fix); "Remove dead links" is the one write.
-function GrammarCheckPanel({ uid, C }) {
+function GrammarCheckPanel({ uid, C, runs, markRun }) {
   const [status, setStatus] = useState('idle'); // idle | scanning | ready | fixing
   const [report, setReport] = useState(null);
   const [fixMsg, setFixMsg] = useState('');
@@ -1250,6 +1477,7 @@ function GrammarCheckPanel({ uid, C }) {
       setReport({ entryCount: entries.length, cardCount: cards.length, shared, orphanCards, noCard, dupNumbers, maxId, maxNum, deadLinks });
       setFixMsg('');
       setStatus('ready');
+      markRun('grammarCheck');
     } catch (e) {
       console.error('Grammar check failed', e);
       setStatus('idle');
@@ -1270,6 +1498,7 @@ function GrammarCheckPanel({ uid, C }) {
       if (ops > 0) await batch.commit();
       setFixMsg(`Removed dead grammar links from ${report.deadLinks.length} item${report.deadLinks.length === 1 ? '' : 's'}. Reload the main app to see it.`);
       setReport(r => ({ ...r, deadLinks: [] }));
+      markRun('grammarDeadLinks');
     } catch (e) {
       console.error('Removing dead grammar links failed', e);
       setFixMsg('Removing dead links failed — check console.');
@@ -1296,59 +1525,72 @@ function GrammarCheckPanel({ uid, C }) {
     </div>
   );
 
+  const nDead = report ? report.deadLinks.length : 0;
+  const busy  = status === 'scanning' || status === 'fixing';
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '760px' }}>
-      <div style={{ fontSize: '11.5px', color: C.textM, lineHeight: 1.6 }}>
-        Read-only. Finds traces of grammar entries overwritten before the G1 fix: an entry with two cards usually means the older card still holds the lost concept. It also lists grammar links that point at deleted entries; Remove dead links is the only write.
-      </div>
-      <div>
-        <button onClick={scan} disabled={status === 'scanning' || status === 'fixing'} style={btnSt(status === 'scanning' || status === 'fixing')}>
-          {status === 'scanning' ? 'Scanning…' : 'Scan Grammar Index'}
-        </button>
-      </div>
-      {report && (
-        <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '8px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={lineSt}>
-            Scanned <span style={numSt}>{report.entryCount}</span> entries and <span style={numSt}>{report.cardCount}</span> grammar cards.
-            {' '}Highest doc id number: <span style={numSt}>{report.maxId ?? '—'}</span>; highest entry number: <span style={numSt}>{report.maxNum}</span>.
-          </div>
-          <div style={lineSt}>
-            Entries with more than one card: <span style={numSt}>{report.shared.length}</span>
-            {report.shared.map(({ entry, cards }) => (
-              <div key={entry.id} style={{ marginTop: '6px' }}>
-                — <span style={{ fontFamily: SH.fk, color: C.text }}>{entry.glossaryTerm || '(no term)'}</span>
-                <span style={{ color: C.textM }}> ({entry.id}, #{entry.entryNumber ?? '?'})</span>
-                {cards.map(c => cardLines(c, entry.glossaryTerm))}
-              </div>
-            ))}
-          </div>
-          <div style={lineSt}>
-            Cards whose entry is missing: <span style={numSt}>{report.orphanCards.length}</span>
-            {report.orphanCards.map(c => cardLines(c, null))}
-          </div>
-          <div style={lineSt}>
-            Entries with no card: <span style={numSt}>{report.noCard.length}</span>
-            {report.noCard.length > 0 && <> — {report.noCard.map(e => `${e.glossaryTerm || '(no term)'} (#${e.entryNumber ?? '?'})`).join(', ')}</>}
-          </div>
-          <div style={lineSt}>
-            Entry numbers used more than once: <span style={numSt}>{report.dupNumbers.length}</span>
-            {report.dupNumbers.length > 0 && <> — {report.dupNumbers.map(([n, list]) => `#${n}: ${list.map(e => e.glossaryTerm || e.id).join(' / ')}`).join('; ')}</>}
-          </div>
-          <div style={lineSt}>
-            Links to deleted entries: <span style={numSt}>{report.deadLinks.length}</span> item{report.deadLinks.length === 1 ? '' : 's'}
-            {report.deadLinks.length > 0 && <> — {report.deadLinks.slice(0, 12).map(l => `${l.label} (${l.dead.length})`).join(', ')}{report.deadLinks.length > 12 ? ` … +${report.deadLinks.length - 12} more` : ''}</>}
-            {report.deadLinks.length > 0 && (
-              <div style={{ marginTop: '6px' }}>
-                <button onClick={removeDeadLinks} disabled={status !== 'ready'} style={btnSt(status !== 'ready')}>
-                  {status === 'fixing' ? 'Removing…' : `Remove dead links (${report.deadLinks.length})`}
-                </button>
-              </div>
-            )}
-            {fixMsg && <div style={{ marginTop: '4px', color: C.textM }}>{fixMsg}</div>}
-          </div>
-        </div>
-      )}
-    </div>
+    <>
+      <ActionRow
+        name="Grammar Index check" kind="read" lastRun={runs.grammarCheck ?? null} C={C}
+        desc="Lists entries with more than one card (the older card usually holds a concept overwritten before the G1 fix), cards whose entry is missing, entries with no card, and entry numbers used twice."
+        controls={
+          <button onClick={scan} disabled={busy} style={btnSt(busy)}>
+            {status === 'scanning' ? 'Scanning…' : 'Scan Grammar Index'}
+          </button>
+        }
+      >
+        {report && (
+          <ResultBox C={C}>
+            <div style={lineSt}>
+              Scanned <span style={numSt}>{report.entryCount}</span> entries and <span style={numSt}>{report.cardCount}</span> grammar cards.
+              {' '}Highest doc id number: <span style={numSt}>{report.maxId ?? '—'}</span>; highest entry number: <span style={numSt}>{report.maxNum}</span>.
+            </div>
+            <div style={lineSt}>
+              Entries with more than one card: <span style={numSt}>{report.shared.length}</span>
+              {report.shared.map(({ entry, cards }) => (
+                <div key={entry.id} style={{ marginTop: '6px' }}>
+                  — <span style={{ fontFamily: SH.fk, color: C.text }}>{entry.glossaryTerm || '(no term)'}</span>
+                  <span style={{ color: C.textM }}> ({entry.id}, #{entry.entryNumber ?? '?'})</span>
+                  {cards.map(c => cardLines(c, entry.glossaryTerm))}
+                </div>
+              ))}
+            </div>
+            <div style={lineSt}>
+              Cards whose entry is missing: <span style={numSt}>{report.orphanCards.length}</span>
+              {report.orphanCards.map(c => cardLines(c, null))}
+            </div>
+            <div style={lineSt}>
+              Entries with no card: <span style={numSt}>{report.noCard.length}</span>
+              {report.noCard.length > 0 && <> — {report.noCard.map(e => `${e.glossaryTerm || '(no term)'} (#${e.entryNumber ?? '?'})`).join(', ')}</>}
+            </div>
+            <div style={lineSt}>
+              Entry numbers used more than once: <span style={numSt}>{report.dupNumbers.length}</span>
+              {report.dupNumbers.length > 0 && <> — {report.dupNumbers.map(([n, list]) => `#${n}: ${list.map(e => e.glossaryTerm || e.id).join(' / ')}`).join('; ')}</>}
+            </div>
+          </ResultBox>
+        )}
+      </ActionRow>
+
+      <ActionRow
+        name="Remove dead links" kind="write" lastRun={runs.grammarDeadLinks ?? null} C={C}
+        desc="Clears grammar links on content sections, section-less sources and notes that point at deleted entries. Uses the results of the check above."
+        controls={
+          <button onClick={removeDeadLinks} disabled={status !== 'ready' || nDead === 0} style={btnSt(status !== 'ready' || nDead === 0)}>
+            {status === 'fixing' ? 'Removing…' : `Remove${report ? ` (${nDead})` : ''}`}
+          </button>
+        }
+      >
+        {report && (
+          <ResultBox C={C}>
+            <div style={lineSt}>
+              Links to deleted entries: <span style={numSt}>{nDead}</span> item{nDead === 1 ? '' : 's'}
+              {nDead > 0 && <> — {report.deadLinks.slice(0, 12).map(l => `${l.label} (${l.dead.length})`).join(', ')}{nDead > 12 ? ` … +${nDead - 12} more` : ''}</>}
+            </div>
+          </ResultBox>
+        )}
+        {fixMsg && <div style={{ fontSize: '11.5px', color: C.textM }}>{fixMsg}</div>}
+      </ActionRow>
+    </>
   );
 }
 
@@ -1357,7 +1599,7 @@ export function DevDashboard({ user }) {
 
   const [todos,        setTodos]        = useState([]);
   const [loading,      setLoading]      = useState(true);
-  const [mode,         setMode]         = useState('planning'); // 'planning' | 'actions'
+  const [mode,         setMode]         = useState('actions'); // 'actions' | 'planning'
   const [view,         setView]         = useState('list');
   const [showArchived, setShowArchived] = useState(false);
   const [filters,      setFilters]      = useState({ category: '', type: '', effort: '', docNeeded: false });
@@ -1368,7 +1610,24 @@ export function DevDashboard({ user }) {
   const [reviewStatsResult, setReviewStatsResult] = useState('');
   const [adAliases,    setAdAliases]    = useState({});
   const [aliasSaveFlash, setAliasSaveFlash] = useState('');
+  const [runs,         setRuns]         = useState({});   // action key → ISO time of last successful run
+  const [adsOpen,      setAdsOpen]      = useState(false);
 
+  // Last-run record for each action: users/{uid}/settings/devActionRuns.
+  // Written on success only; the boot load only reads settings/main, so
+  // this doc never reaches the main app.
+  useEffect(() => {
+    getDoc(doc(db, 'users', user.uid, 'settings', 'devActionRuns'))
+      .then(snap => setRuns(snap.exists() ? snap.data() : {}))
+      .catch(e => console.error('devActionRuns load failed', e));
+  }, [user.uid]);
+
+  const markRun = (key) => {
+    const at = new Date().toISOString();
+    setRuns(prev => ({ ...prev, [key]: at }));
+    setDoc(doc(db, 'users', user.uid, 'settings', 'devActionRuns'), { [key]: at }, { merge: true })
+      .catch(e => console.error('devActionRuns save failed', e));
+  };
 
   // ── Standing utility, not just a one-time migration: full recompute of
   // users/{uid}/settings/reviewStats from the entire reviewLog collection.
@@ -1386,6 +1645,7 @@ export function DevDashboard({ user }) {
     try {
       const stats = await recomputeReviewStats(user.uid, 3);
       setReviewStatsResult(`${stats.totalAllTime} reviews, best day ${stats.bestDay?.count ?? 0}, longest streak ${stats.longestStreak?.length ?? 0}d.`);
+      markRun('reviewStats');
     } catch (e) {
       console.error('Review stats recompute failed', e);
       setReviewStatsResult('Failed — check console.');
@@ -1511,185 +1771,195 @@ export function DevDashboard({ user }) {
     );
   }
 
+  // ── Header stats ─────────────────────────────────────────────
+  const countBy = (st) => todos.filter(i => i.status === st).length;
+  const lastRunKey = Object.keys(runs)
+    .filter(k => ACTION_NAMES[k] && fmtRunDate(runs[k]))
+    .sort((a, b) => String(runs[b]).localeCompare(String(runs[a])))[0];
+  const neverRun = Object.keys(ACTION_NAMES)
+    .filter(k => !fmtRunDate(runs[k])).length;
+  const stats = mode === 'actions'
+    ? [
+        { value: lastRunKey ? fmtRunDate(runs[lastRunKey], false) : '—', label: lastRunKey ? `Last action: ${ACTION_NAMES[lastRunKey]}` : 'No runs recorded yet' },
+        { value: neverRun, label: neverRun === 1 ? 'action with no recorded run' : 'actions with no recorded run' },
+      ]
+    : [
+        { value: countBy('inbox'),       label: 'Inbox' },
+        { value: countBy('todo'),        label: 'Todo' },
+        { value: countBy('in-progress'), label: 'In progress' },
+        { value: countBy('blocked'),     label: 'Blocked' },
+        { value: countBy('done'),        label: 'Done' },
+      ];
+
+  const colSt  = { maxWidth: '960px', margin: '0 auto', paddingLeft: '24px', paddingRight: '24px', boxSizing: 'border-box' };
+  const wide   = mode === 'planning' && view === 'kanban';
+  const btnSt  = (disabled) => ({
+    padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
+    border: `1px solid ${C.border}`, background: 'transparent',
+    color: C.textS, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
+  });
+  const filterLabel = (t) => (
+    <span style={{ fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, whiteSpace: 'nowrap', marginRight: '2px' }}>{t}</span>
+  );
+  const filterGap = <div style={{ width: '1px', height: '16px', background: C.border, margin: '0 4px', flexShrink: 0 }} />;
+
   return (
     <>
       <style>{G}</style>
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: C.bg, overflow: 'hidden' }}>
+      <div style={{ height: '100vh', overflowY: 'auto', background: C.bg }}>
 
         {/* ── Header ── */}
-        <div style={{
-          background: C.surface, borderBottom: `1px solid ${C.border}`,
-          padding: '0 24px', height: '64px',
-          display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0,
-        }}>
-          <div style={{ fontFamily: SH.fd, fontSize: '20px', fontWeight: 600, color: C.logoText, letterSpacing: '-0.3px' }}>
+        <header style={{ ...colSt, paddingTop: '28px' }}>
+          <h1 style={{ fontFamily: SH.fp, fontWeight: 400, fontSize: 'clamp(30px, 6vw, 44px)', letterSpacing: '0.02em', color: C.text, margin: 0, lineHeight: 1.1 }}>
             Dev Dashboard
-          </div>
+          </h1>
+          <div style={{ height: '1px', background: `linear-gradient(90deg, ${C.accent}, transparent)`, margin: '10px 0 14px' }} />
+          <p style={{ margin: 0, color: C.textS, fontSize: '14px', lineHeight: 1.55, maxWidth: '64ch' }}>
+            {mode === 'actions'
+              ? 'Maintenance and repair tools that run straight against Firestore. Rows tagged Read-only never change anything; the rest write, and say what they touch.'
+              : 'The to-do pile, ranked by gratification times necessity. Drag rows to reorder within a group.'}
+          </p>
+          <StatStrip stats={stats} C={C} />
+        </header>
 
-          {/* Top-level mode toggle */}
-          <div style={{ display: 'flex', gap: '3px', background: C.raised, borderRadius: '8px', padding: '3px' }}>
-            {[['planning', 'Planning'], ['actions', 'Actions']].map(([m, label]) => (
-              <button key={m} onClick={() => setMode(m)} style={{
-                padding: '5px 12px', borderRadius: '5px', fontSize: '12px', fontWeight: 500,
-                background: mode === m ? C.accent : 'transparent',
-                color: mode === m ? '#fff' : C.textS,
-                border: 'none', cursor: 'pointer', transition: 'all 0.12s',
+        {/* ── Tabs ── */}
+        <nav role="tablist" style={{ position: 'sticky', top: 0, zIndex: 5, background: C.bg, marginTop: '18px' }}>
+          <div style={{ ...colSt, display: 'flex', gap: '4px', borderBottom: `1px solid ${C.border}`, paddingTop: '6px', overflowX: 'auto' }}>
+            {[['actions', 'Actions'], ['planning', 'Planning']].map(([m, label]) => (
+              <button key={m} role="tab" aria-selected={mode === m} onClick={() => setMode(m)} style={{
+                font: 'inherit', fontSize: '13.5px', background: 'none', border: 'none',
+                borderBottom: `2px solid ${mode === m ? C.accent : 'transparent'}`,
+                color: mode === m ? C.text : C.textS, fontWeight: mode === m ? 600 : 400,
+                padding: '8px 10px', cursor: 'pointer', whiteSpace: 'nowrap', marginBottom: '-1px',
               }}>{label}</button>
             ))}
           </div>
+        </nav>
 
-          {mode === 'planning' && (
-            <>
-              {/* View toggle */}
-              <div style={{ display: 'flex', gap: '3px', background: C.raised, borderRadius: '8px', padding: '3px' }}>
-                {['list', 'kanban'].map(v => (
-                  <button key={v} onClick={() => setView(v)} style={{
-                    padding: '5px 12px', borderRadius: '5px', fontSize: '12px', fontWeight: 500,
-                    background: view === v ? C.accent : 'transparent',
-                    color: view === v ? '#fff' : C.textS,
-                    border: 'none', cursor: 'pointer', textTransform: 'capitalize', transition: 'all 0.12s',
-                  }}>{v}</button>
-                ))}
-              </div>
+        {/* ── Content ── */}
+        {mode === 'actions' ? (
+          <div style={{ ...colSt, padding: '24px 24px 64px', display: 'flex', flexDirection: 'column', gap: '36px' }}>
 
-              <span style={{ fontSize: '11px', fontFamily: SH.fm, color: C.textM }}>
-                {filteredTodos.filter(i => i.status !== 'done').length} active
-              </span>
-            </>
-          )}
+            <ActionGroup
+              title="AVI Vocabulary"
+              note="Scan first; each repair below unlocks with its count. The main app picks up repairs after it has been in the background for a minute or more, or reload it to see them right away."
+              C={C}
+            >
+              <AVIMaintenancePanel uid={user.uid} C={C} runs={runs} markRun={markRun} />
+            </ActionGroup>
 
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center' }}>
-            {mode === 'planning' && (
-              <>
-                <button
-                  onClick={() => setShowArchived(v => !v)}
-                  style={{
-                    padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
-                    border: `1px solid ${showArchived ? C.accent + '55' : C.border}`,
-                    background: showArchived ? C.accentSoft : 'transparent',
-                    color: showArchived ? C.accent : C.textS,
-                    cursor: 'pointer', transition: 'all 0.12s',
-                  }}
-                >{showArchived ? 'Archived: On' : 'Archived: Off'}</button>
+            <ActionGroup title="Flashcards and Reviews" C={C}>
+              <ActionRow
+                name="Recompute review stats" kind="write" lastRun={runs.reviewStats ?? null} C={C}
+                desc="Rebuilds total reviews, best day and streaks from the full review log. Safe to repeat whenever the numbers look off."
+                controls={
+                  <button onClick={handleRecomputeReviewStats} disabled={reviewStatsStatus === 'running'} style={btnSt(reviewStatsStatus === 'running')}>
+                    {reviewStatsStatus === 'running' ? 'Running…' : 'Recompute'}
+                  </button>
+                }
+              >
+                {reviewStatsResult && <div style={{ fontSize: '11.5px', color: C.textM }}>{reviewStatsResult}</div>}
+              </ActionRow>
+              <CardAudioRefreshPanel uid={user.uid} C={C} runs={runs} markRun={markRun} />
+            </ActionGroup>
+
+            <ActionGroup title="Grammar Index" C={C}>
+              <GrammarCheckPanel uid={user.uid} C={C} runs={runs} markRun={markRun} />
+            </ActionGroup>
+
+            <ActionGroup title="Gazette" C={C}>
+              <ActionRow
+                name="Ad aliases" kind="write" C={C}
+                desc="Tag Library plate images with source titles so they appear on matching sources in the Gazette. Untagged plates rotate at random. Each field saves when you leave it."
+                controls={
+                  <button onClick={() => setAdsOpen(o => !o)} style={btnSt(false)}>
+                    {adsOpen ? 'Hide' : `Show (${libraryAdFiles.length})`}
+                  </button>
+                }
+              >
+                {adsOpen && <GazetteAdsPanel adAliases={adAliases} onSaveAlias={handleSaveAlias} savedFlash={aliasSaveFlash} C={C} />}
+              </ActionRow>
+            </ActionGroup>
+          </div>
+        ) : (
+          <div style={{ padding: '20px 0 64px' }}>
+            {/* Toolbar + filters stay in the reading column */}
+            <div style={colSt}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  {['list', 'kanban'].map(v => (
+                    <FilterPill key={v} label={v} active={view === v} onClick={() => setView(v)} C={C} />
+                  ))}
+                </div>
+                {filterGap}
+                <FilterPill label="Show archived" active={showArchived} onClick={() => setShowArchived(v => !v)} C={C} />
+                <span style={{ fontSize: '12px', fontFamily: SH.fm, color: C.textM, marginLeft: '6px' }}>
+                  {filteredTodos.filter(i => i.status !== 'done').length} active shown
+                </span>
                 <button
                   onClick={() => setAddOpen(true)}
                   style={{
-                    padding: '7px 14px', borderRadius: '6px', fontSize: '13px', fontWeight: 500,
-                    background: C.accent, color: '#fff', border: 'none', cursor: 'pointer',
+                    marginLeft: 'auto', padding: '6px 14px', borderRadius: '6px', fontSize: '13px', fontWeight: 500,
+                    background: C.accent, color: '#fff', border: `1px solid ${C.accent}`, cursor: 'pointer',
                   }}
-                >+ Add Item</button>
-              </>
+                >+ Add item</button>
+              </div>
+
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '22px' }}>
+                {filterLabel('Category')}
+                {DEV_CATS.map(c => (
+                  <FilterPill key={c} label={c} active={filters.category === c} onClick={() => toggleFilter('category', c)} C={C} />
+                ))}
+                {filterGap}
+                {filterLabel('Type')}
+                {DEV_TYPES.map(t => (
+                  <FilterPill key={t} label={t} active={filters.type === t} onClick={() => toggleFilter('type', t)} C={C} />
+                ))}
+                {filterGap}
+                {filterLabel('Effort')}
+                {DEV_EFFORTS.map(e => (
+                  <FilterPill key={e} label={e} active={filters.effort === e} onClick={() => toggleFilter('effort', e)} C={C} />
+                ))}
+                {filterGap}
+                <FilterPill
+                  label="Doc needed"
+                  active={filters.docNeeded}
+                  onClick={() => setFilters(p => ({ ...p, docNeeded: !p.docNeeded }))}
+                  C={C}
+                />
+                {hasActiveFilters && (
+                  <button
+                    onClick={() => setFilters({ category: '', type: '', effort: '', docNeeded: false })}
+                    style={{ fontSize: '12px', color: C.textS, background: 'none', border: 'none', textDecoration: 'underline', cursor: 'pointer', padding: '3px 6px' }}
+                  >Clear</button>
+                )}
+              </div>
+
+              {!wide && (
+                <ListView
+                  items={filteredTodos}
+                  C={C}
+                  onEdit={setEditItem}
+                  onDelete={setDeleteItem}
+                  onReorder={handleReorder}
+                />
+              )}
+            </div>
+
+            {/* Kanban breaks out of the column to use the full width */}
+            {wide && (
+              <div style={{ padding: '0 24px' }}>
+                <KanbanView
+                  items={filteredTodos}
+                  C={C}
+                  onEdit={setEditItem}
+                  onDelete={setDeleteItem}
+                  showArchived={showArchived}
+                />
+              </div>
             )}
           </div>
-        </div>
-
-        {/* ── Filter bar ── */}
-        {mode === 'planning' && (
-        <div style={{
-          background: C.surface, borderBottom: `1px solid ${C.border}`,
-          padding: '8px 24px', display: 'flex', gap: '6px',
-          alignItems: 'center', flexWrap: 'wrap', flexShrink: 0,
-        }}>
-          <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, whiteSpace: 'nowrap' }}>Cat</span>
-          {DEV_CATS.map(c => (
-            <FilterPill key={c} label={c} active={filters.category === c} onClick={() => toggleFilter('category', c)} C={C} />
-          ))}
-
-          <div style={{ width: '1px', height: '16px', background: C.border, margin: '0 2px', flexShrink: 0 }} />
-
-          <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, whiteSpace: 'nowrap' }}>Type</span>
-          {DEV_TYPES.map(t => (
-            <FilterPill key={t} label={t} active={filters.type === t} onClick={() => toggleFilter('type', t)} C={C} />
-          ))}
-
-          <div style={{ width: '1px', height: '16px', background: C.border, margin: '0 2px', flexShrink: 0 }} />
-
-          <span style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, whiteSpace: 'nowrap' }}>Effort</span>
-          {DEV_EFFORTS.map(e => (
-            <FilterPill key={e} label={e} active={filters.effort === e} onClick={() => toggleFilter('effort', e)} C={C} />
-          ))}
-
-          <div style={{ width: '1px', height: '16px', background: C.border, margin: '0 2px', flexShrink: 0 }} />
-
-          <FilterPill
-            label="Doc Needed"
-            active={filters.docNeeded}
-            onClick={() => setFilters(p => ({ ...p, docNeeded: !p.docNeeded }))}
-            C={C}
-          />
-
-          {hasActiveFilters && (
-            <button
-              onClick={() => setFilters({ category: '', type: '', effort: '', docNeeded: false })}
-              style={{
-                padding: '4px 10px', borderRadius: '12px', fontSize: '11px',
-                color: C.textM, border: `1px solid ${C.border}`,
-                background: 'transparent', cursor: 'pointer',
-              }}
-            >Clear</button>
-          )}
-        </div>
         )}
-
-        {/* ── Content ── */}
-        <div style={{
-          flex: 1,
-          overflowY: mode === 'actions' || view === 'list' ? 'auto' : 'hidden',
-          overflowX: mode === 'planning' && view === 'kanban' ? 'auto' : 'hidden',
-          padding: '24px',
-        }}>
-          {mode === 'actions' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
-              <div>
-                <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>Gazette Ads</div>
-                <GazetteAdsPanel adAliases={adAliases} onSaveAlias={handleSaveAlias} savedFlash={aliasSaveFlash} C={C} />
-              </div>
-              <div>
-                <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>Review Stats</div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <button
-                    onClick={handleRecomputeReviewStats}
-                    disabled={reviewStatsStatus === 'running'}
-                    style={{
-                      padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
-                      border: `1px solid ${C.border}`, background: 'transparent',
-                      color: C.textS, cursor: reviewStatsStatus === 'running' ? 'default' : 'pointer',
-                      opacity: reviewStatsStatus === 'running' ? 0.6 : 1,
-                    }}
-                  >{reviewStatsStatus === 'running' ? 'Running…' : 'Recompute Review Stats'}</button>
-                  {reviewStatsResult && (
-                    <span style={{ fontSize: '11px', color: C.textM }}>{reviewStatsResult}</span>
-                  )}
-                </div>
-              </div>
-              <div>
-                <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>AVI Maintenance</div>
-                <AVIMaintenancePanel uid={user.uid} C={C} />
-                <CardAudioRefreshPanel uid={user.uid} C={C} />
-              </div>
-              <div>
-                <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>Grammar Index Check</div>
-                <GrammarCheckPanel uid={user.uid} C={C} />
-              </div>
-            </div>
-          ) : view === 'list' ? (
-            <ListView
-              items={filteredTodos}
-              C={C}
-              onEdit={setEditItem}
-              onDelete={setDeleteItem}
-              onReorder={handleReorder}
-            />
-          ) : (
-            <KanbanView
-              items={filteredTodos}
-              C={C}
-              onEdit={setEditItem}
-              onDelete={setDeleteItem}
-              showArchived={showArchived}
-            />
-         )}
-        </div>
       </div>
 
       {/* ── Modals ── */}
