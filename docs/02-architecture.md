@@ -25,13 +25,15 @@ src/
   components/        shared UI — modals, pickers, nav, DatePicker, Icons,
                      AVILogo, Gazette components
   hooks/             useFirestore, useAVIData, useLemmaSearch, useSearchAssist,
-                     useAppTheme, useDragSort, keyboard/pagination helpers
+                     useAppTheme, useDragSort, useLogicalDay,
+                     keyboard/pagination helpers
   utils/             engines and utilities — fsrs, srsEngine, aviUtils,
-                     cardFactory, importEngine, recurrenceEngine,
-                     reviewStatsEngine, lemmaSearchEngine, lemmaSuggest,
-                     wordStaging, echoEngine, quizStateEngine, contentUtils,
-                     ttsUtils,
-                     dateUtils, ...
+                     cardFactory, cardDedupe, def2Cascade, importEngine,
+                     recurrenceEngine, reviewStatsEngine, lemmaSearchEngine,
+                     lemmaSuggest, wordStaging, wordRowUpdater, wordSkip,
+                     aviRowMerge, nuanceCleanup, echoEngine, quizStateEngine,
+                     contentUtils, ttsUtils, taskEdit, apptPromotion,
+                     queuedWrite, keyUtils, scrollUtils, dateUtils, ...
   theme/             buildColors, buildStyles, decoAssets, ThemeContext
   assets/            decorative art and gazette-plates/library/ — globbed,
                      optional, ships empty (see the theming guide)
@@ -83,15 +85,19 @@ npx madge --circular --extensions js,jsx src/
 
 **Boot loads and the three data-access styles.** Different collections deliberately use different access patterns, and knowing which is which matters when you modify them:
 
-1. *One-shot load, in-memory authority, debounced diff sync.* Tasks and settings (`useFirestore.js`, 1500 ms debounce) and the AVI input collections plus `lemmaMaster` (`useAVIData.js`, 800 ms) are loaded once with `getDocs`, edited as in-memory arrays, and persisted by diffing previous synced state against next — only changed documents are written, with the delete-all guard described in the gotchas guide. Pending changes flush on unmount.
+1. *Load, in-memory authority, debounced diff sync.* Tasks and settings (`useFirestore.js`, 1500 ms debounce) and the AVI input collections plus `lemmaMaster` (`useAVIData.js`, 800 ms) are loaded with `getDocs`, edited as in-memory arrays, and persisted by diffing previous synced state against next — only changed documents are written, with the delete-all guard described in the gotchas guide. Settings are written key by key (`setDoc` with `mergeFields`), so App's copy never writes back keys another screen owns (AVI's `avi*` keys, migration flags). Existing AVI rows are written field by field (`updateDoc` of the changed fields only), new rows whole. Pending changes flush on unmount and when the page is hidden (`visibilitychange` → hidden, `pagehide`), so closing or backgrounding the app right after an edit doesn't lose it. Remote refreshes are *merged* into what's on screen, not swapped in (three-way: on-screen vs Firestore vs what this device last saved — an unsaved local change wins, everything else takes Firestore; `mergeRemoteData` in `useFirestore.js`, `mergeAviRows` in `aviRowMerge.js`). The AVI rows are re-read when AVI opens or the tab returns after they've gone stale (a minute or more in the background, or 15 minutes since the read).
 2. *Live listeners.* `content_sources`, `content_sections`, and `appointments` are `onSnapshot` subscriptions in App.jsx — these are the collections that other surfaces (pickers, links, the Gazette) need to see change in real time.
-3. *Direct writes at the interaction site.* Everything else — flashcards, decks, notes, grammar entries, quiz results, review logs — is read at mount where needed and written document-by-document as the user acts. Flashcards and decks specifically live in `useFlashcardData` (defined in App.jsx) and are shared by the Flashcards *and* Quizzes pages so neither duplicates the read.
+3. *Direct writes at the interaction site.* Everything else — flashcards, decks, notes, grammar entries, quiz results, review logs — is read at mount where needed and written document-by-document as the user acts. Flashcards and decks specifically live in `useFlashcardData` (defined in App.jsx) and are shared by the Flashcards *and* Quizzes pages so neither duplicates the read. Writes on these paths that the screen would otherwise wait on — grades, quiz results, Echo sessions, note saves, grammar deletes — go through `queueWrite` (`queuedWrite.js`): memory updates first and the write is not awaited, because with the persistent cache an offline write never settles (see the gotchas guide).
 
 All Firestore access is direct — there is no data-access layer, a known coupling and explicit non-goal discussed in the gotchas guide. Writes use `setDoc` + `{ merge: true }` or `updateDoc`; `undefined` never reaches a write.
 
 **Cascades.** Because AVI rows carry their source *title* (not ID — see the data model guide), renaming or deleting a Content Library source triggers an App-level cascade that batch-rewrites dependent word rows, sentence rows, tasks, and the current-source setting. If you add a new record type that references sources, wire it into these cascades.
 
-**Engines and visibility.** The daily pipeline and other periodic engines run from App.jsx effects, gated on `document.visibilityState` and re-checked on `visibilitychange` so a forgotten background tab never writes or burns API quota.
+**Engines and visibility.** The daily pipeline and other periodic engines run from App.jsx effects, gated on `document.visibilityState` and re-checked on `visibilitychange` so a forgotten background tab never writes or burns API quota. The logical day is App state (`useLogicalDay`, which re-checks at each day-start and on returning to the tab): when it flips with the app open, the same resync a tab return runs (refresh, daily card read, pipeline for the new day) runs once, and every page's notion of "today" follows.
+
+**Navigation.** Each page has a hash (`#today`, `#flashcards`, ...). Navigating pushes it, Back and Forward follow it (a `hashchange` listener), and a reload reopens the page it names (`pageFromHash`, built from `NAV_SECTIONS` plus Settings). Page-internal state (the AVI tab, open panels) isn't part of history.
+
+**The Dev Dashboard** (`#dev`, reload to open; not linked from the navigation) holds maintenance tools that run straight against Firestore, grouped with a description each and the date each last ran (`settings/devActionRuns`): AVI Vocabulary (scan, NFC repair, Def2 resync, 동의어 cleanup, source and section re-tag), Flashcards and Reviews (recompute review stats, update card audio), Grammar Index (check, remove dead links) and Gazette (plate aliases). Read-only actions are tagged as such. Its Planning tab is a personal to-do list (`dev/{uid}/todos`).
 
 **Failed boot loads.** `firestoreLoad` returns `null` for a brand-new account and the string `'error'` when the read fails, and every caller must tell the two apart. The boot load retries silently (after 2, 6, and 15 seconds); if every attempt fails, the app stays in local read-only mode with a banner ("Couldn't reach the server — showing local data. Changes are not being saved.") and a Retry button, and the task sync never starts because `dataLoaded` stays false. The hourly and return-to-tab refreshes simply skip a failed read. A render-time crash during boot is caught by `BootErrorBoundary` in `main.jsx`, which offers a one-tap local reset instead of a blank screen. The reasoning behind both is in the gotchas guide.
 
@@ -136,7 +142,7 @@ The whole architecture in a single trace. You're reading a novel you've cataloge
 2. **Stage.** A row lands in `wordInputs` — surface form, resolved lemma, and provenance as your current source title and section — via the debounced diff sync.
 3. **Define.** The reference definition arrives through `/api/get-krdict-api` (throttled client-side by the `aviApiRateLimit` setting) into `def1`; you distill your targeted definition into `def2`.
 4. **Correct, maybe.** If the resolution was wrong and you fix the lemma on the row, both loops fire: `writeGlobalLemma` teaches the map (the map loop — next encounter resolves correctly everywhere), and the cascade helpers repair the linked lemma entry and any cards (the master loop). Fixing later in Lemma Master fires only the master loop — the asymmetry is documented in the gotchas guide.
-5. **Card.** Completing `def2` triggers `autoCreateWordCard` (`cardFactory.js`): the lemma is ensured in `lemmaMaster`, the deck is found or created by source title (race-safe), the flashcard document is written with its `linkedAVILemmaId` back-reference, and TTS generation fires without awaiting through `/api/generate-tts` — the card is usable immediately and `audioUrl` arrives moments later.
-6. **Study.** The card enters the FSRS lifecycle: the daily pipeline (`srsEngine.js`, cached per logical day in `dailyplan`) counts it when due, each grade rewrites its FSRS fields, and each review increments `reviewLog` and the `reviewStats` aggregate that feed the heatmap and streaks.
+5. **Card.** Completing `def2` triggers `autoCreateWordCard` (`cardFactory.js`): the lemma is ensured in `lemmaMaster`, the deck is found or created by source title (race-safe), the duplicate guard checks the cards already in memory (one card per word per deck; `cardDedupe.js` holds the shared survivor rule), the flashcard document is written with its `linkedAVILemmaId` back-reference, and TTS generation fires without awaiting through `/api/generate-tts` — the card is usable immediately and `audioUrl` arrives moments later (and lands on the in-memory card too). If the word is later renamed, its cards fetch the new word's audio.
+6. **Study.** The card enters the FSRS lifecycle: the daily pipeline (`srsEngine.js`, cached per logical day in `dailyplan`) counts it when due, each grade rewrites its FSRS fields (due dates count from the logical day, so a 1:30 AM review with a 1-day interval is due the next logical day), and each review increments `reviewLog` and the `reviewStats` aggregate that feed the heatmap and streaks.
 
 Every module the trace touched respects the layer diagram: the page called a hook, the hook called utilities, the utilities called Firestore and the functions — and nothing imported upward.

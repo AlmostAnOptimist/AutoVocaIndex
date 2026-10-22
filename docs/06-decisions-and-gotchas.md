@@ -37,6 +37,18 @@ Cause: if the boot read fails and the app carries on as though it loaded, the di
 Rule: `firestoreLoad` returns `'error'` on failure, distinct from `null` (a brand-new account). The boot load retries, then stays read-only: `dataLoaded` stays false, so the sync never starts, and the SRS pipeline waits for it too. Every caller must check for `'error'` explicitly. A bare `if (!remote) return;` lets the string through, and a failed background refresh then sets `tasks` to `undefined`.
 Where: `useFirestore.firestoreLoad`; the boot load, the hourly run, and the visibility refresh in `App.jsx`.
 
+**A refresh merges; it never replaces.**
+Symptom (prevented): an edit made a second before switching apps comes back undone, on screen and then in Firestore; a definition filled on the phone is reverted by an edit on the laptop; a setting saved by one screen is put back by another.
+Cause: the hourly and return-to-tab refreshes used to swap Firestore's copy in wholesale, dropping edits still waiting in the debounce; the sync baseline wasn't moved after a refresh, so the next diff wrote the old version back; and every save wrote this device's whole document (a stale AVI row, the whole settings doc).
+Rule: three-way merge against the baseline (what this device last saved): a field or task changed here and not yet saved wins, everything else takes Firestore's version, including additions and deletions made elsewhere; then the refresh becomes the new baseline (a save already in flight can't put an older baseline back). Write only what changed: AVI rows field by field, `settings/main` key by key. A row deleted on another device stays deleted even if it was edited here. Waiting edits are flushed when the page is hidden.
+Where: `mergeRemoteData` / `planRemoteRefresh` / `commitRefresh` in `useFirestore.js`; `mergeAviRows` (`aviRowMerge.js`) and `applyRemote` / `refreshRemote` in `useAVIData.js`; `refreshFromRemote` in `App.jsx`.
+
+**With the persistent cache, an awaited write can hang forever offline.**
+Symptom (prevented): on the subway, grading a card does nothing and the card can't be graded again; a quiz never reaches its results; deleting a grammar entry freezes the panel.
+Cause: Firestore applies the write to the local cache at once and keeps it, but the promise only settles when the server confirms, so code that `await`s it waits until the connection returns.
+Rule: update memory first and queue the write without awaiting it (`queueWrite` in `queuedWrite.js`), reporting a refusal (and handling `not-found` for a doc deleted elsewhere). Make document ids up front with `doc(collection(...))` instead of `addDoc`. Await only where the next step genuinely needs the server (a Grammar Index create, which must confirm its id is free).
+Where: grading in `FlashcardsPage.jsx`, quiz results and Echo sessions in `QuizzesPage.jsx`, `createCorrectionNote.js`, note saves in `NotesPage.jsx`, Grammar Index deletes.
+
 **Absent, `null`, and `[]` are equivalent — and stripping is preferred.**
 Cause: optional array fields (`dates`, `completedDates`, link arrays) accumulated two "no value" representations over time.
 Rule: every reader guards (`Array.isArray` / `|| []`), so all three states are safe; when clearing a field, new code should *strip it from the object* rather than write an explicit `null`. Both patterns coexist in the shipped tree; don't churn old code to convert it.
@@ -54,13 +66,14 @@ Cause: the app runs Firestore's persistent local cache (`firebase.js`), so a boo
 Rule: once per logical day per device, flashcards and decks are read with `getDocsFromServer`, at boot and again on returning to the tab. The day is stamped (`avi_fc_refresh_{uid}`) only after a successful server read, so an offline attempt retries on the next trigger. Rows merge by content, so unchanged cards keep their object identity and only changed rows re-render.
 Where: `useFlashcardData` and `refreshFlashcardsIfStale` in `App.jsx`. As a repair, the Flashcards Clean up button also resyncs card backs from Lemma Master.
 
-**Local-echo and loading races.** Six verified instances of the same disease — async work racing in-memory state — each with its shipped cure:
+**Local-echo and loading races.** Seven verified instances of the same disease — async work racing in-memory state — each with its shipped cure:
 - *Duplicate source on add:* an `addDoc` plus an optimistic state append can double up. Cure: guard the append — `prev.some(s => s.id === ref.id) ? prev : [...prev, ...]` (`ContentLibraryPage.handleAddSource`).
 - *Duplicate deck on concurrent card creation:* two card factories miss the same not-yet-created deck and each create it. Cure: a shared in-flight promise map keyed on `(uid, deckName)` — first miss creates, everyone else awaits the same promise, entry removed on settle so a later-deleted deck is never resurrected (`cardFactory.resolveDeckId`).
 - *Late-arriving props overwrite local edits:* App.jsx loads inputs asynchronously and can hand them to `useAVIData` after the user has already edited. Cure: a `hasEditedRef` — props catch-up is allowed only until the first local edit, after which local state is authoritative (`useAVIData`).
 - *Background refresh clobbers a fresher list:* quiz results fetched during a session could be shorter than the in-memory list. Cure: higher count wins on merge (`QuizzesPage`).
-- *Duplicate cards in a burst:* the Sentence Input add loop, an Import commit, or a double-fired handler calls the card factory several times from one closure-captured `cards` array, so a "does this card exist?" check passes for every caller. Cure: the duplicate check lives inside the factory itself (one word card per lemma per deck; one sentence card per target word and sentence per deck), and concurrent calls for the same key share one in-flight creation (`cardFactory.withCardCreateLock`). The Flashcards Clean up button removes duplicates that predate the fix, keeping reviewed cards over new ones, then the oldest; cards in more than one deck are never auto-deleted.
+- *Duplicate cards in a burst:* the Sentence Input add loop, an Import commit, or a double-fired handler calls the card factory several times from one closure-captured `cards` array, so a "does this card exist?" check passes for every caller. Cure: the duplicate check lives inside the factory itself (one word card per lemma per deck; one sentence card per target word and sentence per deck), and concurrent calls for the same key share one in-flight creation (`cardFactory.withCardCreateLock`). Every card-creating path passes the cards in memory to that check, and merges and lemma corrections collapse any duplicates they create. One survivor rule everywhere (`cardDedupe.js`): a reviewed card over a new one, then the oldest, then id; a duplicate that is also in another deck only leaves this deck. The Flashcards Clean up button applies the same rule to duplicates that predate the fix.
 - *Duplicate rows on append:* the same race for word rows, sentence rows, and lemma entries. Cure: filter inside the functional updater, which always sees the latest state (`filterNewWordRows`, `filterNewSentenceRows`, `filterNewLemmas` in `aviUtils.js`).
+- *A modal saves the copy it opened with:* Edit Task and the Appointment modal used to write their whole snapshot back, undoing a completion, roll or follow-up promotion that landed while they were open. Cure: send the snapshot as opened along with the edit, and apply only the fields that differ onto the latest document (`applyTaskEdit` / `applyFieldEdits` in `taskEdit.js`); a document deleted meanwhile is not recreated.
 Rule for new code: any pairing of "await a write" with "update local state" needs one of these patterns.
 
 **Firestore is called directly throughout — known coupling, explicit non-goal** *(decision)*.
@@ -95,8 +108,23 @@ Where: the row edit paths and `handlePopupDone` (both loops) vs. the Lemma Maste
 **Every "what day is it" goes through the logical day.**
 Symptom: reviews done at 1 a.m. land on the wrong day; streaks break at midnight.
 Cause: the user's day doesn't flip at midnight — it flips at `settings.dayStartHour` (default 3).
-Rule: always `getLogicalToday(dsh)` / `getLogicalDateStr(dsh)` with the *threaded* `dsh` — never zero-arg (the default masks a threading gap) and never raw `new Date()` for date defaults, display, or document keys. `reviewLog` and `dailyplan` document IDs are logical dates, so this convention is baked into the data itself.
+Rule: always `getLogicalToday(dsh)` / `getLogicalDateStr(dsh)` with the *threaded* `dsh` — never zero-arg (the default masks a threading gap) and never raw `new Date()` for date defaults, display, or document keys. `reviewLog` and `dailyplan` document IDs are logical dates, so this convention is baked into the data itself. Two corollaries: a stored ISO timestamp is bucketed with `logicalDateOf(iso, dsh)`, never `iso.slice(0, 10)` (that's the UTC date, a day behind for anything stored before 9 a.m. in Korea); and a due date is computed from the logical day (`logicalDueISO` in `fsrs.js`), or a 1:30 a.m. review adds a day to its interval. `dsh` is read with `?? 3`, never `|| 3`, so the Midnight option (0) works.
 Where: `dateUtils.js` and every date site.
+
+**"Today" must follow the day flip while the app stays open.**
+Symptom (prevented): a tab left open overnight keeps yesterday's tasks on Today, shows nothing overdue, and doesn't run the review pipeline for the new day.
+Cause: values memoized on `dsh` alone never recompute when the date changes.
+Rule: the logical day is state (`useLogicalDay` in App, re-checked at each day-start and on returning to the tab) and is passed down; memos that depend on "today" key on the day, not on `dsh`. A flip with the app open runs the same resync a tab return runs, once.
+Where: `useLogicalDay.js`; the day-flip effect in `App.jsx`; Today, Overdue, Flashcards, the Library overview hook.
+
+**A recurring task several occurrences behind catches up in one run.**
+Symptom (prevented): a daily task missed for five days stays invisible (Today shows only today, Overdue skips daily tasks) while it steps forward one occurrence per engine run.
+Rule: `rollRecurringTask` repeats the roll until the occurrence doesn't roll (capped), and `nextDueAfterCompletion` gives the date the engine will actually land on, so Upcoming shows the right next date after a late completion.
+Where: `recurrenceEngine.js`.
+
+**A manual task order belongs to one day** *(decision)*.
+A drag on Today or Upcoming stamps `sortOrder` with `sortOrderDate`; the rank applies only on that day, and a drop onto another day's row does nothing. An order without a day (from before this rule) is ignored. Overdue and Unscheduled sort by date and priority and don't drag.
+Where: `dragSort.js`, `useDragSort.js`.
 
 **Grammar cards live outside FSRS entirely** *(decision)*.
 Grammar patterns aren't discrete recall facts, so interval math fits them poorly. Grading a grammar card writes only `{ due: null, lastReview, lastGrade, reps, gapEvents }` — no stability, no interval — and grammar reviews are excluded from `reviewLog`, `reviewStats`, the daily pipeline's triage, and the due snapshot. The Grammar Deck is a browse-and-refresh surface driven by mastery levels, not a scheduler.
@@ -188,10 +216,10 @@ Symptom (prevented): a forgotten background tab's timers fight the active tab's 
 Rule: periodic engines check `document.visibilityState` before acting and re-run on `visibilitychange`; long-running loops (the Import pipeline's fetch loop) pause while hidden and resume on return.
 Where: the engine effects in `App.jsx`; the hidden-state wait loops in `AVIImportPage.jsx`.
 
-**Debounced syncs flush on unmount.**
-Symptom (prevented): the last edit before navigating away never persists.
-Rule: any debounced writer must flush pending state in its cleanup.
-Where: `useAVIData` (cleanup calls `flush()` if anything is pending); `useFirestore` follows the same pattern.
+**Debounced syncs flush on unmount and when the page is hidden.**
+Symptom (prevented): the last edit before navigating away, closing the tab or switching apps never persists (iOS suspends timers in the background).
+Rule: any debounced writer flushes pending state in its cleanup and on `visibilitychange` → hidden / `pagehide`. The same goes for editors with their own autosave: the note editor saves a waiting edit on close, switch, leaving the page and hide instead of cancelling the timer.
+Where: `useAVIData` and `useFirestore` (`flush()`); `NoteEditor` in `NotesPage.jsx`.
 
 **iOS can corrupt localStorage; boot has to survive it.**
 Symptom (prevented): the app white-screens on every load until site data is cleared by hand.
@@ -227,7 +255,8 @@ Where: the separator comment atop the compare picker in `GrammarIndexPage.jsx`; 
 - Some shapes are deterministic and rewrite the primary directly: 는 after a consonant-final stem is a verb (넘는 → 넘다), and a ㄹ-final stem before an 으-ending is ㄷ-irregular (걸으러 → 걷다). The copula-이 rules (이나, 이라서, 이라면…) skip vowel-final stems, and when both X and X이 validate (고양 / 고양이 for 고양이나) the resolver prefers X이.
 - Genuinely ambiguous forms (낮은: 낮 or 낮다; 들었어요: 들다 or 듣다) resolve to the likelier reading and offer the other as a one-tap alternate; don't try to settle them with more rules.
 - Lemmas in the `(주먹을) 날리다` shape (a leading Hangul parenthetical) are distinct entries from `날리다`, and search keeps them apart: no matching rule ever drops a leading parenthetical, while optional endings (`입사(하다)`) and slash forms (`보장하다 / 보장되다`) count as headword variants of their entry. In quizzes, typing the collocation without parentheses (`주먹을 날리다`) earns full credit.
-- Auto-added synonym/nuance rows use the reserved source title `동의어/유의어` (`NUANCE_SOURCE_TITLE` in `aviUtils.js`); don't create a real source with that name.
+- Auto-added synonym/nuance rows use the reserved source title `동의어` (`NUANCE_SOURCE_TITLE` in `aviUtils.js`; the older title `동의어/유의어`, `LEGACY_NUANCE_SOURCE_TITLE`, is still recognized, and rows are added under whichever title the list already uses). Don't create a real source with either name. A word stays in that source only while it has a synonym that still exists; when it loses its last one, its row and its card in that deck go.
+- Import treats a leading bare number ("3 ") as a list marker only when two lines open with consecutive numbers; "3 년 전에…" keeps its number. "1.", "1)", "(1)" and circled digits are always stripped.
 Where: `aviUtils.resolveLemmaWithDictionary` and its comments — read them in full before modifying resolution.
 
 ---

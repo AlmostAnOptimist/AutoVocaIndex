@@ -24,11 +24,11 @@ For the app-generated group, the ID value is also stored as a field on the docum
 
 **Timestamps and dates.** Full timestamps are ISO 8601 strings (`new Date().toISOString()`); calendar dates are `'YYYY-MM-DD'` strings. There are no Firestore `Timestamp` objects anywhere in the model — this matters most for `globalLemmaMap.updatedAt`, which the trust gate compares *as a string* (see that section).
 
-**The logical day.** Every "what day is it for the user" question goes through `getLogicalToday(dsh)` / `getLogicalDateStr(dsh)`, where `dsh` is `settings.dayStartHour` (default 3). Before the day-start hour, it is still "yesterday." `reviewLog` and `dailyplan` document IDs are logical-day dates, so a 1 a.m. review session lands on the previous day's log.
+**The logical day.** Every "what day is it for the user" question goes through `getLogicalToday(dsh)` / `getLogicalDateStr(dsh)`, where `dsh` is `settings.dayStartHour` (default 3). Before the day-start hour, it is still "yesterday." `reviewLog` and `dailyplan` document IDs are logical-day dates, so a 1 a.m. review session lands on the previous day's log. The same rule applies to everything derived from a timestamp: FSRS due dates count from the logical day, and AVI's Added Today, heatmap and streaks, the Gazette activity map, quiz charts and ranges, and Echo dates all bucket a stored ISO timestamp by the logical day it falls on (`logicalDateOf(iso, dsh)` in `dateUtils.js`), never by its UTC date (`iso.slice(0, 10)` is a day off for anything stored before 9 a.m. in Korea).
 
 **Batches.** Batched writes flush at 450–490 operations depending on the site (Firestore's hard cap is 500). If you add bulk-write code, stay under 490 and reuse the existing flush pattern.
 
-**Two persistence styles.** Tasks and the AVI input collections use a *debounced diff sync*: the page edits an in-memory array, and a hook (`useFirestore.js` at 1500 ms, `useAVIData.js` at 800 ms) diffs the previous synced state against the next and writes only changed documents. Everything else uses direct per-document writes at the interaction site. The diff sync includes a delete-all guard: a pass that would delete every document in a collection of more than five is refused and logged, because a sudden many-to-zero jump is almost always a stale-empty-state bug, not an intentional bulk delete (`useAVIData.syncCollection`).
+**Two persistence styles.** Tasks and the AVI input collections use a *debounced diff sync*: the page edits an in-memory array, and a hook (`useFirestore.js` at 1500 ms, `useAVIData.js` at 800 ms) diffs the previous synced state against the next and writes only changed documents — tasks whole, existing AVI rows field by field (`updateDoc` of the changed fields; a removed field is `deleteField()`), `settings/main` key by key. Waiting changes are also written when the page is hidden. A refresh from Firestore is merged into what's on screen rather than replacing it (an edit not yet saved wins; other devices' changes, additions and deletions come in), and a row deleted on another device stays deleted even if it was edited here. Everything else uses direct per-document writes at the interaction site. The diff sync includes a delete-all guard: a pass that would delete every document in a collection of more than five is refused and logged, because a sudden many-to-zero jump is almost always a stale-empty-state bug, not an intentional bulk delete (`useAVIData.syncCollection`).
 
 ---
 
@@ -69,7 +69,7 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 | `notes` | string | For `keepRecord` recurring tasks, completion stamps (`[date] Done`) are prepended here on reset |
 | `keepRecord` | boolean | |
 | `completed` | boolean | |
-| `completedAt` | string \| null | Reset to `null` when a recurring task advances |
+| `completedAt` | string \| null | Reset to `null` when a recurring task advances or a task is reset |
 | `persistent` | boolean | Persistent tasks skip all recurrence/overdue logic |
 | `push` | boolean | Push-forward behavior for non-recurring tasks; forced `false` on multi-date tasks |
 | `activeToday`, `activatedOn` | boolean, string \| null | Unscheduled-task activation |
@@ -79,14 +79,17 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 | `created` | string | ISO timestamp |
 | `linkedSectionId` | string | Present on tasks created from a Content Library section |
 | `isAppointmentTask`, `appointmentId`, `apptProvider`, `linkedApptId` | mixed | Present on appointment-linked tasks (reminder tasks and follow-ups) |
+| `sortOrder`, `sortOrderDate` | number, string | Manual drag order (Today, Upcoming). The rank counts only on `sortOrderDate`, the day it was dragged on; on any other day the task sorts normally. A `sortOrder` without `sortOrderDate` (from before this rule) is ignored |
 
-**Recurrence object.** `type` is one of `none`, `daily`, `specific_days`, `twice_weekly`, `biweekly`, `every_n_days`, `monthly_date`, `monthly_relative`, `every_x_months_on_date`, `every_x_months_on_weekday`, `yearly` (`RECUR_TYPES` in `constants.js`). Depending on type it also carries `days` (weekday names), `interval` (number), `dayOfMonth`, `week` (`first`/`second`/`third`/`last`), and `dayOfWeek`. When the engine advances a completed recurring task it additionally writes `nextDue` and `lastReset` into the recurrence object.
+Fields starting with `_` (`_dateOcc`, `_doneRecord`) exist only on render copies — Upcoming shows each day of a multi-date task, and done records, as copies — and are never stored. Edit Task opens the stored task, never the copy, and saves only the fields you changed onto the task as it is at Save (`applyTaskEdit` in `taskEdit.js`), so a completion, roll or refresh that landed while the modal was open is kept. `firestoreLoad` strips any `_` field that reached Firestore before this rule, and the boot load writes the cleaned docs back once.
+
+**Recurrence object.** `type` is one of `none`, `daily`, `specific_days`, `twice_weekly`, `biweekly`, `every_n_days`, `monthly_date`, `monthly_relative`, `every_x_months_on_date`, `every_x_months_on_weekday`, `yearly` (`RECUR_TYPES` in `constants.js`). Depending on type it also carries `days` (weekday names), `interval` (number), `dayOfMonth`, `week` (`first`/`second`/`third`/`last`), and `dayOfWeek`. When the engine advances a completed recurring task it additionally writes `nextDue` and `lastReset` into the recurrence object. Completing a recurring task stores `nextDue` as the date the engine will actually move it to (`nextDueAfterCompletion`; "every N days" counts from the due date). A task several occurrences behind catches up in one engine run (`rollRecurringTask`), not one step per run.
 
 **Recurrence and `dates` are mutually exclusive by construction** — the modals enforce it, and no recurrence code handles `dates[]`.
 
 ## users/{uid}/appointments/{apptId}
 
-Scheduled sessions (tutoring, classes, exchanges). Document ID is `uid()`, duplicated in the `id` field. Written directly from `AppointmentModal.jsx`, by the follow-up promotion effect in `App.jsx`, and by `saveTask` (date, time, and follow-up queue, merged) when the linked task is edited.
+Scheduled sessions (tutoring, classes, exchanges). Document ID is `uid()`, duplicated in the `id` field. Written from `AppointmentModal.jsx`, by the follow-up promotion effect in `App.jsx`, and by `saveTask` when the linked task is edited. Every update is field-level: the modal sends the payload it would have saved untouched along with the new one, and App applies only the changed fields onto the appointment as it is at Save (`applyFieldEdits` in `taskEdit.js`; an appointment deleted while the modal was open is not recreated); promotion and section links are merge writes of their own fields (`patchAppointment`); the linked-task edit writes results, category, date, time and the follow-up queue only when they were changed in that modal. A new appointment is written whole.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -97,7 +100,7 @@ Scheduled sessions (tutoring, classes, exchanges). Document ID is `uid()`, dupli
 | `category` | string | `'lang'` |
 | `summary`, `results` | string | Pre-session notes / post-session outcomes |
 | `outcome` | string \| null | |
-| `followUpQueue` | array | `{ date, time }` entries (`time` may be `''`), kept date-sorted. When the appointment's date passes, the earliest queued date becomes its new `date`/`time` and each passed date is logged into `results`. Editable from `AppointmentModal.jsx` or from the linked task's edit window (`EditTaskModal.jsx`). Legacy single `followUpDate` / `followUpTime` fields are migrated into the queue on read and stripped or nulled on write |
+| `followUpQueue` | array | `{ date, time }` entries (`time` may be `''`), kept date-sorted. When the appointment's date passes, the earliest queued date becomes its new `date`/`time` and each passed date is logged into `results` as a `[YYYY-MM-DD]` line, once per date (`planFollowUpPromotion` in `apptPromotion.js` skips a date already stamped at the start of a line). Editable from `AppointmentModal.jsx` or from the linked task's edit window (`EditTaskModal.jsx`). Legacy single `followUpDate` / `followUpTime` fields are migrated into the queue on read and stripped or nulled on write |
 | `cost`, `costCurrency` | null | Written as literal `null` (legacy single-cost fields) |
 | `costs` | array | `{ id, label, date, amount (number), currency, notes }` |
 | `taskId` | string \| null | The linked reminder task |
@@ -121,12 +124,15 @@ One document per study material (a novel, a drama, a textbook). Firestore auto-I
 | `studyIntent` | string \| null | `'mining'` exempts a source from the passive-media exclusion in stats |
 | `series`, `seriesOrder` | null | Created as `null` |
 | `sourceStatus` | string | `'Not started'`, `'In Progress'`, `'Done'`, ... Read through `getSourceStatus()`, which falls back to the legacy `watchStatus` field on old documents |
-| `lastActivityAt` | string \| null | ISO timestamp, bumped by section activity |
+| `lastActivityAt` | string \| null | ISO timestamp, bumped by section activity — a section marked Done or In Progress or scheduled, wherever that happens (Library, Today, Appointments, Planner; `sectionDoneWrites` in `contentUtils.js`) |
 | `createdAt` | string | |
 | `sectionOrder` | string[] | Optional; section IDs in drag-reorder order. Absent = natural sort |
 | `costs` | array | Same row shape as appointment costs |
 | `linkedNoteIds` | string[] | Notes linked at source level |
 | `isSourceless` | boolean | Present (`true`) only on the special catch-all "Sourceless" source, created on demand by the source-delete cascade |
+| `pendingArchive`, `pendingArchiveDate` | boolean, string | Set when the source's last open section is finished (every section Done or Skip), wherever it was finished |
+
+**Active and Adrift** are computed on every render, nothing stored (`useLibraryOverviewData.js`): a started source goes Adrift once it has had no qualifying activity for `adriftDays`, even with sections Done or In Progress. A Scheduled source or section holds it in Active only while its task's date is today or later; an overdue schedule doesn't count. Word lists (the 동의어 source, Reference › Word List) and passive media stay off the Overview.
 
 **Provenance is by title, not ID.** AVI input rows store the source *title* string and section *content* string (see `wordInputs`), and deck auto-creation matches `deck.name === source title`. Renaming a source is handled by an app-level cascade that rewrites dependent rows — if you write your own tooling, do not rename a source title in isolation.
 
@@ -141,7 +147,7 @@ Chapters/episodes/units of a source. Firestore auto-ID.
 | `status` | string | `'Not started'`, `'Scheduled'`, `'In Progress'`, `'Done'`, `'Skip'` |
 | `previousStatus` | string \| null | Stashed when marking Done so undo can restore |
 | `url` | string \| null | |
-| `linkedTaskId` | string \| null | The task created by "Schedule" |
+| `linkedTaskId` | string \| null | The task created by "Schedule". Deleting the section or its source, or moving it to Not started or Skip, deletes that task if it is an unfinished one-off (a recurring one only loses the link; a finished one is history and stays); In Progress keeps it |
 | `lastActivityAt` | string | |
 | `createdAt` | string | |
 | `glossaryTermIds` | string[] | Grammar Index entries noticed in this section (the grammar↔section link lives here, on the section) |
@@ -162,7 +168,7 @@ The staging table for word entries — the heart of the Gather step. Synced by t
 | `def1` | string | Reference definition (KRDict or AI fetch) |
 | `def2` | string | The user's targeted definition — the one that goes on cards |
 | `uploaded` | boolean | `true` once a flashcard has been created from this row |
-| `skipUpload` | boolean | User opted this row out of card creation |
+| `skipUpload` | boolean | User opted this row out of card creation. Skip is per word per source: new rows of a word skipped in that source start skipped, skipping a word also skips its sentence rows there, and turning Skip on for a word that already has a card asks whether to remove it |
 | `lastUncheckReason`, `lastUncheckDate` | string | Why/when a row was unchecked from upload; `''` when unused |
 
 ## users/{uid}/sentenceInputs/{row.uid}
@@ -179,6 +185,7 @@ Mined sentences, one row per (sentence, target word) pair — a sentence with tw
 | `cardBack` | string | The lemma's `def2`. A row whose lemma has no `def2` yet keeps an empty back and gets no card; the card is created once the lemma gets a `def2`, wherever it is written |
 | `source`, `section` | string | Title/content strings, as on word rows |
 | `uploaded`, `skipUpload`, `lastUncheckReason`, `lastUncheckDate` | | As on word rows |
+| `skippedWithWord` | boolean | `true` on a sentence row skipped because its word was skipped in that source; un-skipping the word un-skips only these, and asks about the word's other skipped sentence rows (`wordSkip.js`). Absent otherwise |
 
 ## users/{uid}/lemmaMaster/{lemmaID}
 
@@ -196,6 +203,8 @@ One row per resolved lemma — the record behind the Lemma Master page and the f
 | `originUID` | string | `uid()` at creation |
 | `lemmaID` | string | `uid()`; also the document ID |
 
+Deleting an entry removes its id from every other entry's relation fields; a merge repoints them to the survivor (`stripLemmaRelations`), so a word whose only synonym is gone leaves the 동의어 source and its card leaves that deck.
+
 Flashcards link back here via `linkedAVILemmaId` (= `lemmaID`). The cascade helper falls back to matching on normalized lemma text for cards created with a `null` link, and repairs the ID link as a side effect (`aviUtils.js`).
 
 ## users/{uid}/decks/{deckId}
@@ -211,6 +220,8 @@ Flashcards link back here via `linkedAVILemmaId` (= `lemmaID`). The cascade help
 | `paused` | boolean | Paused decks are held out of triage, due counts, and the spike forecast; a card only counts as paused if *every* deck it belongs to is paused |
 
 The Grammar deck uses the fixed ID `deck_grammar`. The Flashcards page also presents virtual collections (`all`, `all_words`, `all_sentences`) — these are UI-only deck IDs and are never stored.
+
+Deleting a deck deletes the cards that are in no other deck; a card also in a deck you keep only leaves the deleted one, with its review history.
 
 Deck find-or-create during card auto-creation is race-safe via a shared in-flight promise map keyed on `(uid, deckName)` (`cardFactory.resolveDeckId`) — concurrent card creations for a new source await one creation instead of each creating a duplicate.
 
@@ -228,7 +239,7 @@ Firestore auto-ID. Three card types share one collection, discriminated by `type
 | `linkedAVILemmaId` | string \| null | → `lemmaMaster.lemmaID` |
 | `linkedGrammarEntryId` | string \| null | → grammar entry ID (grammar cards only) |
 | `gapEvents` | array | Grading history events |
-| `triageBucket`, `lastTriageDate` | string \| null | Written by the daily pipeline's overdue triage |
+| `triageBucket`, `lastTriageDate` | string \| null | Written by the daily pipeline's overdue triage. A deferral moves only the due date (logical today + about 70% of stability); stability and difficulty are left alone |
 | `createdAt` | string | |
 | `easeFactor`, `interval`, `repetitions`, `nextDueDate`, `lastGrade`, `lastReviewed` | mixed | **SM-2-shaped creation fields.** Every card is created with these placeholder values (`2.5 / 1 / 0 / today / null / null`); the first grade writes the FSRS fields, which supersede them |
 
@@ -245,11 +256,13 @@ Firestore auto-ID. Three card types share one collection, discriminated by `type
 
 **Dual-format readers.** Because a card carries only the creation-shape fields until its first grade — and an ungraded card keeps them indefinitely — the due/new helpers accept both formats: `getDueDateStr` reads `due` (FSRS) or `nextDueDate` (legacy), and `isNewCard` treats a card with no `state` field as new only if it also has no `lastGrade`, `lastReviewed`, or `reps`. Presence of `stability` is the "is this an FSRS card" test throughout.
 
+**One card per word per deck.** A vocab card is identified by deck + normalized lemma, a sentence card by deck + lemma + NFC sentence. Every card-creating path passes the cards in memory to the factory's duplicate guard, and merges, corrections and Flashcards Cleanup collapse duplicates with one survivor rule: a reviewed card over a new one, then the earliest `createdAt`, then id (`cardDedupe.js`). A duplicate also in another deck only leaves this one.
+
 **Type-specific fields.** Vocab: `lemma`. Sentence: `lemma`, `sentence`, `inputForm`. Grammar: created with `nextDueDate: null` (scheduled only after its first Grammar Deck review).
 
 **Grammar cards are graded outside FSRS.** `FlashcardsPage.handleGrade` branches on type: a grammar grade writes only `{ due: null, lastReview, lastGrade, reps, gapEvents }` (history capped at the last 100 events) — no stability/difficulty, no interval math. Grammar grades also do **not** write to `reviewLog` or `reviewStats`; those track FSRS reviews only.
 
-**TTS fields** (written by `ttsUtils.js` after async generation): `audioUrl` (vocab front audio), `sentenceAudioUrl` (sentence audio), `exampleAudio` (array of per-line clips for grammar-entry example blocks; setting it clears the legacy single-clip `audioUrl` to `null`).
+**TTS fields** (written by `ttsUtils.js` after async generation): `audioUrl` (vocab front audio), `sentenceAudioUrl` (sentence audio), `exampleAudio` (array of per-line clips for grammar-entry example blocks; setting it clears the legacy single-clip `audioUrl` to `null`). A clip's file name is derived from the spoken word, so `wordAudioMatches(card)` can tell when a renamed card's audio still says the old word; renames fetch the new word's clip, and the Dev Dashboard's audio scan lists older ones. "Needs audio" means `cardNeedsAudio`: grammar cards with examples and no `exampleAudio`, other cards with no `audioUrl` (the Settings count and the backfill use the same rule).
 
 ## users/{uid}/quiz_results/{resultId}
 
@@ -263,7 +276,7 @@ One document per finished Echo Quiz session (Echo two-way or Dictation), kept ap
 
 ## users/{uid}/grammar_entries/{grammar_n}
 
-Grammar Index entries. Document ID is `` `grammar_${entryNumber}` ``.
+Grammar Index entries. Document ID is `grammar_N`: a new entry takes the first N past every id *and* entry number in use, confirmed free in Firestore, and is created with `setDoc` (never `updateDoc` onto an existing doc). Deleting an entry renumbers the ones after it but keeps their ids, so ids and `entryNumber` drift apart — never derive one from the other.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -275,11 +288,11 @@ Grammar Index entries. Document ID is `` `grammar_${entryNumber}` ``.
 | `entryNumber` | number | |
 | `createdAt` | string | |
 
-Creating an entry also creates its linked grammar flashcard in `deck_grammar` (front = `glossaryTerm`, back = `compareTo`). The entry→section link is stored on the *section* (`glossaryTermIds`), and entry→note links are stored on the *note* (`linkedGrammarIds`) — the entry document itself carries no link arrays.
+Creating an entry also creates its linked grammar flashcard in `deck_grammar` (front = `glossaryTerm`, back = `compareTo`). The entry→section link is stored on the *section* (`glossaryTermIds`), and entry→note links are stored on the *note* (`linkedGrammarIds`) — the entry document itself carries no link arrays. Deleting an entry removes its id from every section, source and note that links it (found with `array-contains`, so links made on another device count); the Dev Dashboard's Grammar Index check lists dead links left from before.
 
 ## users/{uid}/grammar_corpus/index
 
-A single denormalized document rebuilt (debounced 2 s) whenever grammar entries change, so the grammar-quiz function call can send a compact corpus instead of the client re-deriving it: `{ entries: [{ id, term, level, compareTo, explanation }], updatedAt }`.
+A single denormalized document rebuilt (debounced 2 s) when grammar entries change — written only when its content differs from what this device last wrote (a fingerprint in localStorage, `avi_grammar_corpus_sig_{uid}`) — so the grammar-quiz function call can send a compact corpus instead of the client re-deriving it: `{ entries: [{ id, term, level, compareTo, explanation }], updatedAt }`.
 
 ## users/{uid}/notes/{noteId}
 
@@ -303,7 +316,7 @@ The once-per-logical-day SRS pipeline cache (`srsEngine.js`): `{ logicalDate, pi
 
 ## users/{uid}/settings/main
 
-The single shared settings document. Two writers merge into it independently: the app-settings sync (`useFirestore.js`) and the AVI-settings sync (`useAVIData.js`, which reads/writes only `avi`-prefixed keys). The active theme is stored here (`theme`) *and* mirrored to localStorage (`avi_theme`) for first paint — Firestore wins at boot. Sound preferences, by contrast, are localStorage-only (`avi_sound`, `avi_quiz_sounds`).
+The single shared settings document. Two writers merge into it independently: the app-settings sync (`useFirestore.js`, which writes only the keys it changed, each replaced whole via `setDoc` with `mergeFields`) and the AVI-settings sync (`useAVIData.js`, which reads/writes only `avi`-prefixed keys and mirrors them into App's copy). Neither ever writes back a key the other owns. The active theme is stored here (`theme`) *and* mirrored to localStorage (`avi_theme`) for first paint — Firestore wins at boot. Sound preferences, by contrast, are localStorage-only (`avi_sound`, `avi_quiz_sounds`).
 
 | Field | Default | Notes |
 |---|---|---|
@@ -316,7 +329,7 @@ The single shared settings document. Two writers merge into it independently: th
 | `anthropicApiKey` | | Legacy and unused. Older versions stored a key here from a Settings field that only unlocked the grammar-quiz button; the field is gone and nothing reads this value. Accounts that set it may still have it |
 | `customApptTypes` | | Extra appointment types; readers accept array or keyed-object-of-arrays |
 | `exchangeRates`, `ratesUpdated` | | `{ USD, EUR, ... }` as KRW-per-unit numbers; `ratesUpdated` is a `'YYYY-MM-DD'` stamp |
-| `adriftDays` | | Unscheduled-task aging threshold |
+| `adriftDays` | 14 | Content Library: days without activity before a started source counts as Adrift |
 | `aviCurrentSource`, `aviCurrentSection` | `''` | The active intake target — stored as title/content **strings**, and rewritten by the source-rename/delete cascades |
 | `aviDictMode` | `'krdict'` | |
 | `aviLemmaSortOrder` | `'recent'` | |
@@ -330,9 +343,9 @@ The single shared settings document. Two writers merge into it independently: th
 
 **May not exist on a fresh account** — every reader falls back to defaults, and the AVI extractor returns a full default object when the document is absent.
 
-## users/{uid}/settings/gazetteAdAliases and users/{uid}/meta/grammar_cleanup
+## users/{uid}/settings/gazetteAdAliases, settings/devActionRuns and meta/grammar_cleanup
 
-`gazetteAdAliases` is a `{ filename: aliasString }` map for Gazette plate labeling, edited from DevDashboard; the Gazette degrades gracefully when it is absent or empty. `meta/grammar_cleanup` is a one-time migration flag document.
+`gazetteAdAliases` is a `{ filename: aliasString }` map for Gazette plate labeling, edited from DevDashboard; the Gazette degrades gracefully when it is absent or empty. `devActionRuns` is `{ actionKey: ISO timestamp }`, the last successful run of each Dev Dashboard action (written on success only, read only by the dashboard; the boot load reads `settings/main` alone, so it never reaches the app). `meta/grammar_cleanup` is a one-time migration flag document.
 
 ---
 
