@@ -12,7 +12,9 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { recomputeReviewStats } from '../utils/reviewStatsEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
-import { regenerateLemmaAudio } from '../utils/ttsUtils.js';
+import { planIsEmpty, applyCardDedupe } from '../utils/cardDedupe.js';
+import { planNuanceCleanup } from '../utils/nuanceCleanup.js';
+import { regenerateLemmaAudio, wordAudioMatches } from '../utils/ttsUtils.js';
 import { spokenLemma, needsSpokenRefresh } from '../utils/spokenText.js';
 
 // ── Constants ─────────────────────────────────────────────────
@@ -662,9 +664,14 @@ function GazetteAdsPanel({ adAliases, onSaveAlias, savedFlash, C }) {
 //   3. Section / source audit — informational: rows whose stored source or
 //      section no longer exists in Content Library, and sentence rows whose
 //      cardBack matches neither def2 nor def1 (possibly hand-edited).
-// Run with no AVI edits in flight elsewhere, and reload the main app after
-// applying — AVIPage keeps an in-memory copy, and its whole-doc diff sync
-// could otherwise write stale rows back over a repair.
+//   4. 동의어 cleanup (bug sweep R1, R2) — relation ids pointing at deleted
+//      Lemma Master entries are removed; a word left with no synonym loses
+//      its 동의어 row, and its card leaves the 동의어 deck (deleted when
+//      that was its only deck). Words deleted from Lemma Master keep their
+//      cards, as the delete promised.
+// S4: AVIPage saves rows field by field (a repair is no longer written back
+// over) and re-reads them once the main app has been away for a minute or
+// more; reload the main app to see a repair right away.
 function AVIMaintenancePanel({ uid, C }) {
   const [status,   setStatus]   = useState('idle'); // idle | scanning | ready | applying
   const [report,   setReport]   = useState(null);
@@ -681,13 +688,14 @@ function AVIMaintenancePanel({ uid, C }) {
     if (status === 'scanning' || status === 'applying') return;
     setStatus('scanning'); setApplyMsg('');
     try {
-      const [lmSnap, wSnap, sSnap, cardSnap, srcSnap, secSnap] = await Promise.all([
+      const [lmSnap, wSnap, sSnap, cardSnap, srcSnap, secSnap, deckSnap] = await Promise.all([
         getDocs(collection(db, 'users', uid, 'lemmaMaster')),
         getDocs(collection(db, 'users', uid, 'wordInputs')),
         getDocs(collection(db, 'users', uid, 'sentenceInputs')),
         getDocs(collection(db, 'users', uid, 'flashcards')),
         getDocs(collection(db, 'users', uid, 'content_sources')),
         getDocs(collection(db, 'users', uid, 'content_sections')),
+        getDocs(collection(db, 'users', uid, 'decks')),
       ]);
       const load  = (snap) => snap.docs.map(d => ({ ref: d.ref, data: d.data() }));
       const lm    = load(lmSnap), words = load(wSnap), sents = load(sSnap), cards = load(cardSnap);
@@ -735,10 +743,18 @@ function AVIMaintenancePanel({ uid, C }) {
         .map(([norm, arr]) => `${norm} (${arr.length} entries)`);
 
       // 2. Def2 resync plan — Lemma Master is canonical
+      // D1: with duplicate entries, use the one Flashcards Cleanup's resync
+      // uses — an entry with a def2 over one without, then the most recently
+      // updated — so the two tools never push different definitions.
       const lmEntryByNorm = {};
       for (const { data } of lm) {
         const k = normalizeLemma(data.lemma || '');
-        if (k && !lmEntryByNorm[k]) lmEntryByNorm[k] = data;
+        if (!k) continue;
+        const cur = lmEntryByNorm[k];
+        const better = !cur ||
+          (!!data.def2 && !cur.def2) ||
+          (!!data.def2 === !!cur.def2 && (data.lastUpdated || '') > (cur.lastUpdated || ''));
+        if (better) lmEntryByNorm[k] = data;
       }
       const def2Updates = [];
       const def2NoCanon = []; // row has a def2 but its LM entry has none — never auto-erased
@@ -806,11 +822,18 @@ function AVIMaintenancePanel({ uid, C }) {
       words.forEach(({ ref, data }) => noteRow(ref, data));
       sents.forEach(({ ref, data }) => noteRow(ref, data));
 
+      // 4. 동의어 cleanup (R1, R2)
+      const nuance = planNuanceCleanup({
+        lm, words,
+        cards: cards.map(({ ref, data }) => ({ id: ref.id, ...data })),
+        decks: deckSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+      });
+
       setReport({
         counts: { lm: lm.length, words: words.length, sents: sents.length, cards: cards.length },
         nfcUpdates, lmDuplicates, def2Updates, def2NoCanon, cardBackUpdates, sentBackReview,
         sectionGroups: Object.values(sectionGroups),
-        sectionsBySrc,
+        sectionsBySrc, nuance,
       });
       setStatus('ready');
     } catch (e) {
@@ -861,6 +884,30 @@ function AVIMaintenancePanel({ uid, C }) {
     setStatus('ready');
   };
 
+  const applyNuance = async () => {
+    if (!report || status === 'applying' || nuanceCount(report.nuance) === 0) return;
+    setStatus('applying');
+    const n = report.nuance;
+    try {
+      await applyBatch(n.relationUpdates);
+      let batch = writeBatch(db);
+      let ops = 0;
+      for (const { ref } of n.rowDeletes) {
+        batch.delete(ref);
+        ops++;
+        if (ops >= 450) { await batch.commit(); batch = writeBatch(db); ops = 0; }
+      }
+      if (ops > 0) await batch.commit();
+      await applyCardDedupe({ uid, plan: n.cardPlan });
+      setApplyMsg(`동의어 cleanup: ${n.relationUpdates.length} lemma${n.relationUpdates.length === 1 ? '' : 's'}, ${n.rowDeletes.length} row${n.rowDeletes.length === 1 ? '' : 's'}, ${n.cardPlan.deletes.length + n.cardPlan.deckUpdates.length} card${n.cardPlan.deletes.length + n.cardPlan.deckUpdates.length === 1 ? '' : 's'}. Reload the main app before further AVI edits.`);
+      setReport(r => ({ ...r, nuance: { ...r.nuance, relationUpdates: [], rowDeletes: [], cardPlan: { deletes: [], deckUpdates: [], decrements: new Map(), keeps: [] }, cardLabels: [] } }));
+    } catch (e) {
+      console.error('동의어 cleanup failed', e);
+      setApplyMsg('동의어 cleanup failed — check console.');
+    }
+    setStatus('ready');
+  };
+
 const applyRetag = async (group, choice) => {
     if (!report || status === 'applying') return;
     setStatus('applying');
@@ -891,7 +938,7 @@ const applyRetag = async (group, choice) => {
     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '760px' }}>
       <div style={{ fontSize: '11.5px', color: C.textM, lineHeight: 1.6 }}>
         Scan is read-only. Apply buttons write field-level repairs to Firestore.
-        Run with no AVI edits open in another tab, and reload the main app after applying.
+        The main app picks repairs up once it has been in the background for a minute or more; reload it to see them right away.
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
         <button onClick={scan} disabled={status === 'scanning' || status === 'applying'} style={btnSt(status === 'scanning' || status === 'applying')}>
@@ -904,6 +951,9 @@ const applyRetag = async (group, choice) => {
             </button>
             <button onClick={applyDef2} disabled={status === 'applying' || (report.def2Updates.length + report.cardBackUpdates.length === 0)} style={btnSt(status === 'applying' || (report.def2Updates.length + report.cardBackUpdates.length === 0))}>
               Apply Def2 Resync ({report.def2Updates.length + report.cardBackUpdates.length})
+            </button>
+            <button onClick={applyNuance} disabled={status === 'applying' || nuanceCount(report.nuance) === 0} style={btnSt(status === 'applying' || nuanceCount(report.nuance) === 0)}>
+              Apply 동의어 Cleanup ({nuanceCount(report.nuance)})
             </button>
           </>
         )}
@@ -938,6 +988,14 @@ const applyRetag = async (group, choice) => {
               Sentence card backs matching neither def2 nor def1 (possibly hand-edited, not auto-fixed): {listPreview(report.sentBackReview)}
             </div>
           )}
+          <div style={lineSt}>
+            동의어 cleanup: <span style={numSt}>{report.nuance.relationUpdates.length}</span> lemma{report.nuance.relationUpdates.length === 1 ? '' : 's'} linking to deleted entries
+            {report.nuance.relationUpdates.length > 0 && <> — {listPreview(report.nuance.relationUpdates.map(u => u.label))}</>}
+            ; <span style={numSt}>{report.nuance.rowDeletes.length}</span> row{report.nuance.rowDeletes.length === 1 ? '' : 's'} with no synonym left
+            {report.nuance.rowDeletes.length > 0 && <> — {listPreview(report.nuance.rowDeletes.map(u => u.label))}</>}
+            ; <span style={numSt}>{report.nuance.cardLabels.length}</span> card{report.nuance.cardLabels.length === 1 ? '' : 's'} to take out of the deck
+            {report.nuance.cardLabels.length > 0 && <> — {listPreview(report.nuance.cardLabels)}</>}.
+          </div>
           {report.sectionGroups.length > 0 && (
             <div style={lineSt}>
               Source / section issues:
@@ -955,7 +1013,7 @@ const applyRetag = async (group, choice) => {
           )}
           {report.nfcUpdates.length === 0 && report.lmDuplicates.length === 0 &&
            report.def2Updates.length === 0 && report.def2NoCanon.length === 0 &&
-           report.cardBackUpdates.length === 0 &&
+           report.cardBackUpdates.length === 0 && nuanceCount(report.nuance) === 0 &&
            report.sentBackReview.length === 0 && report.sectionGroups.length === 0 && (
             <div style={{ ...lineSt, color: C.success || C.textS }}>All clean — nothing to repair.</div>
           )}
@@ -964,6 +1022,9 @@ const applyRetag = async (group, choice) => {
     </div>
   );
 }
+
+const nuanceCount = (n) => !n ? 0
+  : n.relationUpdates.length + n.rowDeletes.length + (planIsEmpty(n.cardPlan) ? 0 : n.cardPlan.deletes.length + n.cardPlan.deckUpdates.length);
 
 // One orphaned source/section group with its fix control: missing sources
 // get a "move to Sourceless" action; stale section values get a dropdown of
@@ -1032,11 +1093,19 @@ function CardAudioRefreshPanel({ uid, C }) {
     setStatus('scanning');
     try {
       const snap = await getDocs(collection(db, 'users', uid, 'flashcards'));
-      const list = snap.docs
+      // A8: also cards whose audio was recorded for another word (renamed
+      // before renames re-recorded audio): the clip's file name doesn't
+      // match the word's spoken form.
+      const all = snap.docs
         .map(d => ({ id: d.id, ...d.data() }))
         .filter(c => c.type !== 'grammar')
         .map(c => ({ card: c, word: c.type === 'sentence' ? c.lemma : c.front }))
-        .filter(t => t.word && needsSpokenRefresh(t.word));
+        .filter(t => t.word);
+      const list = [];
+      for (const t of all) {
+        if (needsSpokenRefresh(t.word)) { list.push(t); continue; }
+        if (await wordAudioMatches(t.card) === false) list.push({ ...t, renamed: true });
+      }
       setTargets(list);
       setProg({ done: 0, failed: 0 });
       setStatus('ready');
@@ -1065,7 +1134,7 @@ function CardAudioRefreshPanel({ uid, C }) {
     <div style={{ marginTop: '18px', paddingTop: '14px', borderTop: `1px solid ${C.border}` }}>
       <div style={{ fontSize: '13px', fontWeight: 600, color: C.text, marginBottom: '4px' }}>Update card audio</div>
       <div style={{ fontSize: '12px', color: C.textM, marginBottom: '10px', lineHeight: 1.5 }}>
-        Re-records the word audio on cards whose word has parentheses or a slash, so it says the spoken form. Reload the app afterwards.
+        Re-records the word audio on cards whose word has parentheses or a slash, so it says the spoken form, and on cards whose audio says a different word (renamed before renames re-recorded it). Reload the app afterwards.
       </div>
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
         <button onClick={scan} disabled={status === 'scanning' || status === 'running'} style={btnSt(status === 'scanning' || status === 'running')}>
@@ -1084,7 +1153,7 @@ function CardAudioRefreshPanel({ uid, C }) {
             <>
               <div style={{ marginBottom: '4px' }}>{targets.length} card{targets.length === 1 ? '' : 's'} to update, for example:</div>
               {targets.slice(0, 6).map(t => (
-                <div key={t.card.id} style={{ fontFamily: SH.fk, color: C.textM }}>{t.word} → {spokenLemma(t.word)}</div>
+                <div key={t.card.id} style={{ fontFamily: SH.fk, color: C.textM }}>{t.renamed ? `${t.word} (audio said another word)` : `${t.word} → ${spokenLemma(t.word)}`}</div>
               ))}
             </>
           )}
@@ -1094,6 +1163,189 @@ function CardAudioRefreshPanel({ uid, C }) {
         <div style={{ fontSize: '12px', color: C.textS, marginTop: '10px' }}>
           {status === 'running' ? 'Updating' : 'Updated'} {prog.done} of {targets.length}{prog.failed ? ` · ${prog.failed} failed` : ''}.
           {status === 'done' && ' Reload the app so open pages pick up the new audio.'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Grammar Index check (G1, read-only) ───────────────────────
+// Before the G1 fix, creating an entry could reuse the doc id of an existing
+// entry and write over it (term, compare-to and mastery replaced, explanation
+// and examples blanked) while a second grammar card was created for the same
+// entry. The old card keeps the lost concept's term, compare-to, explanation
+// and examples. This scan only reads: it lists entries with more than one
+// card, cards whose entry is missing, entries with no card, and duplicate
+// entry numbers. Nothing is changed.
+// Bug sweep G2: it also lists grammar links on sections, section-less
+// sources and notes that point at deleted entries (deletes left them before
+// the fix); "Remove dead links" is the one write.
+function GrammarCheckPanel({ uid, C }) {
+  const [status, setStatus] = useState('idle'); // idle | scanning | ready | fixing
+  const [report, setReport] = useState(null);
+  const [fixMsg, setFixMsg] = useState('');
+
+  const btnSt = (disabled) => ({
+    padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
+    border: `1px solid ${C.border}`, background: 'transparent',
+    color: C.textS, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+  });
+  const clip = (s, n = 140) => {
+    const t = String(s || '').replace(/\s+/g, ' ').trim();
+    return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+  };
+
+  const scan = async () => {
+    if (status === 'scanning' || status === 'fixing') return;
+    setStatus('scanning');
+    try {
+      const [entrySnap, cardSnap, secSnap, srcSnap, noteSnap] = await Promise.all([
+        getDocs(collection(db, 'users', uid, 'grammar_entries')),
+        getDocs(collection(db, 'users', uid, 'flashcards')),
+        getDocs(collection(db, 'users', uid, 'content_sections')),
+        getDocs(collection(db, 'users', uid, 'content_sources')),
+        getDocs(collection(db, 'users', uid, 'notes')),
+      ]);
+      const entries = entrySnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const byId    = new Map(entries.map(e => [e.id, e]));
+      // G2: links to entries that no longer exist.
+      const deadLinks = [];
+      const collectDead = (snap, field, kind, labelOf) => snap.docs.forEach(d => {
+        const ids  = d.data()[field] || [];
+        const dead = ids.filter(id => !byId.has(id));
+        if (dead.length) deadLinks.push({ ref: d.ref, field, kept: ids.filter(id => byId.has(id)), dead, label: `${kind} ${labelOf(d.data()) || d.id}` });
+      });
+      collectDead(secSnap,  'glossaryTermIds',  'section', x => x.content);
+      collectDead(srcSnap,  'glossaryTermIds',  'source',  x => x.title);
+      collectDead(noteSnap, 'linkedGrammarIds', 'note',    x => x.title);
+      const cards   = cardSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.type === 'grammar');
+
+      const cardsByEntry = new Map();
+      const orphanCards  = [];
+      for (const c of cards) {
+        if (!c.linkedGrammarEntryId || !byId.has(c.linkedGrammarEntryId)) { orphanCards.push(c); continue; }
+        if (!cardsByEntry.has(c.linkedGrammarEntryId)) cardsByEntry.set(c.linkedGrammarEntryId, []);
+        cardsByEntry.get(c.linkedGrammarEntryId).push(c);
+      }
+      const shared = [...cardsByEntry.entries()]
+        .filter(([, list]) => list.length > 1)
+        .map(([entryId, list]) => ({
+          entry: byId.get(entryId),
+          cards: [...list].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || ''))),
+        }));
+      const noCard = entries.filter(e => !cardsByEntry.has(e.id));
+
+      const byNumber = new Map();
+      for (const e of entries) {
+        const k = e.entryNumber ?? '(none)';
+        if (!byNumber.has(k)) byNumber.set(k, []);
+        byNumber.get(k).push(e);
+      }
+      const dupNumbers = [...byNumber.entries()].filter(([, list]) => list.length > 1);
+
+      const idNums  = entries.map(e => /^grammar_(\d+)$/.exec(e.id)).filter(Boolean).map(m => Number(m[1]));
+      const maxId   = idNums.length ? Math.max(...idNums) : null;
+      const maxNum  = entries.reduce((m, e) => Math.max(m, e.entryNumber || 0), 0);
+
+      setReport({ entryCount: entries.length, cardCount: cards.length, shared, orphanCards, noCard, dupNumbers, maxId, maxNum, deadLinks });
+      setFixMsg('');
+      setStatus('ready');
+    } catch (e) {
+      console.error('Grammar check failed', e);
+      setStatus('idle');
+    }
+  };
+
+  const removeDeadLinks = async () => {
+    if (!report || status !== 'ready' || !report.deadLinks.length) return;
+    setStatus('fixing');
+    try {
+      let batch = writeBatch(db);
+      let ops = 0;
+      for (const l of report.deadLinks) {
+        batch.update(l.ref, { [l.field]: l.kept });
+        ops++;
+        if (ops >= 450) { await batch.commit(); batch = writeBatch(db); ops = 0; }
+      }
+      if (ops > 0) await batch.commit();
+      setFixMsg(`Removed dead grammar links from ${report.deadLinks.length} item${report.deadLinks.length === 1 ? '' : 's'}. Reload the main app to see it.`);
+      setReport(r => ({ ...r, deadLinks: [] }));
+    } catch (e) {
+      console.error('Removing dead grammar links failed', e);
+      setFixMsg('Removing dead links failed — check console.');
+    }
+    setStatus('ready');
+  };
+
+  const lineSt = { fontSize: '12px', color: C.textS, lineHeight: 1.6 };
+  const numSt  = { color: C.text, fontWeight: 600 };
+  const cardSt = { paddingLeft: '12px', borderLeft: `2px solid ${C.border}`, margin: '4px 0 4px 4px', fontSize: '11.5px', color: C.textS, lineHeight: 1.55 };
+
+  const cardLines = (c, entryTerm) => (
+    <div key={c.id} style={cardSt}>
+      <div>
+        <span style={{ fontFamily: SH.fk, color: C.text, fontWeight: 600 }}>{c.front || '(no term)'}</span>
+        {entryTerm != null && (c.front || '') !== (entryTerm || '') && (
+          <span style={{ color: C.warning || C.accent }}> — differs from the entry; likely the overwritten concept</span>
+        )}
+      </div>
+      <div style={{ color: C.textM }}>card {c.id} · created {String(c.createdAt || '?').slice(0, 10)} · reviews {c.reps || 0}</div>
+      {c.back && <div>Compare to: {clip(c.back)}</div>}
+      {(c.explanation || c.notes) && <div>Explanation: {clip(c.explanation || c.notes)}</div>}
+      {c.examples && <div>Examples: {clip(c.examples)}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '760px' }}>
+      <div style={{ fontSize: '11.5px', color: C.textM, lineHeight: 1.6 }}>
+        Read-only. Finds traces of grammar entries overwritten before the G1 fix: an entry with two cards usually means the older card still holds the lost concept. It also lists grammar links that point at deleted entries; Remove dead links is the only write.
+      </div>
+      <div>
+        <button onClick={scan} disabled={status === 'scanning' || status === 'fixing'} style={btnSt(status === 'scanning' || status === 'fixing')}>
+          {status === 'scanning' ? 'Scanning…' : 'Scan Grammar Index'}
+        </button>
+      </div>
+      {report && (
+        <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '8px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={lineSt}>
+            Scanned <span style={numSt}>{report.entryCount}</span> entries and <span style={numSt}>{report.cardCount}</span> grammar cards.
+            {' '}Highest doc id number: <span style={numSt}>{report.maxId ?? '—'}</span>; highest entry number: <span style={numSt}>{report.maxNum}</span>.
+          </div>
+          <div style={lineSt}>
+            Entries with more than one card: <span style={numSt}>{report.shared.length}</span>
+            {report.shared.map(({ entry, cards }) => (
+              <div key={entry.id} style={{ marginTop: '6px' }}>
+                — <span style={{ fontFamily: SH.fk, color: C.text }}>{entry.glossaryTerm || '(no term)'}</span>
+                <span style={{ color: C.textM }}> ({entry.id}, #{entry.entryNumber ?? '?'})</span>
+                {cards.map(c => cardLines(c, entry.glossaryTerm))}
+              </div>
+            ))}
+          </div>
+          <div style={lineSt}>
+            Cards whose entry is missing: <span style={numSt}>{report.orphanCards.length}</span>
+            {report.orphanCards.map(c => cardLines(c, null))}
+          </div>
+          <div style={lineSt}>
+            Entries with no card: <span style={numSt}>{report.noCard.length}</span>
+            {report.noCard.length > 0 && <> — {report.noCard.map(e => `${e.glossaryTerm || '(no term)'} (#${e.entryNumber ?? '?'})`).join(', ')}</>}
+          </div>
+          <div style={lineSt}>
+            Entry numbers used more than once: <span style={numSt}>{report.dupNumbers.length}</span>
+            {report.dupNumbers.length > 0 && <> — {report.dupNumbers.map(([n, list]) => `#${n}: ${list.map(e => e.glossaryTerm || e.id).join(' / ')}`).join('; ')}</>}
+          </div>
+          <div style={lineSt}>
+            Links to deleted entries: <span style={numSt}>{report.deadLinks.length}</span> item{report.deadLinks.length === 1 ? '' : 's'}
+            {report.deadLinks.length > 0 && <> — {report.deadLinks.slice(0, 12).map(l => `${l.label} (${l.dead.length})`).join(', ')}{report.deadLinks.length > 12 ? ` … +${report.deadLinks.length - 12} more` : ''}</>}
+            {report.deadLinks.length > 0 && (
+              <div style={{ marginTop: '6px' }}>
+                <button onClick={removeDeadLinks} disabled={status !== 'ready'} style={btnSt(status !== 'ready')}>
+                  {status === 'fixing' ? 'Removing…' : `Remove dead links (${report.deadLinks.length})`}
+                </button>
+              </div>
+            )}
+            {fixMsg && <div style={{ marginTop: '4px', color: C.textM }}>{fixMsg}</div>}
+          </div>
         </div>
       )}
     </div>
@@ -1414,6 +1666,10 @@ export function DevDashboard({ user }) {
                 <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>AVI Maintenance</div>
                 <AVIMaintenancePanel uid={user.uid} C={C} />
                 <CardAudioRefreshPanel uid={user.uid} C={C} />
+              </div>
+              <div>
+                <div style={{ fontFamily: SH.fb, fontWeight: 700, fontSize: '15px', color: C.text, marginBottom: '14px' }}>Grammar Index Check</div>
+                <GrammarCheckPanel uid={user.uid} C={C} />
               </div>
             </div>
           ) : view === 'list' ? (

@@ -11,6 +11,7 @@ import { DatePicker } from './DatePicker.jsx';
 import { APPOINTMENT_TYPES } from '../constants.js';
 import { getOrderedSectionsForSource } from '../utils/contentUtils.js';
 import { playSound } from '../utils/soundEngine.js';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 
 // ── Shared constants & helpers ────────────────────────────────
 
@@ -172,6 +173,31 @@ function SourceSearchPicker({ value, onChange, sources, placeholder, C, S }) {
 }
 
 // ── AppointmentModal ──────────────────────────────────────────
+// The appointment doc the modal saves, built from its fields. The modal also
+// builds it from the fields as they were at open (K3), so App can apply only
+// what changed onto the appointment as it is when Save is pressed.
+function buildApptPayload(f, existing) {
+  return {
+    id: f.id, date: f.date.trim(), time: f.time || '', type: f.type,
+    provider: f.provider.trim(), category: f.category,
+    summary: f.summary.trim(), results: f.results.trim(), outcome: f.outcome || null,
+    followUpQueue: [...f.followUpQueue].sort((a, b) => a.date.localeCompare(b.date)),
+    cost: null, costCurrency: null,
+    costs: f.costs.map(({ id, label, date: cDate, amount, currency: cur, notes }) => ({
+      id, label, date: cDate, amount: parseFloat(amount) || 0, currency: cur, notes: notes || '',
+    })),
+    taskId: f.taskId,
+    lastVisitDate: existing?.lastVisitDate || null,
+    created: existing ? (existing.created || null) : new Date().toISOString(),
+    mainSourceId:  f.mainSourceId  || null,
+    mainSectionId: f.mainSectionId || null,
+    additionalSources: f.additionalSources.map(({ id, sourceId, sectionId, done }) => ({
+      id, sourceId, sectionId: sectionId || null, done,
+    })),
+    reminderTaskIds: f.reminderTaskIds,
+  };
+}
+
 export function AppointmentModal({
   open, existing, onSave, onDelete, onClose,
   updateData, settings,
@@ -220,6 +246,10 @@ export function AppointmentModal({
   const [notesOpen,          setNotesOpen]          = useState(false);
 
   const summaryRef = useRef(null);
+  // K3: the doc as the modal would have saved it untouched (null for a new
+  // appointment), and the form fields at open.
+  const basePayloadRef = useRef(null);
+  const openFieldsRef  = useRef(null);
 
   const typeOptions = useMemo(() => {
     const base   = APPOINTMENT_TYPES[category] || [];
@@ -257,13 +287,12 @@ export function AppointmentModal({
       setSummary(existing.summary || '');
       setResults(existing.results || '');
       setOutcome(existing.outcome || null);
-      if (existing.followUpQueue) {
-        setFollowUpQueue([...existing.followUpQueue].sort((a, b) => a.date.localeCompare(b.date)));
-      } else if (existing.followUpDate) {
-        setFollowUpQueue([{ date: existing.followUpDate, time: existing.followUpTime || '' }]);
-      } else {
-        setFollowUpQueue([]);
-      }
+      const openQueue = existing.followUpQueue
+        ? [...existing.followUpQueue].sort((a, b) => a.date.localeCompare(b.date))
+        : existing.followUpDate
+          ? [{ date: existing.followUpDate, time: existing.followUpTime || '' }]
+          : [];
+      setFollowUpQueue(openQueue);
       const existingCosts = existing.costs && existing.costs.length > 0
         ? existing.costs
         : existing.cost != null
@@ -276,7 +305,8 @@ export function AppointmentModal({
       const hasSource = !!(existing.mainSourceId || (existing.additionalSources || []).length);
       setMainSourceId(existing.mainSourceId || null);
       setMainSectionId(existing.mainSectionId || null);
-      setAdditionalSources((existing.additionalSources || []).map(a => ({ ...a, id: a.id || uid() })));
+      const openAdditional = (existing.additionalSources || []).map(a => ({ ...a, id: a.id || uid() }));
+      setAdditionalSources(openAdditional);
       if (existing.date) {
         const [y, m, d] = existing.date.split('-').map(Number);
         const now = new Date();
@@ -292,7 +322,21 @@ export function AppointmentModal({
       const existingReminderIds = existing.reminderTaskIds || [];
       setReminderTaskIds(existingReminderIds);
       setReminderSectionOpen(existingReminderIds.length > 0);
+      const openFields = {
+        id: existing.id, date: existing.date || '', time: existing.time || '',
+        type: existing.type || 'Tutoring', provider: existing.provider || '',
+        category: existing.category || 'lang', summary: existing.summary || '',
+        results: existing.results || '', outcome: existing.outcome || null,
+        followUpQueue: openQueue, costs: existingCosts,
+        taskId: existing.taskId || null,
+        mainSourceId: existing.mainSourceId || null, mainSectionId: existing.mainSectionId || null,
+        additionalSources: openAdditional, reminderTaskIds: existingReminderIds,
+      };
+      openFieldsRef.current  = openFields;
+      basePayloadRef.current = buildApptPayload(openFields, existing);
     } else {
+      openFieldsRef.current  = null;
+      basePayloadRef.current = null;
       setDate(toDateStr(getLogicalToday(dsh)));
       setTime('');
       setType(APPOINTMENT_TYPES.lang[0]);
@@ -416,14 +460,25 @@ export function AppointmentModal({
       // Rescheduling the appointment to a later date resurfaces its task as
       // open — the previous date's completion no longer applies.
       const rescheduledForward = !!existing?.date && !!date.trim() && date.trim() > existing.date;
-      updateData(prev => ({
-        ...prev,
-        tasks: prev.tasks.map(t => t.id === finalTaskId ? {
-          ...t, title: `Appt: ${type}`, date: date.trim() || null,
-          time: time || null, category, apptProvider: provider.trim(), notes: results.trim(),
-          ...(rescheduledForward ? { completed: false, completedAt: null } : {}),
-        } : t),
-      }));
+      // K3: only the task fields whose form field changed since open, so a
+      // promotion or roll that moved the task meanwhile is kept.
+      const o = openFieldsRef.current;
+      const was = (k, v) => !o || o[k] !== v;
+      const taskPatch = {
+        ...(was('type', type) ? { title: `Appt: ${type}` } : {}),
+        ...(was('date', date) ? { date: date.trim() || null } : {}),
+        ...(was('time', time) ? { time: time || null } : {}),
+        ...(was('category', category) ? { category } : {}),
+        ...(was('provider', provider) ? { apptProvider: provider.trim() } : {}),
+        ...(was('results', results) ? { notes: results.trim() } : {}),
+        ...(rescheduledForward ? { completed: false, completedAt: null } : {}),
+      };
+      if (Object.keys(taskPatch).length > 0) {
+        updateData(prev => ({
+          ...prev,
+          tasks: prev.tasks.map(t => t.id === finalTaskId ? { ...t, ...taskPatch } : t),
+        }));
+      }
     }
     // Process reminder changes
     const finalReminderIds = [
@@ -452,31 +507,20 @@ export function AppointmentModal({
     }
     pendingDeletes.forEach(id => onDeleteTask(id));
 
-    onSave({
-      id: apptId, date: date.trim(), time: time || '', type,
-      provider: provider.trim(), category,
-      summary: summary.trim(), results: results.trim(), outcome: outcome || null,
-      followUpQueue: sortedQueue,
-      cost: null, costCurrency: null,
-      costs: costs.map(({ id, label, date: cDate, amount, currency: cur, notes }) => ({
-        id, label, date: cDate, amount: parseFloat(amount) || 0, currency: cur, notes: notes || '',
-      })),      taskId: finalTaskId,
-      lastVisitDate: existing?.lastVisitDate || null,
-      created: existing?.created || new Date().toISOString(),
-      mainSourceId:  mainSourceId  || null,
-      mainSectionId: mainSectionId || null,
-      additionalSources: additionalSources.map(({ id, sourceId, sectionId, done }) => ({
-        id, sourceId, sectionId: sectionId || null, done,
-      })),
-      reminderTaskIds: finalReminderIds,
-    });
+    // K3: with the doc as opened, App applies only the changed fields onto
+    // the appointment as it is now (a new appointment is written whole).
+    onSave(buildApptPayload({
+      id: apptId, date, time, type, provider, category, summary, results, outcome,
+      followUpQueue: sortedQueue, costs, taskId: finalTaskId,
+      mainSourceId, mainSectionId, additionalSources, reminderTaskIds: finalReminderIds,
+    }, existing), existing ? basePayloadRef.current : undefined);
     onClose();
   };
 
   const isValid = !!date.trim();
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+    if (isSubmitEnter(e) && e.target.tagName !== 'TEXTAREA') {
       playSound('mouse_click');
       handleSave();
     }
@@ -656,7 +700,7 @@ export function AppointmentModal({
                       onChange={e => setNewReminderTitle(e.target.value)}
                       onKeyDown={e => {
                         if (e.key === 'Escape') { setAddReminderOpen(false); setNewReminderTitle(''); setNewReminderDate(''); setNewReminderNotes(''); }
-                        if (e.key === 'Enter') { e.stopPropagation(); commitNewReminder(); }
+                        if (isSubmitEnter(e)) { e.stopPropagation(); commitNewReminder(); }
                       }}
                       style={S.formInput}
                     />

@@ -14,7 +14,7 @@
 //                  count-based opacity gradient). For low-frequency data (the
 //                  Content Library) where a gradient reads as disheartening.
 
-import { useMemo } from 'react';
+import { useMemo, useRef, useLayoutEffect } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { toDateStr } from '../utils/dateUtils.js';
 
@@ -127,6 +127,14 @@ export function ActivityHeatmap({
   const cellColor = color || C.warning;
   const canGoFwd  = endYM < currentYM;
 
+  // When the grid is wider than its container, open scrolled to the right
+  // so the most recent month is in view. No effect when the grid fits.
+  const scrollRef = useRef(null);
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && el.scrollWidth > el.clientWidth) el.scrollLeft = el.scrollWidth;
+  }, [startYM, endYM]);
+
   return (
     <div>
 
@@ -159,7 +167,7 @@ export function ActivityHeatmap({
           unreachable via normal scroll. The 4px top/left/right padding gives the
           today-cell's outline (2px solid + 1px offset = 3px of bleed) room to render
           without being clipped by the scrollport. */}
-      <div style={{ overflowX: 'auto', padding: '4px 4px 28px' }}>
+      <div ref={scrollRef} style={{ overflowX: 'auto', padding: '4px 4px 28px' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 0, width: 'fit-content', margin: '0 auto' }}>
 
           {/* Day labels + week columns */}

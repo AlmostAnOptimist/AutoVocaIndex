@@ -7,15 +7,16 @@
 // fallback), plus No def2 / No source chips; filter text and chips are lifted into AVIPage.
 
 import { useState, useCallback, useMemo, useEffect, useRef, memo } from 'react';
-import { doc, writeBatch, collection } from 'firebase/firestore';
+import { doc, writeBatch } from 'firebase/firestore';
 import { db, auth } from '../../firebase.js';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
-  uuid, normalizeLemma, fetchDefinition,
-  stripKoreanAffixes, syncNuanceSource,
+  normalizeLemma, fetchDefinition,
+  syncNuanceSource, stripLemmaRelations, notifyNuanceSync,
   updateLinkedCards, resolveLemmaWithDictionary,
+  isRealDefinition, resolveCorrectedDef1,
 } from '../../utils/aviUtils.js';
 import {
   buildLemmaIndex, buildSurfaceMap, filterLemmaMaster,
@@ -24,6 +25,7 @@ import {
 import { SUGGESTION_KIND_LABEL } from '../../hooks/useLemmaSearch.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { LemmaAutocompleteInput, LemmaMergeModal } from '../../components/avi/LemmaAutocompleteInput.jsx';
+import { planCardDedupe, applyCardDedupe, dedupeLemmaRows } from '../../utils/cardDedupe.js';
 import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
@@ -46,14 +48,29 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
   const [def2Val,     setDef2Val]     = useState(l.def2  || '');
   const [mergeTarget, setMergeTarget] = useState(null); // selected lemma entry to merge into
 
-  useEffect(() => { setLemmaVal(l.lemma || ''); }, [l.lemma]);
-  useEffect(() => { setDef1Val(l.def1  || ''); }, [l.def1]);
-  useEffect(() => { setDef2Val(l.def2  || ''); }, [l.def2]);
+  // U10: a field follows the entry only while you're not editing it. An
+  // update that lands while you type (the background Def1 fill, a remote
+  // read, a rename's lookup) used to replace the text under the cursor.
+  // focusRef: the desktop field being edited, with its value at focus;
+  // editBaseRef: the mobile editor's values when it opened.
+  const focusRef    = useRef(null);   // { field, start }
+  const editBaseRef = useRef(null);
+  const isEditingNow = () => editingLemmaID === l.lemmaID;
+  useEffect(() => { if (focusRef.current?.field !== 'lemma' && !isEditingNow()) setLemmaVal(l.lemma || ''); }, [l.lemma]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (focusRef.current?.field !== 'def1'  && !isEditingNow()) setDef1Val(l.def1  || ''); }, [l.def1]);  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (focusRef.current?.field !== 'def2'  && !isEditingNow()) setDef2Val(l.def2  || ''); }, [l.def2]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const onFieldFocus = (field, value) => (e) => {
+    focusRef.current = { field, start: value };
+    e.target.style.background = C.raised; e.target.style.borderColor = C.border;
+  };
 
   // Called when the lemma field blurs with a changed value.
   // If the new value matches an existing lemma, open the merge modal instead of saving.
   const handleLemmaBlur = (value) => {
-    if (value === (l.lemma || '')) return;
+    const start = focusRef.current?.field === 'lemma' ? focusRef.current.start : (l.lemma || '');
+    focusRef.current = null;
+    // U10: not typed in — show the entry's current lemma instead of saving.
+    if (value === start || value === (l.lemma || '')) { setLemmaVal(l.lemma || ''); return; }
     const normVal  = normalizeLemma(value);
     const existing = lemmaMaster.find(
       x => x.lemmaID !== l.lemmaID && normalizeLemma(x.lemma) === normVal
@@ -68,8 +85,15 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
   };
 
   const handleBlur = (field, value) => {
-    const original = field === 'def1' ? l.def1 : l.def2;
-    if (value === (original || '')) return;
+    const original = (field === 'def1' ? l.def1 : l.def2) || '';
+    const start = focusRef.current?.field === field ? focusRef.current.start : original;
+    focusRef.current = null;
+    // U10: not typed in — show the entry's current text instead of saving
+    // the older text back over a change that arrived meanwhile.
+    if (value === start || value === original) {
+      if (field === 'def1') setDef1Val(original); else setDef2Val(original);
+      return;
+    }
     onSave(l.lemmaID, field, value);
   };
 
@@ -107,21 +131,41 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
     const meaningPills = relatedPills(l.relatedMeaning, 'Meaning');
     const isEditing    = editingLemmaID === l.lemmaID;
 
-    const startEdit = () => setEditingLemmaID(l.lemmaID);
+    const startEdit = () => {
+      editBaseRef.current = { lemma: l.lemma || '', def1: l.def1 || '', def2: l.def2 || '' };
+      setLemmaVal(l.lemma || '');
+      setDef1Val(l.def1 || '');
+      setDef2Val(l.def2 || '');
+      setEditingLemmaID(l.lemmaID);
+    };
 
+    // A4: definitions are saved before a rename. Each save finds the
+    // word's rows by the lemma this render knows; after the rename ran
+    // first, the rows already carried the new lemma, so the definition
+    // changes reached the Lemma Master entry but not its rows. The rename
+    // then carries the rows (with their new definitions) across.
+    // U10: only fields changed since the editor opened are saved, so a
+    // background update to another field isn't written back over.
     const saveEdit = () => {
-      if (lemmaVal !== (l.lemma || '')) {
+      const base = editBaseRef.current || { lemma: l.lemma || '', def1: l.def1 || '', def2: l.def2 || '' };
+      const lemmaEdited = lemmaVal !== base.lemma && lemmaVal !== (l.lemma || '');
+      if (lemmaEdited) {
         const normVal  = normalizeLemma(lemmaVal);
         const existing = lemmaMaster.find(x => x.lemmaID !== l.lemmaID && normalizeLemma(x.lemma) === normVal);
         if (existing) { setMergeTarget(existing); return; }
-        onSave(l.lemmaID, 'lemma', lemmaVal);
       }
-      if (def2Val !== (l.def2 || '')) onSave(l.lemmaID, 'def2', def2Val);
-      if (def1Val !== (l.def1 || '')) onSave(l.lemmaID, 'def1', def1Val);
+      if (def2Val !== base.def2 && def2Val !== (l.def2 || '')) onSave(l.lemmaID, 'def2', def2Val);
+      else setDef2Val(l.def2 || '');
+      if (def1Val !== base.def1 && def1Val !== (l.def1 || '')) onSave(l.lemmaID, 'def1', def1Val);
+      else setDef1Val(l.def1 || '');
+      if (lemmaEdited) onSave(l.lemmaID, 'lemma', lemmaVal);
+      else setLemmaVal(l.lemma || '');
+      editBaseRef.current = null;
       setEditingLemmaID(null);
     };
 
     const cancelEdit = () => {
+      editBaseRef.current = null;
       setLemmaVal(l.lemma || '');
       setDef1Val(l.def1 || '');
       setDef2Val(l.def2 || '');
@@ -262,7 +306,7 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
             value={lemmaVal}
             onChange={setLemmaVal}
             onBlur={handleLemmaBlur}
-            onFocus={e => { e.target.style.background = C.raised; e.target.style.borderColor = C.border; }}
+            onFocus={onFieldFocus('lemma', lemmaVal)}
             onSelectExisting={handleSelectExistingLemma}
             lemmaMaster={lemmaMaster}
             excludeLemmaID={l.lemmaID}
@@ -298,7 +342,7 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
             value={def1Val}
             onChange={e => setDef1Val(e.target.value)}
             onBlur={e => handleBlur('def1', e.target.value)}
-            onFocus={e => { e.target.style.background = C.raised; e.target.style.borderColor = C.border; }}
+            onFocus={onFieldFocus('def1', def1Val)}
             placeholder="—"
           />
         </div>
@@ -310,7 +354,7 @@ const LemmaCard = memo(function LemmaCard({ l, lemmaMaster, lemmaSourcesMap, fet
             value={def2Val}
             onChange={e => setDef2Val(e.target.value)}
             onBlur={e => handleBlur('def2', e.target.value)}
-            onFocus={e => { e.target.style.background = C.raised; e.target.style.borderColor = C.border; }}
+            onFocus={onFieldFocus('def2', def2Val)}
             placeholder="—"
           />
         </div>
@@ -395,6 +439,9 @@ export function AVILemmaMasterPage({
   const [lemmaPopup,  setLemmaPopup]  = useState(null); // { query, id } to open the popup on
   const [editingLemmaID, setEditingLemmaID] = useState(null); // mobile only — which card (if any) is in edit mode
   const scrollRef = useRef(null);
+  // Latest data and cards, for checks made after an await (A1).
+  const liveRef = useRef({ data, cards });
+  liveRef.current = { data, cards };
 
   const scrollToTop = () => scrollRef?.current?.scrollTo({ top: 0, behavior: 'smooth' });
 
@@ -553,18 +600,56 @@ export function AVILemmaMasterPage({
           cards, uid, updateCards,
         }).catch(e => console.error('LM lemma: card update failed', e));
 
-        // Re-fetch def1 for new lemma
+        // Re-fetch def1 for the new lemma (A1). Only a real hit replaces it;
+        // a miss keeps the old def1 when just a parenthetical changed
+        // (resolveCorrectedDef1). A def1 typed or saved while the lookup
+        // ran wins: nothing is written once the entry's def1 has moved.
         setFetching(lemmaID);
-        try {
-          const def1 = await fetchDefinition(value, data.aviSettings);
-          if (def1 && def1 !== '__RATE_LIMITED__' && def1 !== '__NO_API_KEY__') {
-            updateData(prev => ({
+        let fetched = '';
+        try { fetched = await fetchDefinition(value, data.aviSettings); }
+        catch {} finally { setFetching(null); }
+        const oldDef1 = lmatch.def1 || '';
+        const def1    = resolveCorrectedDef1(fetched, oldDef1, oldLemma, value);
+        // liveRef: the lookup can take seconds, so check what the entry
+        // holds now, not the snapshot from before the await.
+        const liveEntry = liveRef.current.data.lemmaMaster.find(l => l.lemmaID === lemmaID);
+        if (def1 !== oldDef1 && liveEntry && (liveEntry.def1 || '') === oldDef1) {
+          const follows = isRealDefinition(def1) && !!oldDef1;
+          updateData(prev => {
+            const entry = prev.lemmaMaster.find(l => l.lemmaID === lemmaID);
+            if (!entry || (entry.def1 || '') !== oldDef1) return prev;
+            const entryNorm = normalizeLemma(entry.lemma);
+            const stamp     = new Date().toISOString();
+            return {
               ...prev,
-              lemmaMaster: prev.lemmaMaster.map(l => l.lemmaID === lemmaID ? { ...l, def1, lastUpdated: new Date().toISOString() } : l),
-              wordInputs:  prev.wordInputs.map(w => normalizeLemma(w.lemma) === newNorm ? { ...w, def1 } : w),
-            }));
+              lemmaMaster: prev.lemmaMaster.map(l => l.lemmaID === lemmaID ? { ...l, def1, lastUpdated: stamp } : l),
+              // Rows still on the entry's old def1 (or a miss) follow; a row
+              // with its own real def1 keeps it.
+              wordInputs: prev.wordInputs.map(w =>
+                normalizeLemma(w.lemma) === entryNorm &&
+                ((w.def1 || '') === oldDef1 || !isRealDefinition(w.def1))
+                  ? { ...w, def1 }
+                  : w
+              ),
+              // Sentence backs derived from def1 follow a real hit only.
+              sentenceInputs: follows
+                ? prev.sentenceInputs.map(s =>
+                    normalizeLemma(s.targetWord) === entryNorm && s.cardBack === oldDef1
+                      ? { ...s, cardBack: def1 }
+                      : s
+                  )
+                : prev.sentenceInputs,
+            };
+          });
+          if (follows) {
+            // Cards whose back was the old def1 (no def2 on the lemma) follow.
+            updateLinkedCards({
+              lemmaID, lemmaText: value,
+              buildUpdates: (c) => c.back === oldDef1 ? { back: def1 } : null,
+              cards: liveRef.current.cards, uid, updateCards,
+            }).catch(e => console.error('LM rename def1: card update failed', e));
           }
-        } catch {} finally { setFetching(null); }
+        }
       }
 
     } else if (field === 'def1') {
@@ -682,6 +767,8 @@ export function AVILemmaMasterPage({
         return {
           ...w,
           lemma: survivorLemma,
+          // A9: reassigned rows take the survivor's def1 (a real one).
+          ...(isRealDefinition(survivor.def1) ? { def1: survivor.def1 } : {}),
           def2:  survivingDef2 || '',
           ...(def2Changed && w.uploaded ? {
             uploaded: false, lastUncheckReason: 'lemma merged', lastUncheckDate: now,
@@ -709,21 +796,20 @@ export function AVILemmaMasterPage({
         };
       });
 
-      // The edited lemma's wordInputs row (if it had its own 동의어/유의어 capture)
+      // R2: other entries' links to the edited lemma now point at the
+      // survivor (they pointed at an id that no longer exists).
+      const repointed = stripLemmaRelations(mergedLemmaMaster, [], { [editedLemmaID]: survivingLemmaID });
+
+      // The edited lemma's wordInputs row (if it had its own 동의어 capture)
       // just got relabeled to the survivor's lemma above — if the survivor already
       // had its own capture too, this collapses the resulting duplicate down to
       // one, and otherwise adds/removes based on the merged relatedMeaning.
       const { wordInputs: finalWordInputs, added, removed } = syncNuanceSource(
-        cascadedWordInputs, mergedLemmaMaster, [survivingLemmaID]
+        cascadedWordInputs, repointed.lemmaMaster, [survivingLemmaID, ...repointed.affected]
       );
-      if (added.length)   showAVIToast(`Added to 동의어/유의어: ${added.join(', ')}`, 'goToNuanceSource');
-      if (removed.length) showAVIToast(`Removed from 동의어/유의어: ${removed.join(', ')}`, 'goToNuanceSource');
+      notifyNuanceSync(showAVIToast, added, removed);
 
-      return {
-        ...prev,
-        lemmaMaster: mergedLemmaMaster,
-        wordInputs: finalWordInputs,
-        sentenceInputs: prev.sentenceInputs.map(s => {
+      const mergedSentenceInputs = prev.sentenceInputs.map(s => {
           const norm = normalizeLemma(s.targetWord);
           if (norm === editedNorm) {
             // L6: a row still waiting for a def2 keeps its empty back (AVIPage's
@@ -755,7 +841,23 @@ export function AVILemmaMasterPage({
             };
           }
           return s;
-        }),
+        });
+
+      // A9: reassigned rows that collide with the survivor's own (same
+      // source and section, or same source and sentence) collapse to the
+      // older row, the same identity Import uses (cardDedupe).
+      const survivorWordUids = new Set(prev.wordInputs.filter(w => normalizeLemma(w.lemma) === survivorNorm).map(w => w.uid));
+      const survivorSentUids = new Set(prev.sentenceInputs.filter(x => normalizeLemma(x.targetWord) === survivorNorm).map(x => x.uid));
+      const deduped = dedupeLemmaRows(
+        { wordInputs: finalWordInputs, sentenceInputs: mergedSentenceInputs }, [survivorLemma],
+        r => survivorWordUids.has(r.uid) || survivorSentUids.has(r.uid), // the survivor's own rows win ties
+      );
+
+      return {
+        ...prev,
+        lemmaMaster: repointed.lemmaMaster,
+        wordInputs: deduped.wordInputs,
+        sentenceInputs: deduped.sentenceInputs,
       };
     });
 
@@ -765,6 +867,17 @@ export function AVILemmaMasterPage({
     const editedPre   = data.lemmaMaster.find(l => l.lemmaID === editedLemmaID);
     const survivorPre = data.lemmaMaster.find(l => l.lemmaID === survivingLemmaID);
     if (editedPre && survivorPre) {
+      // A9: once the edited lemma's cards carry the survivor's lemma, a deck
+      // holding both lemmas' cards keeps one — the older review history
+      // (cardDedupe). The chosen def2 is already every survivor card's back.
+      const editedNormPre = normalizeLemma(editedPre.lemma);
+      const isEditedCard  = (c) => c.type !== 'grammar' &&
+        (c.linkedAVILemmaId === editedLemmaID || (!!c.lemma && normalizeLemma(c.lemma) === editedNormPre));
+      const projected     = (cards || []).map(c => isEditedCard(c)
+        ? { ...c, lemma: survivorPre.lemma, linkedAVILemmaId: survivingLemmaID } : c);
+      const touchedDecks  = [...new Set((cards || []).filter(isEditedCard).flatMap(c => c.deckIds || []))];
+      const dedupePlan    = planCardDedupe(projected, { lemmas: [survivorPre.lemma], deckIds: touchedDecks });
+
       updateLinkedCards({
         lemmaID: editedLemmaID, lemmaText: editedPre.lemma,
         buildUpdates: (c) => ({
@@ -776,7 +889,18 @@ export function AVILemmaMasterPage({
           ...(survivingDef2 ? { back: survivingDef2 } : {}),
         }),
         cards, uid, updateCards,
-      }).catch(e => console.error('LM merge: card update failed', e));
+        // The renamed cards show in the same update as the merged rows, so
+        // AVIPage's 동의어 card sync finds the moved card instead of making
+        // a second one for the survivor.
+        memoryFirst: true,
+      })
+        .then(() => applyCardDedupe({
+          uid, plan: dedupePlan, updateCards, updateDecks,
+          // A vocab survivor's back is the def2 picked in the merge.
+          survivorUpdates: (c) => (survivingDef2 && c.type !== 'sentence' && c.back !== survivingDef2)
+            ? { back: survivingDef2 } : null,
+        }))
+        .catch(e => console.error('LM merge: card update failed', e));
 
       // Survivor's own linked cards adopt the chosen def2 as back too —
       // the block above only reaches cards linked to the deleted entry.
@@ -788,7 +912,7 @@ export function AVILemmaMasterPage({
         }).catch(e => console.error('LM merge: survivor card update failed', e));
       }
     }
-  }, [updateData, showAVIToast, data, cards, uid, updateCards]);
+  }, [updateData, showAVIToast, data, cards, uid, updateCards, updateDecks]);
 
   // ── Refetch def1 ─────────────────────────────────────────────
   const refetchDef1 = useCallback(async (lemmaID) => {
@@ -842,13 +966,23 @@ export function AVILemmaMasterPage({
         (cardCount ? ` ${cardCount} linked flashcard${cardCount > 1 ? 's' : ''} will be kept.` : '')
       : `Delete lemma "${l.lemma}" from Lemma Master?`;
     if (!window.confirm(msg)) return;
-    updateData(prev => ({
-      ...prev,
-      lemmaMaster:    prev.lemmaMaster.filter(x => x.lemmaID !== lemmaID),
-      wordInputs:     prev.wordInputs.filter(w => normalizeLemma(w.lemma) !== norm),
-      sentenceInputs: prev.sentenceInputs.filter(s => normalizeLemma(s.targetWord) !== norm),
-    }));
-  }, [data, updateData, cards]);
+    updateData(prev => {
+      // R2: the deleted id leaves every other entry's relations, and a word
+      // whose only synonym this was leaves 동의어 (AVIPage takes its card
+      // out of the deck).
+      const stripped = stripLemmaRelations(prev.lemmaMaster.filter(x => x.lemmaID !== lemmaID), [lemmaID]);
+      const synced   = syncNuanceSource(
+        prev.wordInputs.filter(w => normalizeLemma(w.lemma) !== norm), stripped.lemmaMaster, stripped.affected
+      );
+      notifyNuanceSync(showAVIToast, synced.added, synced.removed);
+      return {
+        ...prev,
+        lemmaMaster:    stripped.lemmaMaster,
+        wordInputs:     synced.wordInputs,
+        sentenceInputs: prev.sentenceInputs.filter(s => normalizeLemma(s.targetWord) !== norm),
+      };
+    });
+  }, [data, updateData, cards, showAVIToast]);
 
   // ── Dedupe ───────────────────────────────────────────────────
   const dedupeAll = () => {

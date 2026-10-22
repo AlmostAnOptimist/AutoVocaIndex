@@ -7,16 +7,30 @@ export function loadState() {
   if (DEMO) return null; // demo: never read the local baseline (cross-account bleed)
   try {
     const r = localStorage.getItem(STORAGE_KEY);
-    if (r) return JSON.parse(r);
+    if (r) {
+      // savedAt is a diagnostic stamp (S10), not app data.
+      const { savedAt: _savedAt, ...stored } = JSON.parse(r);
+      return stored;
+    }
   } catch {}
   return null;
 }
 
+// S10: a failed local save (storage full, private mode) is logged once per
+// run of failures instead of being swallowed. The stamp shows in devtools
+// how old the local snapshot is.
+let saveFailureLogged = false;
 export function saveState(data) {
   if (DEMO) return; // demo: never persist the local baseline
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch {}
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...data, savedAt: new Date().toISOString() }));
+    saveFailureLogged = false;
+  } catch (e) {
+    if (!saveFailureLogged) {
+      console.error('AVI: saving the local copy failed (storage full or unavailable)', e);
+      saveFailureLogged = true;
+    }
+  }
 }
 
 export function createInitialTasks() {

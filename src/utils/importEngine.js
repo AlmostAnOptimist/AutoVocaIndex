@@ -26,17 +26,35 @@ export function countHangulSyllables(s) {
 // Leading list-marker patterns: "1 ", "1. ", "1) ", "(1) ", and circled
 // digits. The dot form requires trailing whitespace so a line that opens
 // with a decimal number (3.5점을 받았어요) survives untouched.
+// R3: a bare number and a space ("1 ") is also how prose can open
+// ("3 년 전에 …"), so it counts as a list marker only when the paste is a
+// numbered list — at least two lines opening with consecutive bare numbers
+// (hasBareNumberedList). The other forms always count.
+const BARE_NUMBER = /^\s*(\d{1,4})\s+(?=\S)/;
 const LIST_MARKERS = [
   /^\s*\(\d{1,4}\)\s*/,
   /^\s*\d{1,4}\)\s*/,
   /^\s*\d{1,4}\.\s+/,
-  /^\s*\d{1,4}\s+/,
+  BARE_NUMBER,
   /^\s*[\u2460-\u2473]\s*/,
 ];
 
-export function stripListMarker(line) {
+export function hasBareNumberedList(lines) {
+  let prev = null;
+  for (const line of lines || []) {
+    const m = BARE_NUMBER.exec(String(line || ''));
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (prev !== null && n === prev + 1) return true;
+    prev = n;
+  }
+  return false;
+}
+
+export function stripListMarker(line, { bareNumbers = true } = {}) {
   const s = String(line || '');
   for (const pat of LIST_MARKERS) {
+    if (pat === BARE_NUMBER && !bareNumbers) continue;
     if (pat.test(s)) return s.replace(pat, '');
   }
   return s;
@@ -49,9 +67,11 @@ export function stripListMarker(line) {
 // the preceding sentence.
 export function segmentSentences(text) {
   const parts = [];
+  const lines = String(text || '').split(/\n+/);
+  const bareNumbers = hasBareNumberedList(lines);
 
-  String(text || '').split(/\n+/).forEach(line => {
-    const pieces = stripListMarker(line).split(TERMINAL_SPLIT);
+  lines.forEach(line => {
+    const pieces = stripListMarker(line, { bareNumbers }).split(TERMINAL_SPLIT);
     let buf = '';
     for (let i = 0; i < pieces.length; i++) {
       const piece = pieces[i];
@@ -99,8 +119,10 @@ export function segmentWordsDetailed(text, cleanFn) {
   const clean = typeof cleanFn === 'function' ? cleanFn : (s) => String(s || '').trim();
   const seen = new Set();
   const out = [];
-  String(text || '').split(/\n+/).forEach(line => {
-    const t = String(clean(stripListMarker(line)) || '').trim();
+  const lines = String(text || '').split(/\n+/);
+  const bareNumbers = hasBareNumberedList(lines);
+  lines.forEach(line => {
+    const t = String(clean(stripListMarker(line, { bareNumbers })) || '').trim();
     if (!t) return;
     const key = t.toLowerCase();
     if (seen.has(key)) return;
@@ -199,7 +221,13 @@ export function buildImportPlan(mode, items, deps) {
 // 향상되다 → 향상(하다/되다). A matched term takes the entry's own lemma text
 // so its rows link and its def2 comes along. Injected to keep this module
 // free of app services.
-export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, section, uuid, normalizeLemma, knownTerms = [], includeKnownSentences = false, findEntry = null }) {
+export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, section, uuid, normalizeLemma, knownTerms = [], includeKnownSentences = false, findEntry = null, isSkipped = null }) {
+  // Skip is per word per source: rows for a word already skipped in this
+  // source start skipped (the caller supplies wordSkip.isSkippedInSource).
+  const skipOf = (l) => (typeof isSkipped === 'function' ? !!isSkipped(l) : false);
+  // A10: sentence rows that start skipped carry the word's marker, so
+  // un-skipping the word brings them back without asking.
+  const sentSkip = (l) => (skipOf(l) ? { skipUpload: true, skippedWithWord: true } : { skipUpload: false });
   const nl = typeof normalizeLemma === 'function' ? normalizeLemma : (s) => String(s || '').trim();
   const now = new Date().toISOString();
 
@@ -249,7 +277,7 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
       uid: uuid(), ts: now, input: t.input,
       source, section,
       lemma, def1, def2,
-      uploaded: false, skipUpload: false,
+      uploaded: false, skipUpload: skipOf(lemma),
       lastUncheckReason: '', lastUncheckDate: '',
     });
     if (mode === 'sentence') {
@@ -265,7 +293,7 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
           cardBack: def2 || '',
           inputForm: sentence.includes(t.input) ? t.input : '',
           source, section,
-          uploaded: false, skipUpload: false,
+          uploaded: false, ...sentSkip(lemma),
           lastUncheckReason: '', lastUncheckDate: '',
         });
       }
@@ -288,7 +316,7 @@ export function buildCommitRows({ mode, terms, sentences, lemmaMaster, source, s
           cardBack: def2 || '', // L6: waits for a def2, as above
           inputForm: sentence.includes(k.input) ? k.input : '',
           source, section,
-          uploaded: false, skipUpload: false,
+          uploaded: false, ...sentSkip(lemma),
           lastUncheckReason: '', lastUncheckDate: '',
         });
       }

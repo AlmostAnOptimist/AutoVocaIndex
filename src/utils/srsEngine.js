@@ -30,6 +30,10 @@ function filterActiveCards(cards, pausedDeckIds) {
 //
 // Returns pipelineOutput:
 //   { date, triaged, dueAtDayStart, spikes, spikeDetected, generatedAt }
+// When the pipeline ran here (not read back from today's saved plan), the
+// result also carries cardUpdates — the triage fields written to each card —
+// so the caller can apply them in memory instead of re-reading every card
+// (bug sweep P2). cardUpdates is not saved with the plan.
 //
 // dueAtDayStart is a snapshot of how many non-grammar, non-new cards are due
 // at the moment the pipeline runs — used as the fixed daily total in TodayPage.
@@ -64,7 +68,7 @@ export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks =
   for (const card of overdue) {
     const bucket = triageBucket(card);
     if (bucket === 'defer') {
-      updates.push({ id: card.id, ...compressInterval(card), triageBucket: 'defer', lastTriageDate: today });
+      updates.push({ id: card.id, ...compressInterval(card, dsh), triageBucket: 'defer', lastTriageDate: today });
     } else {
       updates.push({ id: card.id, triageBucket: bucket, lastTriageDate: today });
     }
@@ -94,7 +98,7 @@ export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks =
     generatedAt: new Date().toISOString(),
   });
 
-  return output;
+  return { ...output, cardUpdates: updates };
 }
 
 // ── Spike-only re-run (called after each review session) ──────────────────────

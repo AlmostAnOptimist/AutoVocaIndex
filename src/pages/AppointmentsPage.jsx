@@ -188,7 +188,7 @@ export function AppointmentsPage({
   const [filterType,     setFilterType]     = useState('');
   const [filterProvider, setFilterProvider] = useState('');
 
-  const today = toDateStr(getLogicalToday(dsh || 3));
+  const today = toDateStr(getLogicalToday(dsh ?? 3));
 
   // Sources available in the picker — Tutor type excluded (lives in Appointments natively)
   const pickerSources = useMemo(() =>

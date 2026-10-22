@@ -43,15 +43,23 @@ exports.handler = async function (event) {
       apiKey: process.env.ANTHROPIC_API_KEY,
     });
 
+    // P4: Claude Haiku 5.5 (Haiku 4.5 is a legacy model past its earliest
+    // retirement date). Haiku 5.5 thinks by default; a short definition
+    // doesn't need it, so thinking is off ("disabled" is accepted at the
+    // default effort).
     const message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: "claude-haiku-5-5",
       max_tokens: 1024,
+      thinking: { type: "disabled" },
       messages: [{ role: "user", content: lemma }],
       // [LANG-SPECIFIC] The persona is a Korean dictionary assistant (docs/08).
       system: `You are a Korean dictionary assistant. When given a Korean word or phrase, provide a concise English definition in the style of krdict.korean.go.kr. Format: numbered senses like "1. [definition]\\n\\n2. [definition]" etc. Include brief usage context per sense. Be accurate and natural. Return ONLY the definition text, nothing else.`,
     });
 
-    const text = message.content[0]?.text || "";
+    // Read the text block by type (a thinking block can come first on
+    // newer models). A refusal or an empty reply returns '', which the app
+    // treats as "dictionary unreachable", not as a miss (A12).
+    const text = (message.content || []).find(b => b.type === "text")?.text || "";
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },

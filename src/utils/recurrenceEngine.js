@@ -185,6 +185,72 @@ export function getWindowEnd(task) {
 
 const OVERDUE_AUTO_UNSCHEDULE_DAYS = 14;
 
+// T8: enough steps for a daily task missed for almost three years.
+const MAX_CATCH_UP_STEPS = 1000;
+
+// Rolls a recurring task forward as far as `logicalToday` calls for, in one
+// go. A completed occurrence rolls once the day after its due date; a missed
+// one once its grace window has ended (getWindowEnd); and the occurrence it
+// lands on goes through the same test, so a task that's several steps behind
+// catches up in a single run instead of one step per run (Sept incident
+// patch 5). Each step counts from the due date, never from when the engine
+// happens to run. Returns the same object when nothing moves.
+export function rollRecurringTask(task, logicalToday) {
+  let cur = task;
+  for (let i = 0; i < MAX_CATCH_UP_STEPS; i++) {
+    const dueDate = parseDate(cur.date);
+    if (!dueDate) break;
+    let shouldAdvance;
+    if (cur.completed) {
+      // Completed: advance as soon as the logical day has moved past the due date.
+      shouldAdvance = logicalToday > dueDate;
+    } else {
+      // Missed: use the grace window so the task stays visible until
+      // the next occurrence slot is about to begin.
+      const windowEnd = getWindowEnd(cur);
+      if (!windowEnd) break;
+      shouldAdvance = logicalToday > windowEnd;
+    }
+    if (!shouldAdvance) break;
+
+    const nextDate = getNextOccurrence(cur, dueDate);
+    if (!nextDate || nextDate <= cur.date) break;
+
+    let notes = cur.notes || '';
+    if (cur.keepRecord && cur.completed && cur.date) {
+      const entry = `[${cur.date}] Done`;
+      notes = notes.trim() ? `${entry}\n${notes.trim()}` : entry;
+    }
+
+    cur = {
+      ...cur,
+      date: nextDate,
+      completed: false,
+      completedAt: null,
+      notes,
+      recurrence: {
+        ...cur.recurrence,
+        nextDue: nextDate,
+        lastReset: toDateStr(logicalToday),
+      },
+    };
+  }
+  return cur;
+}
+
+// T7: where a recurring task completed today will land once the engine
+// rolls it — the day after its due date, or today when it was finished
+// late — so Upcoming's "next" date matches what actually happens.
+export function nextDueAfterCompletion(task, logicalToday) {
+  const due = parseDate(task.date);
+  if (!due) return getNextOccurrence(task, logicalToday);
+  const dayAfterDue = new Date(due);
+  dayAfterDue.setDate(dayAfterDue.getDate() + 1);
+  const rollDay = logicalToday > due ? logicalToday : dayAfterDue;
+  const rolled = rollRecurringTask({ ...task, completed: true }, rollDay);
+  return rolled.date !== task.date ? rolled.date : getNextOccurrence(task, due);
+}
+
 export function runRecurrenceEngine(tasks, dsh) {
   const logicalToday = getLogicalToday(dsh);
   const cutoff = new Date(logicalToday);
@@ -237,52 +303,11 @@ export function runRecurrenceEngine(tasks, dsh) {
     }
 
     // ── Recurring tasks ──
+    // T8: rolled all the way in one run (rollRecurringTask).
     if (!task.date) return task;
-    const dueDate = parseDate(task.date);
-    if (!dueDate) return task;
-
-    let shouldAdvance = false;
-
-    if (task.completed) {
-      // Completed: advance as soon as the logical day has moved past the due date.
-      // Use dueDate as the anchor — engine timing doesn't affect the result.
-      shouldAdvance = logicalToday > dueDate;
-    } else {
-      // Missed: use the grace window so the task stays visible until
-      // the next occurrence slot is about to begin.
-      const windowEnd = getWindowEnd(task);
-      if (!windowEnd) return task;
-      shouldAdvance = logicalToday > windowEnd;
-    }
-
-    if (shouldAdvance) {
-      // Always compute nextDate from dueDate, not logicalToday.
-      // This ensures the next occurrence is correct regardless of
-      // when the engine happens to run.
-      const nextDate = getNextOccurrence(task, dueDate);
-      changed = true;
-
-      let notes = task.notes || '';
-      if (task.keepRecord && task.completed && task.date) {
-        const entry = `[${task.date}] Done`;
-        notes = notes.trim() ? `${entry}\n${notes.trim()}` : entry;
-      }
-
-      return {
-        ...task,
-        date: nextDate,
-        completed: false,
-        completedAt: null,
-        notes,
-        recurrence: {
-          ...task.recurrence,
-          nextDue: nextDate,
-          lastReset: toDateStr(logicalToday),
-        },
-      };
-    }
-
-    return task;
+    const rolled = rollRecurringTask(task, logicalToday);
+    if (rolled !== task) changed = true;
+    return rolled;
   });
 
   return { tasks: updated, changed };

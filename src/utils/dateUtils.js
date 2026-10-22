@@ -74,6 +74,27 @@ export function getLogicalDateStr(dsh = 3) {
   return toDateStr(getLogicalToday(dsh));
 }
 
+// The logical day (YYYY-MM-DD) a timestamp falls on: before the day-start
+// hour it still belongs to the previous day. Empty for a missing or bad
+// timestamp. A bare date ('YYYY-MM-DD') is already a day and is returned
+// as is (new Date() would read it as UTC midnight).
+export function logicalDateOf(iso, dsh = 3) {
+  if (!iso) return '';
+  if (typeof iso === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  if (d.getHours() < dsh) d.setDate(d.getDate() - 1);
+  return toDateStr(d);
+}
+
+// Milliseconds from `now` until the next day-start (local time, dsh:00),
+// when the logical day flips.
+export function msUntilNextDayStart(dsh = 3, now = new Date()) {
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), dsh, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  return next.getTime() - now.getTime();
+}
+
 export function getGreeting(dsh) {
   const h = new Date().getHours();
   const e = ((h - dsh) + 24) % 24;

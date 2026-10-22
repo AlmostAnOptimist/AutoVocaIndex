@@ -23,6 +23,7 @@ import { AVINoMatchActions } from '../../components/avi/AVIAddToWordInput.jsx';
 import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
 import { normalizeLemma, applyRelationPin, applyRelationConnect } from '../../utils/aviUtils.js';
 import { searchKey } from '../../utils/lemmaSearchEngine.js';
+import { isSubmitEnter } from '../../utils/keyUtils.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -558,7 +559,7 @@ export function AVISearchPage({
       placeholder="Search Korean word or English meaning…"
       value={query}
       onChange={e => setQuery(e.target.value)}
-      onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && runSearch()}
+      onKeyDown={e => isSubmitEnter(e) && runSearch()}
     />
     <select style={selectStyle} value={modeOverride} onChange={e => setModeOverride(e.target.value)}>
       <option>Auto</option>

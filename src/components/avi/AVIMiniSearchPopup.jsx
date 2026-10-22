@@ -20,6 +20,7 @@ import { SH } from '../../theme/buildStyles.js';
 import { Icons } from '../Icons.jsx';
 import { applyRelationPin, applyRelationConnect } from '../../utils/aviUtils.js';
 import { AVINoMatchActions } from './AVIAddToWordInput.jsx';
+import { isSubmitEnter } from '../../utils/keyUtils.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -181,7 +182,7 @@ export function AVIMiniSearchPopup({ initialQuery, initialLemmaID, data, updateD
             style={{ flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.bg, color: C.text, fontSize: isMobile ? '16px' : '13px', fontFamily: SH.fk, outline: 'none' }}
             value={query}
             onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && runSearch()}
+            onKeyDown={e => isSubmitEnter(e) && runSearch()}
             placeholder="Korean or English…"
           />
           <button onClick={() => runSearch()} style={{ ...S.btnPrimary, ...S.btnMetallic, padding: '7px 14px', borderRadius: '8px', fontSize: '13px', fontWeight: 600, flexShrink: 0 }}>Search</button>

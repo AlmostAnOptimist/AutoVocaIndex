@@ -1,13 +1,14 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { RecurrenceSelector } from './RecurrenceSelector.jsx';
 import { Icons } from './Icons.jsx';
 import { CATEGORIES } from '../constants.js';
 import { playSound } from '../utils/soundEngine.js';
-import { uid, parseDate, fmtDate } from '../utils/dateUtils.js';
+import { parseDate, fmtDate } from '../utils/dateUtils.js';
 import { DatePicker } from './DatePicker.jsx';
 import { fmtApptDate, fmtTime } from './AppointmentModal.jsx';
 import { SH } from '../theme/buildStyles.js';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
   // Follow-up queue (appointment tasks only) — mirrors AppointmentModal's
   // queue editor; saved back to the appointment doc via saveTask's sync.
   const [followUpQueue, setFollowUpQueue] = useState([]);
+  const openQueueRef = useRef(undefined); // K3: the appointment's follow-ups as opened
   const [newQueueDate,  setNewQueueDate]  = useState('');
   const [newQueueTime,  setNewQueueTime]  = useState('');
   useEffect(() => {
@@ -77,15 +79,16 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
       setConfirmOpen(false);
       if (task.isAppointmentTask && task.appointmentId) {
         const appt = (appointments || []).find(a => a.id === task.appointmentId);
-        if (appt?.followUpQueue) {
-          setFollowUpQueue([...appt.followUpQueue].sort((a, b) => a.date.localeCompare(b.date)));
-        } else if (appt?.followUpDate) {
-          setFollowUpQueue([{ date: appt.followUpDate, time: appt.followUpTime || '' }]);
-        } else {
-          setFollowUpQueue([]);
-        }
+        const openQueue = appt?.followUpQueue
+          ? [...appt.followUpQueue].sort((a, b) => a.date.localeCompare(b.date))
+          : appt?.followUpDate
+            ? [{ date: appt.followUpDate, time: appt.followUpTime || '' }]
+            : [];
+        setFollowUpQueue(openQueue);
+        openQueueRef.current = openQueue;
       } else {
         setFollowUpQueue([]);
+        openQueueRef.current = undefined;
       }
       setNewQueueDate('');
       setNewQueueTime('');
@@ -151,12 +154,16 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
           ? { completedDates: task.completedDates.filter(ds => finalDates.includes(ds)) }
           : {}),
       } : {}),
-    });
+    }, task.isAppointmentTask
+      // K3: the follow-ups as opened too, so the appointment gets the queue
+      // only when it was edited here.
+      ? { ...task, followUpQueue: openQueueRef.current }
+      : task); // N1/K3: the task as opened, so only changed fields are applied
     onClose();
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+    if (isSubmitEnter(e) && e.target.tagName !== 'TEXTAREA') {
       playSound('mouse_click');
       handleSave();
     }

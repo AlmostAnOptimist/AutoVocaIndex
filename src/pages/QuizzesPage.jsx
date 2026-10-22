@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  collection, getDocs, addDoc, updateDoc, setDoc, query, orderBy, getDoc, doc as fsDoc,
+  collection, getDocs, updateDoc, setDoc, query, orderBy, getDoc, doc as fsDoc,
   arrayUnion, arrayRemove,
 } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
@@ -10,6 +10,7 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH, frameBevel } from '../theme/buildStyles.js';
 import { playSound, playQuizCompleteSound } from '../utils/soundEngine.js';
 import { createCorrectionNote } from '../utils/createCorrectionNote.js';
+import { queueWrite, isOffline } from '../utils/queuedWrite.js';
 import { callGrammarQuizAPI, callGrammarQuizChunks, describeGrammarQuizError } from '../utils/grammarQuizUtils.js';
 import {
   buildGenerationRequest, validateGeneratedQuestions,
@@ -27,7 +28,7 @@ import {
   getVocaHints, isTwoSynonymFront, normalizeFrontForMatching,
   formatScore, computeRelatedCredit, findClozeTokenIndex,
 } from '../utils/jamoUtils.js';
-import { toDateStr, getLogicalToday } from '../utils/dateUtils.js';
+import { toDateStr, getLogicalToday, logicalDateOf } from '../utils/dateUtils.js';
 import { isNewCard } from '../utils/fsrs.js';
 import { normalizeLemma, getSourceSections, resolveLemmaWithDictionary } from '../utils/aviUtils.js';
 import {
@@ -50,7 +51,7 @@ import { wordAudioUrl, playAudioUrl } from '../utils/ttsUtils.js';
 import { Icons } from '../components/Icons.jsx';
 import { crowSrc as CrowImg, decoBlockStyle } from '../utils/decoAssets.js';
 import { PaginationFooter } from '../components/PaginationFooter.jsx';
-import { useGlobalKey } from '../hooks/useGlobalKey.js';
+import { useGlobalKey, useDoneKey } from '../hooks/useGlobalKey.js';
 import { DEMO, DEMO_LIMIT_NOTE, demoCapReached } from '../demo/demoConfig.js';
 import { usePaginationKeys } from '../hooks/usePaginationKeys.js';
 import { GRAMMAR_MASTERY } from '../constants.js';
@@ -58,6 +59,7 @@ import {
   GazetteMasthead, GoldRule, BylineRule, GazetteKicker, GazetteHeadline,
   GazetteStandfirst, DropCapLead, GazetteFig, GazetteBox, BoxRow, GazetteSplitFig,
 } from '../components/GazetteComponents.jsx';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 
 // Module-level ref updated by QuizzesPage on every render, so all sub-components
 // in this file share the quiz-sounds enabled state without prop drilling.
@@ -227,6 +229,9 @@ function ConfigRow({ label, children, C, noBorder, alignStart }) {
 // ─────────────────────────────────────────────────────────────
 // VOCA QUIZ CONFIG
 // ─────────────────────────────────────────────────────────────
+// Q1: how long a quiz start waits for Lemma Master before going without it.
+const LEMMA_WAIT_MS = 4000;
+
 const VOCA_DEFAULTS = {
   questionTypes:   ['multiple'],
   typeCounts:                 { multiple: 10, truefalse: 5, matching: 1, type: 5 },
@@ -1120,7 +1125,7 @@ function EchoRound({ state, initialDraft, onDraft, onCommit, onEnd, alternatesOf
   // Enter = next row (whole-column mode) or check this row (row mode).
   // Ignored while the Korean keyboard is still building a syllable.
   const onAnswerKey = (e, id, idx) => {
-    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+    if (!isSubmitEnter(e)) return;
     e.preventDefault();
     if (rowMode) { checkRow(id); return; }
     const next = rows[idx + 1];
@@ -1128,7 +1133,7 @@ function EchoRound({ state, initialDraft, onDraft, onCommit, onEnd, alternatesOf
     else checkBtnRef.current?.focus();
   };
   const onCorrectionKey = (e, id) => {
-    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+    if (!isSubmitEnter(e)) return;
     e.preventDefault();
     const missIds = graded.rows.filter(r => r.accepted === false).map(r => r.id);
     const next = missIds[missIds.indexOf(id) + 1];
@@ -1516,13 +1521,13 @@ function EchoSummaryBody({ sum, glossOf, C }) {
 
 function EchoSummary({ state, save, onRetrySave, onPracticeMissed, onAgain, onDone, C, S }) {
   const sum = useMemo(() => buildSummary(state), [state]);
-  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
+  useDoneKey(onDone); // U9
   const itemMap = useMemo(() => new Map(state.items.map(i => [i.id, i])), [state.items]);
   const missed = sum.items.filter(it => it.misses > 0 || !it.resolved);
   const gist = (en) => splitSenses(en)[0]?.display || String(en || '').split('\n')[0];
   const glossOf = (id) => { const item = itemMap.get(id); return item ? gist(item.en) : null; };
   const saveText = !save ? '' : save.status === 'saving' ? 'Saving…'
-    : save.status === 'saved' ? 'Saved to your Echo history.'
+    : save.status === 'saved' ? (save.offline ? "Saved on this device. It will sync when you're back online." : 'Saved to your Echo history.')
     : save.status === 'skipped' ? 'No rounds were finished, so nothing was saved.'
     : save.status === 'error' ? "Couldn't save this session." : '';
 
@@ -1631,22 +1636,67 @@ function weightedDraw(cards, n) {
   return result;
 }
 
+// ── Q2: one word, one appearance ─────────────────────────────
+// Text compared the way a learner reads it: NFC, trimmed, case-insensitive.
+const quizText = (s) => String(s || '').normalize('NFC').trim().toLowerCase();
+const termOf   = (c) => c.front || '—';
+const defnOf   = (c) => c.back || c.notes || '—';
+const wordKey  = (c) => quizText(c.lemma || String(c.front || '').split('\n')[0]);
+
+// One card per word: a word studied in two sources has a card in each deck,
+// and both could otherwise answer the same question. Keeps the card the
+// quiz would weight highest (weaker), then the older one.
+function dedupeWordCards(cards) {
+  const best = new Map();
+  for (const c of cards) {
+    const k = wordKey(c);
+    if (!k) continue;
+    const cur = best.get(k);
+    if (!cur) { best.set(k, c); continue; }
+    const dw = cardWeight(c) - cardWeight(cur);
+    if (dw > 0 || (dw === 0 && String(c.createdAt || '') < String(cur.createdAt || ''))) best.set(k, c);
+  }
+  return [...best.values()];
+}
+
+// Picks n cards for one question type, preferring words no earlier type in
+// this quiz has used; reuses words only when the pool runs out.
+function pickFresh(pool, n, used) {
+  const fresh = pool.filter(c => !used.has(c.id));
+  let picked = weightedSample(fresh, Math.min(n, fresh.length));
+  if (picked.length < n) {
+    const ids = new Set(picked.map(c => c.id));
+    picked = picked.concat(weightedSample(pool.filter(c => !ids.has(c.id)), n - picked.length));
+  }
+  picked.forEach(c => used.add(c.id));
+  return picked;
+}
+
 // ─────────────────────────────────────────────────────────────
 // BUILD QUESTIONS
 // ─────────────────────────────────────────────────────────────
-function buildMultipleChoice(cards, config, count) {
+function buildMultipleChoice(cards, config, count, picked = null) {
   const len = count !== undefined ? count : (config.length || 10);
   if (cards.length < 2) return [];
   // Weighted sample for question cards; random distractors from full pool
-  const pool = weightedSample(cards, len);
+  const pool = picked || weightedSample(cards, len);
   return pool.map((card, idx) => {
     const wantTerm = config.answerFormat === 'term' ? true
       : config.answerFormat === 'definition' ? false
       : idx % 2 === 0;
     const prompt  = wantTerm ? (card.back || card.notes || '—') : (card.front || '—');
     const correct = wantTerm ? (card.front || '—')              : (card.back || card.notes || '—');
-    const distractorCards = shuffleArray(cards.filter(c => c.id !== card.id))
-      .slice(0, config.choiceCount - 1);
+    // Q2: no choice may read the same as the answer or as another choice.
+    const answerSide = (c) => (wantTerm ? termOf(c) : defnOf(c));
+    const seenText = new Set([quizText(correct)]);
+    const distractorCards = [];
+    for (const c of shuffleArray(cards.filter(c => c.id !== card.id))) {
+      if (distractorCards.length >= config.choiceCount - 1) break;
+      const t = quizText(answerSide(c));
+      if (seenText.has(t)) continue;
+      seenText.add(t);
+      distractorCards.push(c);
+    }
     const distractors = distractorCards
       .map(c => wantTerm ? (c.front || '—') : (c.back || c.notes || '—'));
     const choiceCardMap = {};
@@ -1661,17 +1711,19 @@ function buildMultipleChoice(cards, config, count) {
   });
 }
 
-function buildTrueFalse(cards, config, count) {
+function buildTrueFalse(cards, config, count, picked = null) {
   const len = count !== undefined ? count : (config.length || 10);
   if (cards.length < 2) return [];
   // Weighted sample for question cards
-  const pool = weightedSample(cards, len);
+  const pool = picked || weightedSample(cards, len);
   return pool.map((card, idx) => {
     const wantTerm = config.answerFormat === 'term' ? true
       : config.answerFormat === 'definition' ? false
       : idx % 2 === 0;
-    const isReal    = Math.random() > 0.5;
-    const otherCard = shuffleArray(cards.filter(c => c.id !== card.id))[0];
+    // Q2: a "false" pairing must use a definition that really differs.
+    const others    = cards.filter(c => c.id !== card.id && quizText(defnOf(c)) !== quizText(defnOf(card)));
+    const isReal    = others.length === 0 || Math.random() > 0.5;
+    const otherCard = shuffleArray(others)[0];
     const term = card.front || '—';
     const defn = isReal
       ? (card.back || card.notes || '—')
@@ -1685,9 +1737,20 @@ function buildTrueFalse(cards, config, count) {
   });
 }
 
-function buildMatchingSet(cards) {
+function buildMatchingSet(cards, picked = null) {
   if (cards.length < 2) return null;
-  const pool  = shuffleArray(cards).slice(0, 10);
+  // Q2: every term and every definition in a set reads differently, so a
+  // swapped match can't be marked wrong for picking an identical twin.
+  const seenTerm = new Set(), seenDefn = new Set();
+  const pool = [];
+  for (const c of (picked || shuffleArray(cards))) {
+    if (pool.length >= 10) break;
+    const t = quizText(termOf(c)), d = quizText(defnOf(c));
+    if (seenTerm.has(t) || seenDefn.has(d)) continue;
+    seenTerm.add(t); seenDefn.add(d);
+    pool.push(c);
+  }
+  if (pool.length < 2) return null;
   const pairs = pool.map(card => ({
     id:   card.id,
     term: card.front || '—',
@@ -1731,10 +1794,10 @@ function resolveRelatedLemmas(card, lemmaMaster) {
   };
 }
 
-function buildVocaTypeQuestions(cards, count, lemmaMaster) {
+function buildVocaTypeQuestions(cards, count, lemmaMaster, picked = null) {
   if (cards.length === 0) return [];
   const n    = Math.min(count, cards.length);
-  const pool = weightedSample(cards, n);
+  const pool = picked || weightedSample(cards, n);
   return pool.map(card => {
     const { relatedFormLemmas, relatedMeaningLemmas } = resolveRelatedLemmas(card, lemmaMaster);
     return {
@@ -2715,7 +2778,7 @@ function VocaTypeQ({ q, config, onAnswer, onOverride, onRelatedOverride, C, S })
             // isComposing: the Korean keyboard is still building a syllable.
             // That Enter only finishes the syllable; submitting on it can
             // send twice and skip past the feedback.
-            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && handleSubmit()}
+            onKeyDown={e => isSubmitEnter(e) && handleSubmit()}
             placeholder="Type the Korean word…"
             style={{
                           // 16px on mobile: iOS Safari auto-zooms any focused input whose
@@ -2798,7 +2861,7 @@ function VocaTypeQ({ q, config, onAnswer, onOverride, onRelatedOverride, C, S })
 function VocaQuizResults({ questions, correct, total, matchMisses = [], matchTotal = 0, resultId, config, onUpdateResult, onDone, C, S }) {
   const [localQs, setLocalQs] = useState(questions);
   const [saving,  setSaving]  = useState(false);
-  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
+  useDoneKey(onDone); // U9
 
   // Resync if the parent hands down a different questions array (e.g. a
   // late-landing duplicate finish over a slow connection replaced lastResult).
@@ -3537,7 +3600,7 @@ function GrammarConceptPick({ q, chosenId, C }) {
 function GrammarTranslationResults({ questions, translations, conceptChoices, assessment, assessErrorCode, onRetryAssess, onOverride, links, onDone, C, S }) {
   // Enter = Back to Quizzes, except while a Retry button is showing (G2), so
   // pressing Enter on Retry doesn't also leave the screen.
-  useGlobalKey(e => { if (e.key === 'Enter') onDone(); }, { enabled: !!assessment });
+  useDoneKey(onDone, { enabled: !!assessment }); // U9
   const score = useMemo(
     () => scoreTranslationQuiz(questions, assessment, conceptChoices),
     [questions, assessment, conceptChoices]
@@ -3845,7 +3908,7 @@ function GrammarSelectionResults({ questions, userSelections, onExplanations, li
   const [explanations,     setExplanations]     = useState({});
   const [explaining,       setExplaining]       = useState(false);
   const [explainError,     setExplainError]     = useState(false);
-  useGlobalKey(e => { if (e.key === 'Enter') onDone(); }, { enabled: !showExplainModal });
+  useDoneKey(onDone, { enabled: !showExplainModal }); // U9
 
   const score = useMemo(() => scoreSelectionQuiz(questions, userSelections), [questions, userSelections]);
 
@@ -4030,13 +4093,27 @@ function clusterScores(scores) {
   });
 }
 
+// T3: a result's date is a UTC ISO stamp; everything shown or grouped by
+// day uses the logical day it falls on (local time, day-start aware), as
+// The State of Quizzes already does. `n` days back from logical today is a
+// range's first day; a result is in range when its own day is on or after it.
+function rangeStartDay(n, dsh) {
+  const c = getLogicalToday(dsh);
+  c.setDate(c.getDate() - n);
+  return toDateStr(c);
+}
+const inRange = (iso, startDay, dsh) => {
+  const d = logicalDateOf(iso, dsh);
+  return !!d && d >= startDay;
+};
+
 // Groups quiz results by date and averages scores per type — shared between
 // the home preview chart and the Report Card's range-filtered chart. Caller
 // is responsible for any date-range pre-filtering before passing `list` in.
-function buildQuizChartData(list) {
+function buildQuizChartData(list, dsh = 3) {
   const byDate = {};
   for (const r of list) {
-    const key = r.date?.split('T')[0] || r.date;
+    const key = logicalDateOf(r.date, dsh) || r.date;
     if (!byDate[key]) byDate[key] = { voca: [], gram: [], gramSel: [], cloze: [] };
     if (r.type === 'voca')    byDate[key].voca.push(r.score);
     // Grammar splits into Translation (gram) and Selection (gramSel) — G4
@@ -4068,7 +4145,7 @@ function buildQuizChartData(list) {
 // preview list and the Report Card table. `onClick` omitted entirely (not
 // just falsy) when not provided, so non-interactive rows skip the hover
 // handlers and pointer cursor rather than faking an inert click target.
-function QuizResultRow({ r, last, padding, onClick, C }) {
+function QuizResultRow({ r, last, padding, onClick, C, dsh = 3 }) {
   const isVoca  = r.type === 'voca';
   const isCloze = r.type === 'cloze';
   const typeColor = isVoca ? C.accent : isCloze ? (C.success || '#7a9e6e') : (C.accent2 || C.success);
@@ -4098,7 +4175,7 @@ function QuizResultRow({ r, last, padding, onClick, C }) {
           padding: '2px 7px', borderRadius: '10px',
           color: typeColor, background: typeBg,
           }}>{typeLabel}</span>
-        <span style={{ color: C.textM }}>{r.date?.split('T')[0]}</span>
+        <span style={{ color: C.textM }}>{logicalDateOf(r.date, dsh)}</span>
       </div>
       <span style={{ fontFamily: SH.fm, color: scoreColor }}>
         {r.score}%
@@ -4335,12 +4412,12 @@ function MiniLineChart({ data, width = 560, height = 180, C }) {
 // ECHO HISTORY ON THE EXAMINER (X2)
 // ─────────────────────────────────────────────────────────────
 const ECHO_END_LABEL = { rounds: 'Complete', complete: 'All done both ways', cap: 'Stopped at the cap', ended: 'Ended early' };
-const echoDay = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : toDateStr(d); };
+const echoDay = (iso, dsh = 3) => logicalDateOf(iso, dsh);
 const echoPct = (x) => (x?.total ? `${Math.round((x.correct / x.total) * 100)}%` : '—');
 const echoGloss = (e) => (e ? (splitSenses(e.def2 || '')[0]?.display || def1ShortGloss(e.def1) || '') : '');
 
 // One saved Echo session in the Echo Log.
-function EchoLogRow({ s, last, onClick, C }) {
+function EchoLogRow({ s, last, onClick, C, dsh = 3 }) {
   return (
     <div
       onClick={onClick}
@@ -4358,7 +4435,7 @@ function EchoLogRow({ s, last, onClick, C }) {
             fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', padding: '2px 7px', borderRadius: '10px',
             color: C.warning, background: `${C.warning}18`,
           }}>{s.kind === 'dictation' ? 'Dictation' : 'Echo'}</span>
-          <span style={{ color: C.textM }}>{echoDay(s.finishedAt || s.startedAt)}</span>
+          <span style={{ color: C.textM }}>{echoDay(s.finishedAt || s.startedAt, dsh)}</span>
         </div>
         <div style={{ fontSize: '11px', color: C.textM, marginTop: '3px' }}>
           {s.itemCount ?? 0} words · {s.roundsPlayed ?? 0} round{s.roundsPlayed === 1 ? '' : 's'} · {ECHO_END_LABEL[s.endReason] || 'Complete'}
@@ -4382,7 +4459,7 @@ function EchoLogRow({ s, last, onClick, C }) {
 }
 
 // A saved session's summary, read-only, from the Echo Log.
-function EchoHistoryModal({ session, byId, onClose, C, S }) {
+function EchoHistoryModal({ session, byId, onClose, C, S, dsh = 3 }) {
   useGlobalKey(e => { if (e.key === 'Escape') onClose(); });
   const glossOf = (id) => echoGloss(byId.get(id)) || null;
   return createPortal(
@@ -4392,7 +4469,7 @@ function EchoHistoryModal({ session, byId, onClose, C, S }) {
     }} onClick={onClose}>
       <div style={{ ...S.modal, maxWidth: '620px', maxHeight: 'min(80vh, calc(100dvh - 32px))', display: 'flex', flexDirection: 'column', gap: '16px' }} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: '12px', color: C.textM }}>Echo · {echoDay(session.finishedAt || session.startedAt)}</span>
+          <span style={{ fontSize: '12px', color: C.textM }}>Echo · {echoDay(session.finishedAt || session.startedAt, dsh)}</span>
           <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', color: C.textM, cursor: 'pointer', fontSize: '18px', padding: '2px' }}>✕</button>
         </div>
         <EchoSummaryBody sum={session} glossOf={glossOf} C={C} />
@@ -4406,7 +4483,7 @@ function EchoHistoryModal({ session, byId, onClose, C, S }) {
 // a three-session trend, saved alternates (× removes, X-D3), and ticks for
 // "Practice these", which opens the Echo setup with the ticked words.
 const WR_PAGE_SIZE = 10;
-function EchoWordRecord({ sessions, lemmaMaster, onRemoveAlternate, onPractice, C, S }) {
+function EchoWordRecord({ sessions, lemmaMaster, onRemoveAlternate, onPractice, C, S, dsh = 3 }) {
   const [query,  setQuery]  = useState('');
   const [page,   setPage]   = useState(0);
   const [ticked, setTicked] = useState([]);
@@ -4428,7 +4505,7 @@ function EchoWordRecord({ sessions, lemmaMaster, onRemoveAlternate, onPractice, 
   const shown = rows.slice(pg * WR_PAGE_SIZE, (pg + 1) * WR_PAGE_SIZE);
   const usable = ticked.filter(id => byId.has(id));
   const toggle = (id) => setTicked(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
-  const lastSeen = (iso) => { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+  const lastSeen = (iso) => { const day = logicalDateOf(iso, dsh); return day ? new Date(day + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'; };
   const cols = isMobile ? '24px minmax(0, 1fr) auto' : '24px minmax(0, 1fr) 62px 62px 62px 56px 52px 58px 64px';
   const head = { fontSize: '10px', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: C.textM, textAlign: 'center' };
   const trendMarks = (trend) => (
@@ -4585,12 +4662,14 @@ function ReportCard({ results, report, echoCount = 0, echoSessions = [], lemmaMa
     })();
   };
 
+  // T3/T4: ranges count logical days back from today, and key on today
+  // (read per render; App re-renders when the day flips).
+  const rcToday = toDateStr(getLogicalToday(dsh));
   const filtered = useMemo(() => {
     if (range === 'all') return results;
-    const cutoff = getLogicalToday(dsh);
-    cutoff.setDate(cutoff.getDate() - parseInt(range));
-    return results.filter(r => new Date(r.date) >= cutoff);
-  }, [results, range, dsh]);
+    const start = rangeStartDay(parseInt(range), dsh);
+    return results.filter(r => inRange(r.date, start, dsh));
+  }, [results, range, dsh, rcToday]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sortedFiltered = useMemo(() => [...filtered].reverse(), [filtered]);
 
@@ -4599,12 +4678,11 @@ function ReportCard({ results, report, echoCount = 0, echoSessions = [], lemmaMa
     const at = (e) => new Date(e.finishedAt || e.startedAt);
     let list = (echoSessions || []).filter(e => !isNaN(at(e)));
     if (range !== 'all') {
-      const cutoff = getLogicalToday(dsh);
-      cutoff.setDate(cutoff.getDate() - parseInt(range));
-      list = list.filter(e => at(e) >= cutoff);
+      const start = rangeStartDay(parseInt(range), dsh);
+      list = list.filter(e => inRange(e.finishedAt || e.startedAt, start, dsh));
     }
     return list.sort((a, b) => String(b.finishedAt || b.startedAt).localeCompare(String(a.finishedAt || a.startedAt)));
-  }, [echoSessions, range, dsh]);
+  }, [echoSessions, range, dsh, rcToday]); // eslint-disable-line react-hooks/exhaustive-deps
   const echoTotalPages = Math.max(1, Math.ceil(echoFiltered.length / RC_PAGE_SIZE));
   const echoPg         = Math.min(echoPage, echoTotalPages - 1);
   const echoPaged      = echoFiltered.slice(echoPg * RC_PAGE_SIZE, (echoPg + 1) * RC_PAGE_SIZE);
@@ -4613,18 +4691,17 @@ function ReportCard({ results, report, echoCount = 0, echoSessions = [], lemmaMa
   // By The Numbers sits beside The State of Quizzes, so it uses the same
   // fixed window (the last 30 days); Sessions counts Echo too.
   const numbers30 = useMemo(() => {
-    const cutoff = getLogicalToday(dsh);
-    cutoff.setDate(cutoff.getDate() - 29);
-    const scored = results.filter(r => new Date(r.date) >= cutoff)
+    const start = rangeStartDay(29, dsh);
+    const scored = results.filter(r => inRange(r.date, start, dsh))
       .sort((a, b) => String(b.date).localeCompare(String(a.date)));
-    const echo = (echoSessions || []).filter(e => new Date(e.finishedAt || e.startedAt) >= cutoff).length;
+    const echo = (echoSessions || []).filter(e => inRange(e.finishedAt || e.startedAt, start, dsh)).length;
     return {
       sessions: scored.length + echo,
       best:     scored.length ? Math.max(...scored.map(r => r.score)) : null,
       recent:   scored.length ? scored[0].score : null,
       perfect:  scored.filter(r => r.score === 100).length,
     };
-  }, [results, echoSessions, dsh]);
+  }, [results, echoSessions, dsh, rcToday]); // eslint-disable-line react-hooks/exhaustive-deps
   const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / RC_PAGE_SIZE));
   const page       = Math.min(rawPage, Math.max(0, totalPages - 1));
   const pagedRows  = sortedFiltered.slice(page * RC_PAGE_SIZE, (page + 1) * RC_PAGE_SIZE);
@@ -4637,7 +4714,7 @@ function ReportCard({ results, report, echoCount = 0, echoSessions = [], lemmaMa
     enabled: !selectedResult,
   });
 
-  const chartData = useMemo(() => buildQuizChartData(filtered), [filtered]);
+  const chartData = useMemo(() => buildQuizChartData(filtered, dsh), [filtered, dsh]);
   const vocaR  = filtered.filter(r => r.type === 'voca');
   // Grammar averages are kept per kind (G4): Translation and Selection score differently
   const gramTR = filtered.filter(r => r.type === 'grammar' && grammarResultMode(r) === 'translation');
@@ -4653,7 +4730,7 @@ function ReportCard({ results, report, echoCount = 0, echoSessions = [], lemmaMa
   // Masthead vitals — drawn from full unfiltered history, independent of the range toggle below
   const todayStr     = toDateStr(getLogicalToday(dsh));
   const mastheadDate = new Date(todayStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.setDate(c.getDate() - 7); return new Date(r.date) >= c; });
+const last7        = results.filter(r => inRange(r.date, rangeStartDay(7, dsh), dsh));
   const last7Avg     = last7.length ? Math.round(last7.reduce((s, r) => s + r.score, 0) / last7.length) : null;
 
   // Lead story: the State of Quizzes report (E5), computed by the parent so
@@ -4759,7 +4836,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
       {/* Word Record (X2): every word Echo has seen */}
       <div>
         <GazetteKicker>Word Record</GazetteKicker>
-        <EchoWordRecord sessions={echoSessions} lemmaMaster={lemmaMaster} onRemoveAlternate={onRemoveAlternate} onPractice={onPracticeEcho} C={C} S={S} />
+        <EchoWordRecord sessions={echoSessions} lemmaMaster={lemmaMaster} onRemoveAlternate={onRemoveAlternate} onPractice={onPracticeEcho} C={C} S={S} dsh={dsh} />
       </div>
 
       {/* Session Log (Vocabulary, Cloze, Grammar) | Echo Log (X2) */}
@@ -4777,6 +4854,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
                     padding="10px 16px"
                     onClick={() => openResult(r)}
                     C={C}
+                    dsh={dsh}
                   />
                 ))}
               </div>
@@ -4803,7 +4881,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
             <>
               <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
                 {echoPaged.map((s, i, arr) => (
-                  <EchoLogRow key={s.id || s.startedAt || i} s={s} last={i === arr.length - 1} onClick={() => setOpenEcho(s)} C={C} />
+                  <EchoLogRow key={s.id || s.startedAt || i} s={s} last={i === arr.length - 1} onClick={() => setOpenEcho(s)} C={C} dsh={dsh} />
                 ))}
               </div>
               <PaginationFooter
@@ -4824,7 +4902,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
         </div>
       </div>
 
-      {openEcho && <EchoHistoryModal session={openEcho} byId={lemmaById} onClose={() => setOpenEcho(null)} C={C} S={S} />}
+      {openEcho && <EchoHistoryModal session={openEcho} byId={lemmaById} onClose={() => setOpenEcho(null)} C={C} S={S} dsh={dsh} />}
 
       {/* Result detail popup — portaled to document.body so it anchors to the
           real viewport, not to this page's .fade-up wrapper (a persisting
@@ -4854,7 +4932,7 @@ const last7        = results.filter(r => { const c = getLogicalToday(dsh); c.set
                   {selectedResult.result.type === 'voca' ? 'Voca' : selectedResult.result.type === 'cloze' ? 'Cloze'
                     : grammarResultMode(selectedResult.result) === 'selection' ? 'Grammar · Selection' : 'Grammar · Translation'}
                 </span>
-                <span style={{ fontSize: '12px', color: C.textM }}>{selectedResult.result.date?.split('T')[0]}</span>
+                <span style={{ fontSize: '12px', color: C.textM }}>{logicalDateOf(selectedResult.result.date, dsh)}</span>
               </div>
               <span style={{ fontFamily: SH.fm, fontSize: '24px', color: selectedResult.result.score >= 90 ? C.warning : selectedResult.result.score >= 70 ? C.accent : C.danger }}>
                 {selectedResult.result.score}%
@@ -5043,13 +5121,23 @@ function buildClozeQuestions(sentenceCards, wordInputForms, config, lemmaMaster)
     });
   }
 
-  // Select mode — distractor pool is all word input surface forms from the same source(s)
-  const uniqueInputs = [...new Set(wordInputForms)];
+  // Select mode — distractor pool is all word input surface forms from the same source(s).
+  // Q2: wordInputForms are { input, lemma }; another form of the card's own
+  // word (사과가 for 사과를) is not offered as a wrong choice.
+  const formsByInput = new Map();
+  for (const w of wordInputForms) {
+    const f = typeof w === 'string' ? { input: w, lemma: '' } : w;
+    if (f.input && !formsByInput.has(f.input)) formsByInput.set(f.input, f);
+  }
+  const uniqueForms = [...formsByInput.values()];
 
   return sampled.map(card => {
     const { relatedFormLemmas, relatedMeaningLemmas } = resolveRelatedLemmas(card, lemmaMaster);
     const correct     = card.inputForm;
-    const others      = shuffleArray(uniqueInputs.filter(f => f !== correct));
+    const ownWord     = quizText(card.lemma);
+    const others      = shuffleArray(uniqueForms
+      .filter(f => f.input !== correct && !(ownWord && quizText(f.lemma) === ownWord))
+      .map(f => f.input));
     const distractors = others.slice(0, config.choiceCount - 1);
     const choices     = shuffleArray([correct, ...distractors]);
     return {
@@ -5309,7 +5397,7 @@ function ClozeTypeQ({ q, onAnswer, onOverride, onRelatedOverride, C, S }) {
             value={input}
             onChange={e => setInput(e.target.value)}
             // isComposing guard: see the voca Type input
-            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && handleSubmit()}
+            onKeyDown={e => isSubmitEnter(e) && handleSubmit()}
             placeholder="Type the missing word…"
             style={{
                           // 16px on mobile prevents the iOS focus auto-zoom (see voca Type input)
@@ -5481,6 +5569,15 @@ function ClozeQuizSession({ questions: initialQuestions, onFinish, C, S }) {
 
   const getCredit = q => q.credit ?? (q.isCorrect ? 1.0 : 0.0);
 
+  // U8: single-fire guard (same as the Vocabulary Quiz) — Enter plus a click
+  // on the last question, or End plus See results, saved two results.
+  const finishedRef = useRef(false);
+  const finishOnce = (...args) => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    onFinish(...args);
+  };
+
   const handleAnswer = (userAnswer, credit) => {
      // credit is a number (1.0 / 0.5 / 0.0) for cloze_type; boolean-derived for cloze_select
      const cr        = typeof credit === 'number' ? credit : (credit ? 1.0 : 0.0);
@@ -5507,7 +5604,7 @@ function ClozeQuizSession({ questions: initialQuestions, onFinish, C, S }) {
   const advance = () => {
     if (idx + 1 >= questions.length) {
       const creditSum = questions.reduce((s, q) => s + getCredit(q), 0);
-      onFinish(questions, creditSum, questions.length);
+      finishOnce(questions, creditSum, questions.length);
     } else {
       setIdx(prev => prev + 1);
       setWaiting(false);
@@ -5540,7 +5637,7 @@ function ClozeQuizSession({ questions: initialQuestions, onFinish, C, S }) {
           <button
             onClick={() => {
               const creditSum = questions.reduce((s, q) => s + getCredit(q), 0);
-              onFinish(questions, creditSum, questions.filter(q => q.answered).length || 1);
+              finishOnce(questions, creditSum, questions.filter(q => q.answered).length || 1);
             }}
             style={{ fontSize: '12px', color: C.textM, padding: '3px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: 'transparent', cursor: 'pointer', flexShrink: 0 }}
           >
@@ -5564,7 +5661,7 @@ function ClozeQuizSession({ questions: initialQuestions, onFinish, C, S }) {
 }
 
 function ClozeQuizResults({ questions, correct, total, onDone, C, S }) {
-  useGlobalKey(e => { if (e.key === 'Enter') onDone(); });
+  useDoneKey(onDone); // U9
   const rawPct = total > 0 ? correct / total * 100 : 0;
   const pct    = formatScore(Math.round(rawPct * 10) / 10);
 
@@ -5681,7 +5778,7 @@ function qrWrite(key, val) { try { localStorage.setItem(key, JSON.stringify(val)
 // Deck study session with the given card ids.
 // echoDeckTarget / onEchoDeckTargetUsed (X3): a deck card's Echo button sends
 // its deck id here; the Echo setup opens with that deck chosen.
-export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: propCards, decks: propDecks, settings, grammarEntries, onNavigateToGrammar, onPracticeGrammarCards, wordInputs = [], aviSources = [], aviSections = [], echoDeckTarget = null, onEchoDeckTargetUsed = null }) {
+export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: propCards, decks: propDecks, settings, grammarEntries, onNavigateToGrammar, onPracticeGrammarCards, wordInputs = [], aviSources = [], aviSections = [], echoDeckTarget = null, onEchoDeckTargetUsed = null, onNotice = null }) {
   const { C, S } = useAppTheme();
   const uid = auth.currentUser?.uid;
   // Keep module-level ref current so every sub-component in this file reads
@@ -5747,12 +5844,38 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   }, [uid]);
 
   // Load lemmaMaster from Firestore on mount
-  useEffect(() => {
-    if (!uid) return;
-    getDocs(collection(db, 'users', uid, 'lemmaMaster'))
-      .then(snap => setLemmaMaster(snap.docs.map(d => d.data())))
-      .catch(() => {});
+  // Q1: the Vocabulary (Type) and Cloze starts wait for this load, up to
+  // LEMMA_WAIT_MS, instead of reading the empty list from first render, so
+  // related-word credit applies. A failed load is retried at the next start.
+  const lemmaMasterRef = useRef(lemmaMaster);
+  lemmaMasterRef.current = lemmaMaster;
+  const lemmaLoadRef   = useRef(null);   // the load in flight, if any
+  const lemmaLoadedRef = useRef(false);
+  const loadLemmaMaster = useCallback(() => {
+    if (!uid) return Promise.resolve(null);
+    const p = getDocs(collection(db, 'users', uid, 'lemmaMaster'))
+      .then(snap => {
+        const rows = snap.docs.map(d => d.data());
+        lemmaMasterRef.current = rows;
+        lemmaLoadedRef.current = true;
+        setLemmaMaster(rows);
+        return rows;
+      })
+      .catch(e => {
+        console.error('QuizzesPage: Lemma Master load failed', e);
+        return null;
+      })
+      .finally(() => { if (lemmaLoadRef.current === p) lemmaLoadRef.current = null; });
+    lemmaLoadRef.current = p;
+    return p;
   }, [uid]);
+  useEffect(() => { loadLemmaMaster(); }, [loadLemmaMaster]);
+  const ensureLemmaMaster = useCallback(async () => {
+    if (lemmaLoadedRef.current) return lemmaMasterRef.current;
+    const p = lemmaLoadRef.current || loadLemmaMaster();
+    await Promise.race([p, new Promise(r => setTimeout(r, LEMMA_WAIT_MS))]);
+    return lemmaMasterRef.current;
+  }, [loadLemmaMaster]);
 
   // Use props directly — these come from App's shared useFlashcardData
   const cards = propCards || [];
@@ -5865,19 +5988,25 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     // on top of each caller already building clean meta objects.
     const cleanMeta = meta ? JSON.parse(JSON.stringify(meta)) : null;
     const entry    = { type, score, correct, total, date: new Date().toISOString(), meta: cleanMeta };
-    try {
-      const ref = await addDoc(collection(db, 'users', uid, 'quiz_results'), entry);
+    // S6: the id is made here and the write queued, so the results screen
+    // shows at once even offline (the result syncs when there's a
+    // connection). If the server refuses it, it comes back out of the list.
+    const ref = fsDoc(collection(db, 'users', uid, 'quiz_results'));
+    queueWrite(() => setDoc(ref, entry), 'QuizzesPage: save result failed', () => {
       setResults(prev => {
-        const next = [...prev, { id: ref.id, ...entry }];
+        const next = prev.filter(r => r.id !== ref.id);
         qrWrite(QR_PREFIX + uid, next);
         return next;
       });
-      return { score, id: ref.id };
-    } catch (e) {
-      console.error('QuizzesPage: save result failed', e);
-      return { score, id: null };
-    }
-  }, [uid]);
+      onNotice?.("This quiz result couldn't be saved.");
+    });
+    setResults(prev => {
+      const next = [...prev, { id: ref.id, ...entry }];
+      qrWrite(QR_PREFIX + uid, next);
+      return next;
+    });
+    return { score, id: ref.id };
+  }, [uid, onNotice]);
 
   // Updates a saved quiz result in Firestore (used by override on results screen).
   // metaPatch: optional meta fields to replace too (e.g. missedConcepts).
@@ -5887,19 +6016,17 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       const newScore = Math.round(rawScore * 10) / 10;
       const fsPatch = { correct: newCorrect, score: newScore };
       if (metaPatch) for (const [k, v] of Object.entries(metaPatch)) fsPatch[`meta.${k}`] = v;
-      try {
-        await updateDoc(fsDoc(db, 'users', uid, 'quiz_results', resultId), fsPatch);
-        setResults(prev => {
-          const next = prev.map(r => r.id === resultId
-            ? { ...r, correct: newCorrect, score: newScore, ...(metaPatch ? { meta: { ...(r.meta || {}), ...metaPatch } } : {}) }
-            : r);
-          qrWrite(QR_PREFIX + uid, next);
-          return next;
-        });
-      } catch (e) {
-        console.error('QuizzesPage: updateResult failed', e);
-      }
-    }, [uid]);
+      // S6: shown at once, write queued.
+      setResults(prev => {
+        const next = prev.map(r => r.id === resultId
+          ? { ...r, correct: newCorrect, score: newScore, ...(metaPatch ? { meta: { ...(r.meta || {}), ...metaPatch } } : {}) }
+          : r);
+        qrWrite(QR_PREFIX + uid, next);
+        return next;
+      });
+      queueWrite(() => updateDoc(fsDoc(db, 'users', uid, 'quiz_results', resultId), fsPatch),
+        'QuizzesPage: updateResult failed', () => onNotice?.("This score change couldn't be saved."));
+    }, [uid, onNotice]);
 
   // ── Grammar quiz: device-only resume snapshot (G2, G-D7) ──
   // One unfinished session per user, saved on this device only. Written on
@@ -6034,17 +6161,14 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
 
       // Full per-question detail, kept separately so it's only fetched on demand
       if (resultId && uid) {
-        try {
-          await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', resultId), {
-            type:        'grammar',
-            questions:   gramQuestions,
-            translations,
-            conceptChoices: (conceptChoices || []).map(c => c || null),
-            assessment,
-          });
-        } catch (e) {
-          console.error('QuizzesPage: detail save failed', e);
-        }
+        // S6: queued, so the results screen never waits on the network.
+        queueWrite(() => setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', resultId), {
+          type:        'grammar',
+          questions:   gramQuestions,
+          translations,
+          conceptChoices: (conceptChoices || []).map(c => c || null),
+          assessment,
+        }), 'QuizzesPage: detail save failed');
       }
       if (resultId) setGramTranslationResultId(resultId);
 
@@ -6072,11 +6196,8 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     if (!uid || !gramTranslationResultId) return;
     const score = scoreTranslationQuiz(gramQuestions, next, gramConceptChoices);
     await updateResult(gramTranslationResultId, score.points, score.total, { missedConcepts: score.missedConcepts });
-    try {
-      await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', gramTranslationResultId), { assessment: next }, { merge: true });
-    } catch (e) {
-      console.error('QuizzesPage: override detail save failed', e);
-    }
+    queueWrite(() => setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', gramTranslationResultId), { assessment: next }, { merge: true }),
+      'QuizzesPage: override detail save failed');
   }, [gramTranslationResultId, gramQuestions, gramConceptChoices, updateResult]);
 
   const handleGrammarTranslationFinish = useCallback(({ translations, conceptChoices }) => {
@@ -6119,18 +6240,15 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       scoring: 'g4',
     });
     if (resultId && uid) {
-      try {
-        await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', resultId), {
-          type:         'grammar',
-          mode:         'selection',
-          questions:    gramQuestions,
-          selections:   toSavedSelections(selections),
-          explanations: {},
-        });
-        setGramSelectionResultId(resultId);
-      } catch (e) {
-        console.error('QuizzesPage: selection detail save failed', e);
-      }
+      // S6: queued, so the results screen never waits on the network.
+      queueWrite(() => setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', resultId), {
+        type:         'grammar',
+        mode:         'selection',
+        questions:    gramQuestions,
+        selections:   toSavedSelections(selections),
+        explanations: {},
+      }), 'QuizzesPage: selection detail save failed');
+      setGramSelectionResultId(resultId);
     }
     setView('grammar_selection_results');
   }, [saveResult, gramQuestions, clearGramSnapshot, dsh]);
@@ -6140,11 +6258,8 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   const handleSelectionExplanations = useCallback(async (explanations) => {
     const uid = auth.currentUser?.uid;
     if (!uid || !gramSelectionResultId) return;
-    try {
-      await setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', gramSelectionResultId), { explanations }, { merge: true });
-    } catch (e) {
-      console.error('QuizzesPage: explanation save failed', e);
-    }
+    queueWrite(() => setDoc(fsDoc(db, 'users', uid, 'quiz_result_details', gramSelectionResultId), { explanations }, { merge: true }),
+      'QuizzesPage: explanation save failed');
   }, [gramSelectionResultId]);
 
   // ── Resume an unfinished session from this device (G2) ─────
@@ -6214,21 +6329,19 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   // touched (arrayUnion / arrayRemove), nothing else on the entry is rewritten.
   const saveEchoAlternate = useCallback(async (lemmaID, text, remove = false) => {
     if (!uid || !lemmaID || !text) return false;
-    try {
-      await updateDoc(fsDoc(db, 'users', uid, 'lemmaMaster', lemmaID), {
-        echoAlternates: remove ? arrayRemove(text) : arrayUnion(text),
-      });
-      setLemmaMaster(prev => prev.map(e => {
-        if (e.lemmaID !== lemmaID) return e;
-        const list = Array.isArray(e.echoAlternates) ? e.echoAlternates : [];
-        return { ...e, echoAlternates: remove ? list.filter(a => a !== text) : (list.includes(text) ? list : [...list, text]) };
-      }));
-      return true;
-    } catch (e) {
-      console.error('QuizzesPage: saving an Echo alternate failed', e);
-      return false;
-    }
-  }, [uid]);
+    // S6: shown at once, write queued (offline included).
+    setLemmaMaster(prev => prev.map(e => {
+      if (e.lemmaID !== lemmaID) return e;
+      const list = Array.isArray(e.echoAlternates) ? e.echoAlternates : [];
+      return { ...e, echoAlternates: remove ? list.filter(a => a !== text) : (list.includes(text) ? list : [...list, text]) };
+    }));
+    queueWrite(() => updateDoc(fsDoc(db, 'users', uid, 'lemmaMaster', lemmaID), {
+      echoAlternates: remove ? arrayRemove(text) : arrayUnion(text),
+    }), 'QuizzesPage: saving an Echo alternate failed', () => {
+      onNotice?.(remove ? "Removing that alternate didn't save." : "That alternate couldn't be saved.");
+    });
+    return true;
+  }, [uid, onNotice]);
   const echoAlternatesOf = useCallback((lemmaID) => {
     const e = lemmaMaster.find(x => x.lemmaID === lemmaID);
     return Array.isArray(e?.echoAlternates) ? e.echoAlternates : [];
@@ -6236,20 +6349,32 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
 
   const sendEchoSummary = useCallback(async (summary) => {
     if (!uid) { setEchoSave({ status: 'error', summary }); return; }
-    setEchoSave({ status: 'saving', summary });
+    // S6: the id is made here and the write queued, so the summary never
+    // sits on "Saving…" offline. If the server refuses it, it comes back out
+    // of the history and the summary offers Retry.
+    let saved, ref;
     try {
-      const saved = JSON.parse(JSON.stringify(summary));
-      const ref = await addDoc(collection(db, 'users', uid, 'echo_sessions'), saved);
-      setEchoSave({ status: 'saved', summary });
-      setEchoSessions(prev => {
-        const next = [...prev, { id: ref.id, ...saved }];
-        qrWrite(ES_PREFIX + uid, next);
-        return next;
-      });
+      saved = JSON.parse(JSON.stringify(summary));
+      ref = fsDoc(collection(db, 'users', uid, 'echo_sessions'));
     } catch (e) {
       console.error('QuizzesPage: echo session save failed', e);
       setEchoSave({ status: 'error', summary });
+      return;
     }
+    queueWrite(() => setDoc(ref, saved), 'QuizzesPage: echo session save failed', () => {
+      setEchoSessions(prev => {
+        const next = prev.filter(x => x.id !== ref.id);
+        qrWrite(ES_PREFIX + uid, next);
+        return next;
+      });
+      setEchoSave(prev => (prev?.summary === summary ? { status: 'error', summary } : prev));
+    });
+    setEchoSave({ status: 'saved', summary, offline: isOffline() });
+    setEchoSessions(prev => {
+      const next = [...prev, { id: ref.id, ...saved }];
+      qrWrite(ES_PREFIX + uid, next);
+      return next;
+    });
   }, [uid]);
 
   // Every round commit and End come through here.
@@ -6351,9 +6476,9 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   }, [echoResume, prepareEchoAudio]);
 
   // ── handleVocaStart ────────────────────────────────────────
-  const handleVocaStart = useCallback((config, vocaDecks) => {
+  const handleVocaStart = useCallback(async (config, vocaDecks) => {
     if (DEMO) config = { ...config, deckIds: [] }; // demo: all decks (7D)
-    const pool = enrichedCards.filter(c => {
+    const eligible = enrichedCards.filter(c => {
       if (c.type === 'grammar') return false;
       if (c.type === 'sentence') return false; // voca formats are word-card only; sentence recall lives in cloze
       if ((c.deckIds || []).includes(GRAMMAR_DECK_ID)) return false;
@@ -6362,22 +6487,37 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       }
       return config.deckIds.some(id => (c.deckIds || []).includes(id));
     });
+    // Q2: one card per word.
+    const pool = dedupeWordCards(eligible);
 
-    if (pool.length < 2) return;
+    // Q3: say why nothing starts.
+    if (pool.length < 2) {
+      onNotice?.(pool.length === 1
+        ? 'The chosen decks hold only one word. A Vocabulary Quiz needs at least 2.'
+        : 'The chosen decks have no word cards.');
+      return;
+    }
 
     const types      = config.questionTypes || ['multiple'];
     const typeCounts = config.typeCounts    || VOCA_DEFAULTS.typeCounts;
+    // Q1: Type questions resolve related words from Lemma Master.
+    const lm = types.includes('type') ? await ensureLemmaMaster() : lemmaMasterRef.current;
 
-    // Build linear questions (MC + TF + Type), shuffled together
+    // Build linear questions (MC + TF + Type), shuffled together.
+    // Q2: each type prefers words the earlier types haven't used.
+    const used = new Set();
     let linearQs = [];
     if (types.includes('multiple')) {
-      linearQs = linearQs.concat(buildMultipleChoice(pool, config, typeCounts.multiple || 5));
+      const n = typeCounts.multiple || 5;
+      linearQs = linearQs.concat(buildMultipleChoice(pool, config, n, pickFresh(pool, Math.min(n, pool.length), used)));
     }
     if (types.includes('truefalse')) {
-      linearQs = linearQs.concat(buildTrueFalse(pool, config, typeCounts.truefalse || 5));
+      const n = typeCounts.truefalse || 5;
+      linearQs = linearQs.concat(buildTrueFalse(pool, config, n, pickFresh(pool, Math.min(n, pool.length), used)));
     }
     if (types.includes('type')) {
-      linearQs = linearQs.concat(buildVocaTypeQuestions(pool, typeCounts.type || 5, lemmaMaster));
+      const n = typeCounts.type || 5;
+      linearQs = linearQs.concat(buildVocaTypeQuestions(pool, n, lm, pickFresh(pool, Math.min(n, pool.length), used)));
     }
     linearQs = shuffleArray(linearQs);
 
@@ -6386,20 +6526,27 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
     if (types.includes('matching')) {
       const numSets = typeCounts.matching || 1;
       for (let i = 0; i < numSets; i++) {
-        const ms = buildMatchingSet(pool);
-        if (ms) matchSets.push(ms);
+        // Unused words first, then the rest; only the words placed count as used.
+        const candidates = [...shuffleArray(pool.filter(c => !used.has(c.id))), ...shuffleArray(pool.filter(c => used.has(c.id)))];
+        const ms = buildMatchingSet(pool, candidates);
+        if (ms) { ms.pairs.forEach(p => used.add(p.id)); matchSets.push(ms); }
       }
     }
 
-    if (linearQs.length === 0 && matchSets.length === 0) return;
+    if (linearQs.length === 0 && matchSets.length === 0) {
+      onNotice?.("Couldn't build any questions from the chosen decks.");
+      return;
+    }
 
     setActiveQuestions(linearQs);
     setActiveMatchSets(matchSets);
     setQuizConfig(config);
     setView('voca_session');
-  }, [enrichedCards]);
+  }, [enrichedCards, ensureLemmaMaster, onNotice]);
 
     const handleVocaFinish = useCallback(async (questions, correct, total, matchMisses = [], matchTotal = 0) => {
+    // U8: End before answering anything leaves without saving a 0% result.
+    if (!questions.some(q => q.answered) && !matchTotal) { setView('home'); return; }
     const byType = {};
     for (const q of questions) {
       const t = q.type === 'voca_type' ? 'type' : q.type;
@@ -6468,18 +6615,25 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       (c.sentence || c.front?.includes('\n'))
     );
 
-  if (sentenceCardsRaw.length === 0) return;
-
-  // Load word inputs for these sources (needed for both inputForm resolution and distractors)
-  let wordInputs = [];
-  try {
-    const snap = await getDocs(collection(db, 'users', uid, 'wordInputs'));
-    wordInputs = snap.docs
-      .map(d => d.data())
-      .filter(w => activeSourceNames.has(w.source) && w.input);
-  } catch (e) {
-    console.error('Cloze quiz: failed to load word inputs', e);
+  if (sentenceCardsRaw.length === 0) {
+    onNotice?.('The chosen decks have no sentence cards.'); // Q3
+    return;
   }
+
+  // Word inputs for these sources (needed for both inputForm resolution and
+  // distractors). Q4: App already holds them; read Firestore only if it
+  // hasn't loaded them yet.
+  let allRows = wordInputs;
+  if (!allRows?.length) {
+    try {
+      const snap = await getDocs(collection(db, 'users', uid, 'wordInputs'));
+      allRows = snap.docs.map(d => d.data());
+    } catch (e) {
+      console.error('Cloze quiz: failed to load word inputs', e);
+      allRows = [];
+    }
+  }
+  const sourceRows = allRows.filter(w => activeSourceNames.has(w.source) && w.input);
   // Resolve inputForm for cards that don't have it (older entries)
     const norm = s => (s || '').trim().toLowerCase();
     const sentenceCards = sentenceCardsRaw.map(c => {
@@ -6490,28 +6644,38 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
       if (base.inputForm) return base;
       const sourceName = (c.deckIds || []).map(id => deckSourceMap[id]).find(Boolean);
       if (!sourceName) return base;
-      const wi = wordInputs.find(w =>
+      const wi = sourceRows.find(w =>
         norm(w.lemma) === norm(c.lemma) && w.source === sourceName
       );
       return wi ? { ...base, inputForm: wi.input } : base;
     }).filter(c => c.inputForm && c.sentence);
 
-    if (sentenceCards.length === 0) return;
+    if (sentenceCards.length === 0) {
+      onNotice?.("None of the chosen sentence cards has its word form recorded, so there's nothing to blank out."); // Q3
+      return;
+    }
 
-  const wordInputForms = wordInputs.map(w => w.input);
-  const questions = buildClozeQuestions(sentenceCards, wordInputForms, config, lemmaMaster);
-  if (questions.length === 0) return;
+  // Q2: forms carry their lemma, so other forms of the same word aren't wrong choices.
+  const wordInputForms = sourceRows.map(w => ({ input: w.input, lemma: w.lemma || '' }));
+  const lm = await ensureLemmaMaster(); // Q1
+  const questions = buildClozeQuestions(sentenceCards, wordInputForms, config, lm);
+  if (questions.length === 0) {
+    onNotice?.("None of the chosen sentences contains its word form as written, so there's nothing to blank out."); // Q3
+    return;
+  }
 
   setClozeConfig({ ...config, activeDeckIds, sourceNames: [...activeSourceNames] });
   setClozeQuestions(questions);
   setView('cloze_session');
-}, [enrichedCards, decks, uid]);
+}, [enrichedCards, decks, uid, wordInputs, ensureLemmaMaster, onNotice]);
 
      const handleClozeFinish = useCallback(async (questions, correct, total) => {
        // Missed lemmas + the exact form that filled the blank (Stage A-4) —
        // stored on the result doc's meta for the session-log popup. Only
        // answered misses count; missedTerms stays as strings for
        // headlineEngine, now uncapped.
+       // U8: End before answering anything leaves without saving a 0% result.
+       if (!questions.some(q => q.answered)) { setView('home'); return; }
        const missedDetail = questions
          .filter(q => q.answered && !q.isCorrect)
          .map(q => ({ term: q.lemma || '', answer: q.inputForm || '' }))
@@ -6534,18 +6698,20 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
      }, [saveResult, clozeConfig]);
 
   // ── Derived data for home view ────────────────────────────
-  const last7     = results.filter(r => { const c = getLogicalToday(dsh); c.setDate(c.getDate() - 7); return new Date(r.date) >= c; });
+  const last7     = results.filter(r => inRange(r.date, rangeStartDay(7, dsh), dsh));
   const vocaLast7 = last7.filter(r => r.type === 'voca');
   const avgLast7  = last7.length ? Math.round(last7.reduce((s, r) => s + r.score, 0) / last7.length) : null;
-  const echoLast7 = echoSessions.filter(e => { const c = getLogicalToday(dsh); c.setDate(c.getDate() - 7); return new Date(e.finishedAt || e.startedAt) >= c; });
+  const echoLast7 = echoSessions.filter(e => inRange(e.finishedAt || e.startedAt, rangeStartDay(7, dsh), dsh));
   // Demo cap (7C): Echo sessions count toward the quiz-session cap too.
   const quizCapHit = DEMO && demoCapReached([...results, ...echoSessions], 'quizSessions');
 
+  // T3/T4: logical days, keyed on today (read per render).
+  const homeToday = toDateStr(getLogicalToday(dsh));
   const homeChartData = useMemo(() => {
-    const c30 = getLogicalToday(dsh); c30.setDate(c30.getDate() - 30);
-    const last30 = results.filter(r => new Date(r.date) >= c30);
-    return buildQuizChartData(last30);
-  }, [results, dsh]);
+    const start = rangeStartDay(30, dsh);
+    const last30 = results.filter(r => inRange(r.date, start, dsh));
+    return buildQuizChartData(last30, dsh);
+  }, [results, dsh, homeToday]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (propCards === null) {
     return (
@@ -6904,7 +7070,7 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
         ) : (
           <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '12px', padding: '20px' }}>
             {[...results].reverse().slice(0, 5).map((r, i, arr) => (
-              <QuizResultRow key={i} r={r} last={i === arr.length - 1} C={C} />
+              <QuizResultRow key={i} r={r} last={i === arr.length - 1} C={C} dsh={dsh} />
             ))}
           </div>
         )}

@@ -9,11 +9,11 @@ import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
-  extractLemmaFromText, writeGlobalLemma, fetchDefinition,
-  getSourceSections, updateLinkedCards,
+  getSourceSections,
 } from '../../utils/aviUtils.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { autoCreateWordCard } from '../../utils/cardFactory.js';
+import { setWordSkip } from '../../utils/wordSkip.js';
 import { stageWordInput } from '../../utils/wordStaging.js';
 import { DEMO } from '../../demo/demoConfig.js';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
@@ -23,6 +23,8 @@ import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
 import { useSearchAssist } from '../../hooks/useSearchAssist.js';
 import { SearchAnchorNote, DidYouMean } from '../../components/avi/SearchAssist.jsx';
+import { scrollListToTop } from '../../utils/scrollUtils.js';
+import { isSubmitEnter } from '../../utils/keyUtils.js';
 
 const WI_PAGE_SIZE = 25;
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -213,8 +215,9 @@ export function AVIWordInputPage({
   const scrollRef = useRef(null);
   const [searchPopup, setSearchPopup] = useState(null);
 
-  const scrollToTop = () =>
-    scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  // U2: on mobile the list flows inside AVI's scroll shell, so scrolling the
+  // list box itself did nothing; this moves whichever box actually scrolls.
+  const scrollToTop = () => scrollListToTop(scrollRef.current);
 
   // ── Stage a new word ────────────────────────────────────────
   // The pipeline itself lives in utils/wordStaging.js (AS5a), shared with the
@@ -259,15 +262,18 @@ export function AVIWordInputPage({
   };
 
   // ── Toggle skip ─────────────────────────────────────────────
-  // Bug #1 fix: was incorrectly setting `uploaded` instead of `skipUpload`.
-  const toggleSkip = useCallback((uid, val) => {
-    updateData(prev => ({
-      ...prev,
-      wordInputs: prev.wordInputs.map(w =>
-        w.uid === uid ? { ...w, skipUpload: val } : w
-      ),
-    }));
-  }, [updateData]);
+  // Skip applies to the word in its source: every row of the same lemma
+  // in that source and its sentence rows follow, an existing card can be
+  // removed, and unskipping restores the cards (utils/wordSkip.js). The
+  // ref keeps the callback stable so memoized rows don't re-render.
+  const skipCtx = useRef(null);
+  skipCtx.current = { data, updateData, cards, decks, uid, updateCards, updateDecks, aviSources, dsh, showAVIToast };
+  const toggleSkip = useCallback((rowUid, val) => {
+    const ctx = skipCtx.current;
+    const row = ctx.data.wordInputs.find(w => w.uid === rowUid);
+    setWordSkip({ ...ctx, row, val })
+      .catch(e => console.error('Word Input: skip update failed', e));
+  }, []);
 
   // ── Delete row ──────────────────────────────────────────────
   const deleteRow = useCallback((uid) => {
@@ -360,7 +366,7 @@ export function AVIWordInputPage({
           value={stagingText}
           onChange={e => setStagingText(e.target.value)}
           onKeyDown={e => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleStageWord();
+            if (isSubmitEnter(e) && (e.metaKey || e.ctrlKey)) handleStageWord();
           }}
           rows={4}
           disabled={DEMO}

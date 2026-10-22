@@ -1,17 +1,15 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { parseDate, isToday, getLogicalToday, getGreeting, toDateStr, getLogicalDateStr, getTaskDates, taskOccursOn, isDateCounted } from '../utils/dateUtils.js';
+import { useState, useMemo, useCallback } from 'react';
+import { parseDate, getLogicalToday, getGreeting, toDateStr, getLogicalDateStr, getTaskDates, taskOccursOn, isDateCounted } from '../utils/dateUtils.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { TaskItem } from '../components/TaskItem.jsx';
 import { ProgressBar } from '../components/ProgressBar.jsx';
 import { CATEGORIES } from '../constants.js';
 import { DAILY_CAP } from '../utils/srsEngine.js';
 import { playSound } from '../utils/soundEngine.js';
-import { doc, setDoc } from 'firebase/firestore';
-import { db, auth } from '../firebase.js';import { SH } from '../theme/buildStyles.js';
+import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
 import { useDragSort } from '../hooks/useDragSort.js';
-import { taskSortComparator, applyDragOrder } from '../utils/dragSort.js';
-import { uid } from '../utils/dateUtils.js';
+import { makeTaskSortComparator, applyDragOrder } from '../utils/dragSort.js';
 import { isDueToday } from '../utils/fsrs.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -65,6 +63,10 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
   const [filter, setFilter] = useState('all');
   const ct  = C.bgText  || C.text;
   const ctm = C.bgTextM || C.textM;
+  // T4: the logical day, read on every render (App re-renders when the day
+  // flips). Memos below that depend on "today" key on it; keyed on dsh
+  // alone they stayed on the day the page was opened.
+  const logicalDayStr = getLogicalDateStr(dsh);
 
   // ── SRS progress for today ────────────────────────────────────
   // srsReviewed: cards reviewed in today's logical window (respects day-flip hour).
@@ -72,8 +74,7 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
   // dueAtDayStart: snapshot taken when the pipeline ran (fixed total all day).
   const srsReviewed = useMemo(() => {
     if (!cards) return 0;
-    const logicalDateStr = getLogicalDateStr(dsh);
-    const windowStart = new Date(logicalDateStr + 'T' + String(dsh).padStart(2, '0') + ':00:00').getTime();
+    const windowStart = new Date(logicalDayStr + 'T' + String(dsh).padStart(2, '0') + ':00:00').getTime();
     const windowEnd   = windowStart + 86_400_000;
     return cards.filter(c => {
       const reviewed = c.lastReview || c.lastReviewed;
@@ -81,7 +82,7 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
       const ms = new Date(reviewed).getTime();
       return ms >= windowStart && ms < windowEnd;
     }).length;
-  }, [cards, dsh]);
+  }, [cards, dsh, logicalDayStr]);
 
   // Live count of due (non-new, non-grammar) cards still pending — used for Left.
   // Of the cards that were due when today's pipeline ran, how many are still due?
@@ -96,15 +97,15 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
       const c = byId.get(id);
       return c && isDueToday(c, dsh) ? n + 1 : n;
     }, 0);
-  }, [cards, srsSnapshot.dueCardIds, dsh]);
+  }, [cards, srsSnapshot.dueCardIds, dsh, logicalDayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Tasks ─────────────────────────────────────────────────────
   const todayTasks = useMemo(() => {
-    const todayDateStr = toDateStr(getLogicalToday(dsh));
-    let t = tasks.filter(tk => !tk.persistent && taskOccursOn(tk, todayDateStr));
+    let t = tasks.filter(tk => !tk.persistent && taskOccursOn(tk, logicalDayStr));
     if (filter !== 'all') t = t.filter(tk => tk.category === filter);
-    return [...t].sort(taskSortComparator);
-  }, [tasks, filter, dsh]);
+    // N6: a manual order counts only on the day it was made for.
+    return [...t].sort(makeTaskSortComparator(() => logicalDayStr));
+  }, [tasks, filter, logicalDayStr]);
 
   const persistentTasks = useMemo(() => {
     return tasks.filter(tk => tk.persistent);
@@ -122,11 +123,14 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
     }));
   }, [updateData, dsh]);
 
-  const handleReorder = useCallback((updatedAllTasks) => {
-    updateData(prev => ({ ...prev, tasks: updatedAllTasks }));
+  // N6: the drag's order is stamped with the day and applied to the latest
+  // tasks (it replaced the whole array with the copy from the last render).
+  const handleReorder = useCallback((ranks, day) => {
+    updateData(prev => ({ ...prev, tasks: applyDragOrder(prev.tasks, ranks, day) }));
   }, [updateData]);
+  const todayOf = useCallback(() => logicalDayStr, [logicalDayStr]);
 
-  const { getDragHandlers } = useDragSort(todayTasks, tasks, handleReorder);
+  const { getDragHandlers } = useDragSort(todayTasks, handleReorder, todayOf);
 
   const today        = getLogicalToday(dsh);
   const todayDateStr = toDateStr(today);
@@ -422,7 +426,6 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
         {!isMobile && <div style={{ visibility: 'hidden', pointerEvents: 'none' }} aria-hidden="true" />}
 
       </div>
-      {isMobile && <div style={{ height: '88px' }} />}
     </div>
   </>
   );

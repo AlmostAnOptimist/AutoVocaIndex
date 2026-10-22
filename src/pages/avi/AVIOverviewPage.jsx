@@ -38,14 +38,15 @@ export function AVIOverviewPage({
   });
 
   const wordsByDay = useMemo(
-    () => buildWordsByDay(wordInputs, sentenceInputs),
-    [wordInputs, sentenceInputs]
+    () => buildWordsByDay(wordInputs, sentenceInputs, dsh ?? 3),
+    [wordInputs, sentenceInputs, dsh]
   );
 
   // ── Masthead + records strip (Stage A-3) ───────────────────
   const addedToday   = wordsByDay[todayStr] || 0;
   const mastheadDate = new Date(todayStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  const aviRecords   = useMemo(() => buildAviRecords(wordsByDay, dsh ?? 3), [wordsByDay, dsh]);
+  // todayStr in the deps: the current streak counts back from today (T4).
+  const aviRecords   = useMemo(() => buildAviRecords(wordsByDay, dsh ?? 3), [wordsByDay, dsh, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
   const recordsItems = useMemo(() => ([
     aviRecords.bestDay   && { label: 'Best Day',   value: `${aviRecords.bestDay.count} · ${fmtRecordDate(aviRecords.bestDay.date)}` },
     aviRecords.bestWeek  && { label: 'Best Week',  value: `${aviRecords.bestWeek.count} · ${fmtWeekRange(aviRecords.bestWeek.weekStart)}` },

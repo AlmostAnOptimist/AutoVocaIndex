@@ -10,7 +10,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
-import { normalizeLemma, getSourceSections, NUANCE_SOURCE_TITLE } from '../../utils/aviUtils.js';
+import { normalizeLemma, getSourceSections, isNuanceSourceTitle } from '../../utils/aviUtils.js';
 import { AVISourceSearchSelect } from '../../components/avi/AVISourceSearchSelect.jsx';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -70,14 +70,14 @@ export function AVISourcePage({
       return (a.lemma || '').localeCompare(b.lemma || '', 'ko');
     });
 
-  // ── relatedMeaning clustering (동의어/유의어 only) ─────────────
+  // ── relatedMeaning clustering (동의어 only) ─────────────
   // Groups words tagged as related-in-meaning so they sit adjacent, with
   // alternating row backgrounds marking each group's boundary — including
   // singletons, which each count as their own group. Restricted to links
   // between lemmas that are both actually visible in this filtered list;
   // a relatedMeaning link to a lemma not tagged to this source doesn't
   // pull anything in.
-  const isNuanceSource = srcFilter === NUANCE_SOURCE_TITLE;
+  const isNuanceSource = isNuanceSourceTitle(srcFilter);
   const { orderedWords, rowBg } = useMemo(() => {
     if (!isNuanceSource || uploadedWords.length === 0) {
       return { orderedWords: uploadedWords, rowBg: new Map() };

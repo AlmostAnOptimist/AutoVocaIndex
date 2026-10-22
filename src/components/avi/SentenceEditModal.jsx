@@ -3,6 +3,12 @@
 // The sentence itself is shown read-only (rows are keyed to their sentence
 // text; changing it would orphan the card matching). Save on the Save button
 // or scrim click; Escape or Cancel discards.
+// A7: like WordEditModal (L5), edits are measured against what the fields
+// held when the modal opened, and only fields you changed are saved. The
+// row can change while the modal is open (a def2 cascade fills an empty
+// back); comparing to the live row made untouched fields look edited, and
+// saving wrote the stale value back (e.g. blanking a back that was just
+// filled, and the card's back with it).
 // Rendered through createPortal(document.body) — containing-block trap guard.
 
 import { useState, useEffect } from 'react';
@@ -16,11 +22,12 @@ const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || w
 export function SentenceEditModal({ row, lemmaMaster, onSave, onClose }) {
   const { C, S } = useAppTheme();
 
-  const [editVal, setEditVal] = useState(() => ({
+  const [initial] = useState(() => ({
     targetWord: row?.targetWord || '',
     cardBack:   row?.cardBack   || '',
     skipUpload: !!row?.skipUpload,
   }));
+  const [editVal, setEditVal] = useState(initial);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -31,16 +38,17 @@ export function SentenceEditModal({ row, lemmaMaster, onSave, onClose }) {
 
   if (!row) return null;
 
-  const dirty =
-    editVal.targetWord !== (row.targetWord || '') ||
-    editVal.cardBack   !== (row.cardBack   || '') ||
-    editVal.skipUpload !== !!row.skipUpload;
+  const changed = {};
+  for (const k of ['targetWord', 'cardBack', 'skipUpload']) {
+    if (editVal[k] !== initial[k]) changed[k] = editVal[k];
+  }
+  const dirty = Object.keys(changed).length > 0;
 
   const saveAndClose = async () => {
     if (saving) return;
     if (!dirty) { onClose(); return; }
     setSaving(true);
-    try { await onSave(row.uid, { ...editVal }); }
+    try { await onSave(row.uid, changed); }
     finally { setSaving(false); onClose(); }
   };
 

@@ -1,7 +1,7 @@
 // src/components/ContentLibraryGazette.jsx
 // Gazette-style replacement for the Content Library Overview tab. Same prop
-// shape as CLOverviewTab (drop-in swap from ContentLibraryPage.jsx).
-// CLOverviewTab itself is left in place, untouched, in ContentLibraryPage.jsx.
+// shape as the old CLOverviewTab it replaced (removed as dead code, bug
+// sweep P3).
 //
 // Note: "cards due today" / "review streak" / a true study-activity heatmap
 // all live in AVI/Flashcards' own data (reviewLog, wordsByDay), which this
@@ -13,7 +13,7 @@
 import { useState, useMemo, useRef } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
-import { toDateStr, computeStreak } from '../utils/dateUtils.js';
+import { computeStreak, logicalDateOf } from '../utils/dateUtils.js';
 import { buildWordsByDay } from '../utils/aviUtils.js';
 import { pickAd } from '../utils/plateEngine.js';
 import { useLibraryOverviewData } from '../hooks/useLibraryOverviewData.js';
@@ -71,7 +71,7 @@ export function ContentLibraryGazette(props) {
     sources, sections, sectionsBySource, allNotes, correctionSessions,
     grammarEntries, grammarMasteryCounts, appointments, cards, decks,
     adriftDays, dsh, onNavigateToSource, onNavigateToNote, onNavigateToCorrection,
-    wordInputs, sentenceInputs, adAliases,
+    wordInputs, sentenceInputs, adAliases, tasks,
   } = props;
 
   const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -83,7 +83,7 @@ export function ContentLibraryGazette(props) {
     todayStr, activeSources, adriftSources, queueByTier,
     recentGrammarReviews, recentLangAppt, openQuestions, carouselNotes,
     fmtDaysAgo, stripHtml,
-  } = useLibraryOverviewData({ sources, sectionsBySource, allNotes, correctionSessions, grammarEntries, cards, appointments, adriftDays, dsh });
+  } = useLibraryOverviewData({ sources, sectionsBySource, allNotes, correctionSessions, grammarEntries, cards, appointments, adriftDays, dsh, tasks });
 
   const lead = useMemo(
     () => getLibraryLeadStory({ adriftSources, queueByTier, grammarEntries, openQuestions, allNotes, correctionSessions, today: todayStr }),
@@ -93,12 +93,13 @@ export function ContentLibraryGazette(props) {
   // Library's own activity signal — not AVI's. See file header note.
   const libraryActivityByDay = useMemo(() => {
     const map = {};
-    const bump = (iso) => { if (!iso) return; const d = iso.slice(0, 10); map[d] = (map[d] || 0) + 1; };
+    // T3: logical day (local time, day-start aware), not the UTC date.
+    const bump = (iso) => { const d = logicalDateOf(iso, dsh); if (d) map[d] = (map[d] || 0) + 1; };
     (sources || []).forEach(s => bump(s.lastActivityAt));
     (allNotes || []).forEach(n => bump(n.createdAt));
     (correctionSessions || []).forEach(s => bump(s.createdAt));
     return map;
-  }, [sources, allNotes, correctionSessions]);
+  }, [sources, allNotes, correctionSessions, dsh]);
 
   const tierCompletedCounts = useMemo(() => {
     const counts = { grammar: 0, mining: 0, casual: 0 };
@@ -129,8 +130,9 @@ export function ContentLibraryGazette(props) {
   // App.jsx — same data AVIOverviewPage's heatmap already uses, just not
   // previously passed this far. Resolves the gap noted in the spec doc.
   const aviStreak = useMemo(
-    () => computeStreak(buildWordsByDay(wordInputs, sentenceInputs), dsh),
-    [wordInputs, sentenceInputs, dsh]
+    () => computeStreak(buildWordsByDay(wordInputs, sentenceInputs, dsh), dsh),
+    // todayStr: the streak counts back from today (T4).
+    [wordInputs, sentenceInputs, dsh, todayStr] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const TIER_META = { grammar: { label: 'Study Queue', tag: 'grammar-tier sources, ready when you are' }, mining: { label: 'Mining Queue', tag: 'vocabulary & sentence harvest' }, casual: { label: 'Casual Queue', tag: 'passive exposure, low pressure' } };
@@ -276,11 +278,17 @@ export function ContentLibraryGazette(props) {
         </GazetteBox>
       </div>
 
-      {/* Library activity + by the numbers */}
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '30px' }}>
-        <GazetteFig caption="Library Activity — twelve-month view">
-          <ActivityHeatmap data={libraryActivityByDay} today={todayStr} color={C.accent2} flat itemLabel={(n) => (n === 1 ? 'update' : 'updates')} monthsToShow={isMobile ? 3 : 12} windowEndYM={activityEndYM} onWindowChange={setActivityEndYM} />
-        </GazetteFig>
+      {/* Library activity + by the numbers. By the Numbers gets a fixed
+          column; the calendar takes the rest and scrolls sideways when the
+          twelve months don't fit. minmax(0, …) plus minWidth 0 lets the
+          calendar's column shrink below its content width instead of
+          squeezing By the Numbers. */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) 300px', gap: '30px' }}>
+        <div style={{ minWidth: 0 }}>
+          <GazetteFig caption="Library Activity — twelve-month view">
+            <ActivityHeatmap data={libraryActivityByDay} today={todayStr} color={C.accent2} flat itemLabel={(n) => (n === 1 ? 'update' : 'updates')} monthsToShow={isMobile ? 3 : 12} windowEndYM={activityEndYM} onWindowChange={setActivityEndYM} />
+          </GazetteFig>
+        </div>
         <GazetteBox title="By The Numbers">
           <BoxRow label="Grammar mastered" value={`${grammarMasteryCounts?.mastered ?? 0} / ${grammarMasteryCounts?.all ?? 0}`} />
           <BoxRow label="Grammar practicing" value={grammarMasteryCounts?.practicing ?? 0} />

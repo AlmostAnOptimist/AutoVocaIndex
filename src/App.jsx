@@ -1,13 +1,12 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { doc, updateDoc, collection, getDocs, getDocsFromServer, writeBatch, query, where, setDoc, getDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
+import { doc, updateDoc, collection, getDocs, getDocsFromServer, writeBatch, query, where, setDoc, getDoc, onSnapshot, deleteDoc, deleteField } from 'firebase/firestore';
 import { db, auth } from './firebase.js';
 import { ThemeContext } from './theme/ThemeContext.js';
 import { useAppTheme } from './hooks/useAppTheme.js';
-import { buildGlobalStyles, SH, frameBevelFilled } from './theme/buildStyles.js';
+import { SH, frameBevelFilled } from './theme/buildStyles.js';
 import { MobileInfoSheet } from './components/MobileInfoSheet.jsx';
-import { buildColors } from './theme/buildColors.js';
 
 import { NavItem } from './components/NavItem.jsx';
 import { ThemePanel } from './components/ThemePanel.jsx';
@@ -35,17 +34,21 @@ import { DevDashboard } from './pages/DevDashboard.jsx';
 
 import { birbSrc, decoBlockStyle } from './utils/decoAssets.js';
 
-import { uid, parseDate, isToday, isPast, toDateStr, getLogicalToday, getLogicalDateStr, getTaskDates, taskOccursOn, taskLastDate, isDateDone } from './utils/dateUtils.js';
+import { uid, parseDate, isPast, toDateStr, getLogicalToday, getLogicalDateStr, getTaskDates, taskOccursOn, taskLastDate, isDateDone } from './utils/dateUtils.js';
 import { runDailyPipeline, DAILY_CAP } from './utils/srsEngine.js';
 import { isDueToday } from './utils/fsrs.js';
-import { runRecurrenceEngine, getNextOccurrence } from './utils/recurrenceEngine.js';
-import { getOrderedSectionsForSource } from './utils/contentUtils.js';
+import { runRecurrenceEngine, nextDueAfterCompletion } from './utils/recurrenceEngine.js';
+import { getOrderedSectionsForSource, sectionDoneWrites } from './utils/contentUtils.js';
 import { loadState, saveState, createInitialTasks } from './utils/storage.js';
-import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow } from './hooks/useFirestore.js';
+import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow, mergeRemoteData, planRemoteRefresh } from './hooks/useFirestore.js';
 import { DEMO, DEMO_LIMIT_NOTE, demoCapReached, isQuotaError, DEMO_TOUR, tourSampleSnapshot } from './demo/demoConfig.js';
 import { ensureDemoSeed } from './demo/seedCopy.js';
 import { DemoBanner } from './demo/DemoBanner.jsx';
 import { DemoCapacityScreen } from './demo/DemoCapacityScreen.jsx';
+import { markAviRowsLoaded } from './hooks/useAVIData.js';
+import { useLogicalDay } from './hooks/useLogicalDay.js';
+import { resolveEditTarget, applyTaskEdit, applyFieldEdits, sameValue } from './utils/taskEdit.js';
+import { planFollowUpPromotion } from './utils/apptPromotion.js';
 import {
   THEME_KEY, SOUND_KEY, QUIZ_SOUND_KEY, CATEGORIES,
   NAV_SECTIONS, PAGE_TITLES,
@@ -158,7 +161,7 @@ function useFlashcardData(uid, dsh = 3) {
   // or re-running the load effect.
   const dshRef = useRef(dsh);
   dshRef.current = dsh;
-  const refreshInFlight = useRef(false);
+  const refreshInFlight = useRef(null);
 
   // Stable updaters — write through to cache
   const updateCards = useCallback((updater) => {
@@ -249,11 +252,15 @@ function useFlashcardData(uid, dsh = 3) {
   // written only on success so an offline attempt retries on the next
   // trigger. Rows merge preserving object identity — unchanged cards keep
   // their references and only rows that actually changed are replaced.
-  const refreshFlashcardsIfStale = useCallback(async () => {
-    if (!uid || refreshInFlight.current) return;
+  // A call made while a refresh is running waits for it (T4: the day-flip
+  // resync and a tab return can overlap; the pipeline must not run on the
+  // pre-refresh cards because the second caller returned early).
+  const refreshFlashcardsIfStale = useCallback(() => {
+    if (!uid) return Promise.resolve();
+    if (refreshInFlight.current) return refreshInFlight.current;
     const todayStr = getLogicalDateStr(dshRef.current);
-    if (fcRead(refreshKey) === todayStr) return;
-    refreshInFlight.current = true;
+    if (fcRead(refreshKey) === todayStr) return Promise.resolve();
+    refreshInFlight.current = (async () => {
     try {
       const [deckSnap, cardSnap] = await Promise.all([
         getDocsFromServer(collection(db, 'users', uid, 'decks')),
@@ -267,8 +274,10 @@ function useFlashcardData(uid, dsh = 3) {
     } catch (e) {
       console.warn('App: daily flashcard refresh failed (will retry on next trigger)', e);
     } finally {
-      refreshInFlight.current = false;
+      refreshInFlight.current = null;
     }
+    })();
+    return refreshInFlight.current;
   }, [uid, refreshKey, updateDecks, updateCards]);
 
   return { cards, decks, fcLoading, updateCards, updateDecks, refreshFlashcardsIfStale };
@@ -349,7 +358,19 @@ function AVISourceSelector({ sources, sections, currentSource, currentSection, o
   );
 }
 
-// ── Nav icon map ────────────────────────────────────────────────────────────
+// ── Pages reachable by hash (U4) ──────────────────────────────────────────────
+// Every nav item plus Settings. A reload or Back/Forward to one of these
+// opens it; anything else (an empty hash) is Today. The old hard-coded list
+// left out Finance and Health (a reload there went to Today) and had a
+// 'notes' page the app doesn't render.
+const PAGE_IDS = new Set([...NAV_SECTIONS.flatMap(s => s.items.map(i => i.id)), 'settings']);
+function pageFromHash(hash) {
+  const id = String(hash || '').replace(/^#/, '');
+  if (!id) return 'today';
+  return PAGE_IDS.has(id) ? id : null;
+}
+
+// ── Nav icon map ──────────────────────────────────────────────────────────────
 const NAV_ICONS = {
   today:       Icons.clock,
   upcoming:    Icons.cal,
@@ -370,7 +391,7 @@ function InnerApp({
   addOpen, setAddOpen, addCat,
   editTask, editOpen, openEdit, closeEdit,
   saveTask, deleteTask,
-  toast, dsh, tasks,
+  toast, showToast, dsh, logicalDay, tasks,
   todayCount, overdueCount,
   toggleTask, addTask, openAddTask,patchTask,
   registerSectionUpdateCallback,
@@ -387,15 +408,22 @@ function InnerApp({
   correctionTarget, setCorrectionTarget,
   correctionSessionTarget, setCorrectionSessionTarget,
   contentSourceTarget, setContentSourceTarget,
-  aviSources, aviSections, aviWordCounts, aviSentenceCounts,
+  aviSources, aviSections,
   aviWordSectionCounts, aviSentSectionCounts,
-  aviWordInputs, aviSentenceInputs, aviInputsLoaded, onAVISourceUpdate, onAVIInputsChange,
+  aviWordInputs, aviSentenceInputs, aviInputsLoaded, onAVISourceUpdate, onAVIInputsChange, onAviSettingsChange,
   appointments, saveAppointment, deleteAppointment,
   onSectionComplete,
   onSourcesChange, onSectionsChange, onSourceRename, onSourceCascadeComplete,
   plannerCommit,
 }) {
   const { C, S, G, theme } = useAppTheme();
+  // U1: every page opens at the top. All pages share one scroller
+  // (.content-pad), so without this a page opened scrolled as far down as
+  // the page before it.
+  const contentRef = useRef(null);
+  useLayoutEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [page]);
   const [moreOpen,              setMoreOpen]              = useState(false);
   const [pendingApptLink,       setPendingApptLink]       = useState(null);
   const [clTriggerAddSource,    setCLTriggerAddSource]    = useState(0);
@@ -428,14 +456,14 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
     return () => document.removeEventListener('focusout', restore);
   }, []);
 
-  const upcomingLangAppt = useMemo(() => {    const todayStr = toDateStr(getLogicalToday(dsh));
+  const upcomingLangAppt = useMemo(() => {
     return appointments
-      .filter(a => a.category === 'lang' && a.date >= todayStr)
+      .filter(a => a.category === 'lang' && a.date >= logicalDay)
       .sort((a, b) => a.date !== b.date ? a.date.localeCompare(b.date) : (a.time || '').localeCompare(b.time || ''))
       [0] || null;
-  }, [appointments, dsh]);
+  }, [appointments, logicalDay]);
 
-  const dateStr = getLogicalToday(dsh).toLocaleDateString('en-US', {
+  const dateStr = new Date(logicalDay + 'T00:00:00').toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 
@@ -625,7 +653,7 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
             </div>
           </div>
           {DEMO && (isMobile || page === 'avi') && <DemoBanner variant="strip" />}
-          <div style={S.contentArea} className={page === 'avi' ? 'content-pad content-pad-flush' : 'content-pad'}>
+          <div ref={contentRef} style={S.contentArea} className={page === 'avi' ? 'content-pad content-pad-flush' : 'content-pad'}>
             {page === 'today' && (
               <TodayPage
                 {...sharedPageProps}
@@ -645,8 +673,6 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                   updateData={updateData}
                   aviSources={aviSources}
                   aviSections={aviSections}
-                  aviWordCounts={aviWordCounts}
-                  aviSentenceCounts={aviSentenceCounts}
                   onSectionComplete={onSectionComplete}
                   tasks={tasks}
                   onToggle={toggleTask}
@@ -672,15 +698,16 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                 onSignOut={onSignOut}
               />
             )}
-{page === 'grammar'    && <GrammarIndexPage defaultOpenEntryId={grammarTarget} onNavigateToFlashcard={(cardIdOrIds) => { setFlashcardStudyTarget(Array.isArray(cardIdOrIds) ? cardIdOrIds : [cardIdOrIds]); setPage('flashcards'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} onNavigateToContent={(sourceId) => { setContentSourceTarget(sourceId); setPage('content'); }} onMasteryCounts={onMasteryCounts} onEntriesChange={onEntriesChange} getCardNextDueDate={getCardNextDueDate} onCardNextDueDateChanged={onCardNextDueDateChanged} updateCards={updateCards} cards={cards} />}
+{page === 'grammar'    && <GrammarIndexPage defaultOpenEntryId={grammarTarget} onNavigateToFlashcard={(cardIdOrIds) => { setFlashcardStudyTarget(Array.isArray(cardIdOrIds) ? cardIdOrIds : [cardIdOrIds]); setPage('flashcards'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} onNavigateToContent={(sourceId) => { setContentSourceTarget(sourceId); setPage('content'); }} onMasteryCounts={onMasteryCounts} onEntriesChange={onEntriesChange} getCardNextDueDate={getCardNextDueDate} onCardNextDueDateChanged={onCardNextDueDateChanged} updateCards={updateCards} cards={cards} dsh={dsh} />}
 {page === 'content'  && <ContentLibraryPage showDecoPanel={showDecoPanel} soundProfile={soundProfile} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} addTask={addTask} defaultOpenSourceId={contentSourceTarget} onNavigateToCorrection={(id) => { setCorrectionSessionTarget(id); setPage('content'); }}
- aviSources={aviSources} aviSections={aviSections} aviWordCounts={aviWordCounts} aviSentenceCounts={aviSentenceCounts} aviWordSectionCounts={aviWordSectionCounts} aviSentSectionCounts={aviSentSectionCounts} onSourcesChange={onSourcesChange} onSectionsChange={onSectionsChange} onSourceRename={onSourceRename} tasks={tasks} onCompleteLinkedTask={toggleTask} patchTask={patchTask} registerSectionUpdateCallback={registerSectionUpdateCallback} settings={data.settings || {}} appointments={appointments} cards={cards || []} decks={decks || []} grammarMasteryCounts={grammarMasteryCounts} noteTarget={noteTarget} correctionTarget={correctionTarget} correctionSessionTarget={correctionSessionTarget} pendingApptLink={pendingApptLink} onApptLinkConsumed={() => setPendingApptLink(null)}
+ aviSources={aviSources} aviSections={aviSections} aviWordSectionCounts={aviWordSectionCounts} aviSentSectionCounts={aviSentSectionCounts} onSourcesChange={onSourcesChange} onSectionsChange={onSectionsChange} onSourceRename={onSourceRename} tasks={tasks} onCompleteLinkedTask={toggleTask} patchTask={patchTask} registerSectionUpdateCallback={registerSectionUpdateCallback} settings={data.settings || {}} appointments={appointments} cards={cards || []} decks={decks || []} grammarMasteryCounts={grammarMasteryCounts} noteTarget={noteTarget} correctionTarget={correctionTarget} correctionSessionTarget={correctionSessionTarget} pendingApptLink={pendingApptLink} onApptLinkConsumed={() => setPendingApptLink(null)}
 wordInputs={aviWordInputs} sentenceInputs={aviSentenceInputs}
 updateCards={updateCards} updateDecks={updateDecks} onSourceCascadeComplete={onSourceCascadeComplete}
 triggerAddSource={clTriggerAddSource} triggerAddQuestion={clTriggerAddQuestion}
-triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection} />}
-{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} />}
-{page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} wordInputs={aviWordInputs} aviSources={aviSources} aviSections={aviSections} echoDeckTarget={echoDeckTarget} onEchoDeckTargetUsed={() => setEchoDeckTarget(null)} />}
+triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection}
+onDeleteTask={deleteTask} />}
+{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} onNotice={showToast} />}
+{page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} wordInputs={aviWordInputs} aviSources={aviSources} aviSections={aviSections} echoDeckTarget={echoDeckTarget} onEchoDeckTargetUsed={() => setEchoDeckTarget(null)} onNotice={showToast} />}
 {page === 'avi' && (
   <AVIPage
     cards={cards}
@@ -694,11 +721,15 @@ triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection} 
     wordInputs={aviWordInputs}
     sentenceInputs={aviSentenceInputs}
     onAVIInputsChange={onAVIInputsChange}
+    onAviSettingsChange={onAviSettingsChange}
     inputsLoaded={aviInputsLoaded}
     settings={data.settings || {}}
     onNavigateToFlashcards={() => setPage('flashcards')}
   />
 )}
+            {/* U6: bottom clearance on phones/tablets for every page (CSS shows
+                it there only); AVI keeps its own (flush layout). */}
+            {page !== 'avi' && <div className="content-bottom-spacer" aria-hidden="true" />}
           </div>
         </main>
 
@@ -879,6 +910,10 @@ export default function App() {
     return base;
   });
 
+  // S1: the latest rendered data, for refreshes that merge after an await.
+  const dataRef = useRef(data);
+  dataRef.current = data;
+
   const [dataLoaded, setDataLoaded] = useState(false); // true once Firestore load completes
   const [loadFailed, setLoadFailed] = useState(false);   // remote load exhausted all retries
   const [loadRetryNonce, setLoadRetryNonce] = useState(0); // bump to re-run the load effect
@@ -919,9 +954,13 @@ export default function App() {
         // Keep localStorage in sync with what came from Firestore        
         saveState(next);
         // If the engine advanced tasks on load, write back to Firestore immediately
-        // so a reload always gets the correct advanced state rather than stale data
-        if (changed) {
-          firestoreWriteTasksNow(user.uid, next.tasks).catch(e =>
+        // so a reload always gets the correct advanced state rather than stale data.
+        // N1: tasks that came back with render-only markers are written back
+        // clean too (left out of the diff base so they count as changed).
+        const repairedIds = remote.repairedTaskIds || [];
+        if (changed || repairedIds.length) {
+          const writeBase = (remote.tasks || []).filter(t => !repairedIds.includes(t.id));
+          firestoreWriteTasksNow(user.uid, next.tasks, writeBase).catch(e =>
             console.warn('AVI: post-engine Firestore write failed', e)
           );
         }
@@ -940,27 +979,29 @@ export default function App() {
             .then(snap => {
               const full = snap.docs.map(d => ({ ...d.data() }));
               setAviWordInputs(full);
-              const src = {}, sec = {};
+              const sec = {};
               full.forEach(({ source: s, section: n }) => {
-                if (s) { src[s] = (src[s] || 0) + 1; }
                 if (s && n != null) { const k = `${s}|${n}`; sec[k] = (sec[k] || 0) + 1; }
               });
-              setAviWordCounts(src);
               setAviWordSectionCounts(sec);
-            }).catch(() => {}),
+              return true;
+            }).catch(() => false),
           getDocs(collection(db, 'users', user.uid, 'sentenceInputs'))
             .then(snap => {
               const full = snap.docs.map(d => ({ ...d.data() }));
               setAviSentenceInputs(full);
-              const src = {}, sec = {};
+              const sec = {};
               full.forEach(({ source: s, section: n }) => {
-                if (s) { src[s] = (src[s] || 0) + 1; }
                 if (s && n != null) { const k = `${s}|${n}`; sec[k] = (sec[k] || 0) + 1; }
               });
-              setAviSentenceCounts(src);
               setAviSentSectionCounts(sec);
-            }).catch(() => {}),
-        ]).then(() => setAviInputsLoaded(true));
+              return true;
+            }).catch(() => false),
+        ]).then(([wordsOk, sentsOk]) => {
+          // S4: AVI re-reads the rows when this copy goes stale.
+          if (wordsOk && sentsOk) markAviRowsLoaded();
+          setAviInputsLoaded(true);
+        });
       setDataLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -996,6 +1037,9 @@ export default function App() {
     dueAtDayStart: 0, spikes: [], triaged: 0, spikeDetected: false,
   });
   const pipelineRanForUid = useRef(null);
+  // P2: bumped on a day flip so the pipeline re-runs without re-reading
+  // every card (the daily refresh has already brought them up to date).
+  const [pipelineTick, setPipelineTick] = useState(0);
 
   useEffect(() => {
     const uid = user?.uid;
@@ -1008,8 +1052,9 @@ export default function App() {
     pipelineRanForUid.current = pipelineKey;
     (async () => {
       try {
-        const result = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
-        if (result) setSrsSnapshot(DEMO_TOUR ? tourSampleSnapshot(result, logicalDate) : result);
+        const pipelineResult = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
+        const { cardUpdates, ...result } = pipelineResult || {};
+        if (pipelineResult) setSrsSnapshot(DEMO_TOUR ? tourSampleSnapshot(result, logicalDate) : result);
 
         // Rollover reconcile: the spike task's title count was frozen days ago
         // from an exact-date forecast. On the task's own day, rewrite it to the
@@ -1041,13 +1086,24 @@ export default function App() {
             return changed ? { ...prev, tasks: tasksNext } : prev;
           });
         }
-        // If triage moved overdue cards, refresh card state from Firestore.
-        if (result?.triaged > 0) {
-          const { getDocs: gd, collection: col } = await import('firebase/firestore');
-          const refreshed = await gd(col(db, 'users', uid, 'flashcards'));
-          const refreshedRows = refreshed.docs.map(d => ({ id: d.id, ...d.data() }))
-            .filter(c => c.type === 'grammar' || (c.back !== '' && c.back != null));
-          updateCards(refreshedRows);
+        // If triage moved overdue cards, bring card state up to date.
+        // P2: triage run here hands back what it wrote, so it's applied in
+        // memory. A plan read back from earlier today (this device or
+        // another) is re-read from Firestore only when the cards in memory
+        // don't show that triage yet; before, every load on a day with
+        // triage re-read every card.
+        if (cardUpdates?.length) {
+          const byId = new Map(cardUpdates.map(({ id, ...fields }) => [id, fields]));
+          updateCards(prev => prev ? prev.map(c => byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c) : prev);
+        } else if (result?.triaged > 0) {
+          const seen = cards.filter(c => c.lastTriageDate === logicalDate).length;
+          if (seen < result.triaged) {
+            const { getDocs: gd, collection: col } = await import('firebase/firestore');
+            const refreshed = await gd(col(db, 'users', uid, 'flashcards'));
+            const refreshedRows = refreshed.docs.map(d => ({ id: d.id, ...d.data() }))
+              .filter(c => c.type === 'grammar' || (c.back !== '' && c.back != null));
+            updateCards(refreshedRows);
+          }
         }
       } catch (e) {
         console.error('App: SRS pipeline failed', e);
@@ -1057,7 +1113,7 @@ export default function App() {
   // loading; dataLoaded included so it fires once the remote load lands even
   // when cards won the race.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, cards, dataLoaded]);
+  }, [user?.uid, cards, dataLoaded, pipelineTick]);
 
   // Called by FlashcardsPage after each session ends (spike-only re-run result).
   const onPipelineResult = useCallback((result) => {
@@ -1079,12 +1135,15 @@ export default function App() {
   }, [updateCards]);
   const [aviSources,           setAviSources]           = useState([]);
   const [aviSections,          setAviSections]          = useState([]);
+  // K6: latest Library sources/sections for callbacks that don't re-bind
+  // on them (toggleTask finishes linked sections from Today).
+  const clLiveRef = useRef({ sources: [], sections: [] });
+  clLiveRef.current = { sources: aviSources, sections: aviSections };
   const [aviWordInputs,        setAviWordInputs]        = useState([]);
   const [aviSentenceInputs,    setAviSentenceInputs]    = useState([]);
   const [aviInputsLoaded,      setAviInputsLoaded]      = useState(false);
-  const [aviWordCounts,        setAviWordCounts]        = useState({});
-  const [aviSentenceCounts,    setAviSentenceCounts]    = useState({});
   const [aviWordSectionCounts, setAviWordSectionCounts] = useState({});
+  const [aviSentSectionCounts, setAviSentSectionCounts] = useState({});
   // AVI pushes its live inputs up so these prop snapshots stay current —
   // they load once at boot via getDocs, and an AVIPage remount otherwise
   // re-initializes from the stale boot data (in-session additions vanish
@@ -1092,15 +1151,18 @@ export default function App() {
   const handleAVIInputsChange = useCallback((words, sents) => {
     setAviWordInputs(words || []);
     setAviSentenceInputs(sents || []);
-    const src = {}, sec = {};
-    (words || []).forEach(({ source: s, section: n }) => {
-      if (s) { src[s] = (src[s] || 0) + 1; }
-      if (s && n != null) { const k = `${s}|${n}`; sec[k] = (sec[k] || 0) + 1; }
-    });
-    setAviWordCounts(src);
-    setAviWordSectionCounts(sec);
+    // Per-section counts for the Library. Sentence counts follow too (they
+    // used to stay at their boot values until a reload).
+    const sectionCounts = (rows) => {
+      const sec = {};
+      (rows || []).forEach(({ source: s, section: n }) => {
+        if (s && n != null) { const k = `${s}|${n}`; sec[k] = (sec[k] || 0) + 1; }
+      });
+      return sec;
+    };
+    setAviWordSectionCounts(sectionCounts(words));
+    setAviSentSectionCounts(sectionCounts(sents));
   }, []);
-  const [aviSentSectionCounts, setAviSentSectionCounts] = useState({});
 
   // ── Source rename cascade (called directly by ContentLibraryPage) ─
   const handleSourceRename = useCallback(async (oldTitle, newTitle) => {
@@ -1179,8 +1241,8 @@ export default function App() {
       const nextW = renameRows(aviWordInputs);
       const nextS = renameRows(aviSentenceInputs);
       const wc = buildCounts(nextW), sc = buildCounts(nextS);
-      setAviWordInputs(nextW);     setAviWordCounts(wc.src);     setAviWordSectionCounts(wc.sec);
-      setAviSentenceInputs(nextS); setAviSentenceCounts(sc.src); setAviSentSectionCounts(sc.sec);
+      setAviWordInputs(nextW);     setAviWordSectionCounts(wc.sec);
+      setAviSentenceInputs(nextS); setAviSentSectionCounts(sc.sec);
     } catch (e) {
       console.error('Source rename: AVI entry update failed', e);
     }
@@ -1214,8 +1276,9 @@ export default function App() {
       const wc = buildCounts(wFull);
       const sc = buildCounts(sFull);
       setAviWordInputs(wFull);      setAviSentenceInputs(sFull);
-      setAviWordCounts(wc.src);     setAviWordSectionCounts(wc.sec);
-      setAviSentenceCounts(sc.src); setAviSentSectionCounts(sc.sec);
+      setAviWordSectionCounts(wc.sec);
+      setAviSentSectionCounts(sc.sec);
+      markAviRowsLoaded();
     } catch (e) { console.error('D3: AVI re-sync failed', e); }
   }, []);
 
@@ -1229,7 +1292,11 @@ export default function App() {
   const [correctionTarget,        setCorrectionTarget]        = useState(null);
   const [correctionSessionTarget, setCorrectionSessionTarget] = useState(null);
   const [contentSourceTarget, setContentSourceTarget] = useState(null);
-  const { setSyncTarget, seedLastSynced } = useFirestoreSync(user?.uid ?? null, setSyncStatus);
+  const { setSyncTarget, seedLastSynced, getSyncBase, commitRefresh } = useFirestoreSync(user?.uid ?? null, setSyncStatus);
+
+  // T4: the logical day as state that changes at the day flip (useLogicalDay),
+  // so the resync below and InnerApp's "today" follow the new day at once.
+  const appDayStr = useLogicalDay(data.settings?.dayStartHour ?? 3);
 
   // ── Persist on every data change ─────────────────────────────
   // Always write to localStorage (offline fallback).
@@ -1256,14 +1323,21 @@ export default function App() {
   }, [quizSoundsEnabled]);
 
   // ── UI state ─────────────────────────────────────────────────
-  const [page, setPage] = useState(() => {
-    const hash = window.location.hash.replace('#', '');
-    const valid = ['today','upcoming','overdue','appointments','flashcards','grammar','notes','content','quizzes','avi','settings'];
-    return valid.includes(hash) ? hash : 'today';
-  });
+  const [page, setPage] = useState(() => pageFromHash(window.location.hash) || 'today');
   const navigateTo = useCallback((id) => {
     setPage(id);
     window.location.hash = id;
+  }, []);
+  // U4: every navigation adds a history entry (the hash); Back, Forward and
+  // iOS swipe-back change the hash, and the page follows it. Nothing listened
+  // before, so Back changed the address bar but not the page.
+  useEffect(() => {
+    const onHashChange = () => {
+      const id = pageFromHash(window.location.hash);
+      if (id) setPage(id);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
   const [themeOpen, setThemeOpen] = useState(false);
   const [addOpen,   setAddOpen]   = useState(false);
@@ -1288,6 +1362,37 @@ export default function App() {
     if (page !== 'quizzes') setEchoDeckTarget(null);
   }, [page]);
 
+  // ── S1: apply a Firestore snapshot without dropping local edits ──
+  // Used by the hourly and return-to-app refreshes. The snapshot is merged
+  // into what's on screen (mergeRemoteData: edits not yet saved win, other
+  // devices' changes come in), the recurrence engine runs on the result, and
+  // the difference from what Firestore returned (kept local edits plus rolls)
+  // is written at once and becomes the sync baseline. Returns the merged
+  // data, or null when nothing was loaded.
+  const refreshFromRemote = useCallback(async (uidR) => {
+    const remote = await firestoreLoad(uidR);
+    if (!remote || remote === 'error') return null;
+    const local = dataRef.current;
+    const { next, serverView } = planRemoteRefresh({
+      local, remote, base: getSyncBase(), runEngine: runRecurrenceEngine,
+    });
+    commitRefresh(serverView, next);
+    // An edit made after `local` was read is newer than both; it wins too.
+    setData(prev => (prev === local ? next : mergeRemoteData(prev, next, local)));
+    return next;
+  }, [getSyncBase, commitRefresh]);
+
+  // ── S3: mirror AVI's own settings into App's copy ──────────────
+  // AVI saves its avi* keys to settings/main itself; keeping App's copy in
+  // step means an AVI revisit (which starts from App's copy) shows them.
+  const handleAviSettingsChange = useCallback((payload) => {
+    setData(prev => {
+      const s = prev.settings || {};
+      if (Object.keys(payload).every(k => JSON.stringify(s[k]) === JSON.stringify(payload[k]))) return prev;
+      return { ...prev, settings: { ...s, ...payload } };
+    });
+  }, []);
+
   // ── Recurrence engine: run immediately on load, then hourly ───
   // Initial run uses local state (data was just loaded from Firestore).
   // Hourly interval reloads from Firestore first so the engine never runs on stale
@@ -1308,21 +1413,7 @@ export default function App() {
     const hourlyRun = async () => {
       if (document.visibilityState !== 'visible') return;
       try {
-        const remote = await firestoreLoad(uid);
-        if (!remote || remote === 'error') return;
-        const dsh = remote.settings?.dayStartHour ?? 3;
-        const { tasks: updatedTasks, changed } = runRecurrenceEngine(remote.tasks || [], dsh);
-        const freshTasks = changed ? updatedTasks : remote.tasks;
-        setData(prev => ({
-          ...prev,
-          settings: remote.settings || prev.settings,
-          tasks: freshTasks,
-        }));
-        if (changed) {
-          firestoreWriteTasksNow(uid, freshTasks).catch(e =>
-            console.warn('AVI: hourly engine write failed', e)
-          );
-        }
+        await refreshFromRemote(uid);
       } catch (e) {
         console.warn('AVI: hourly Firestore reload failed', e);
       }
@@ -1337,57 +1428,82 @@ export default function App() {
   // Updates tasks and settings so cross-device changes are seen.
   // Also detects day flips: resets the pipeline guard and refreshes cards so the
   // SRS pipeline re-runs for the new logical day. Throttled to once per 60 seconds.
+  // T4: the same resync also runs when the logical day flips while the app
+  // stays open (effect below), so a tab left on screen overnight rolls its
+  // tasks and re-runs the pipeline for the new day instead of waiting for
+  // the hourly tick or a tab switch. One resync at a time; a second call
+  // while one is running shares it. resyncDayRef is the logical day the
+  // last resync checked, so a flip a tab return has already handled isn't
+  // resynced a second time.
+  const resyncRef    = useRef(null);
+  const resyncDayRef = useRef(null);
+
   useEffect(() => {
     if (!dataLoaded || !user?.uid) return;
+    let inFlight = null;
+    const resync = () => {
+      if (inFlight) return inFlight;
+      inFlight = runResync().finally(() => { inFlight = null; });
+      return inFlight;
+    };
     const handleVisibility = async () => {
       if (document.visibilityState !== 'visible') return;
       const now = Date.now();
       if (now - lastVisibilityRefresh.current < 60_000) return;
       lastVisibilityRefresh.current = now;
+      await resync();
+    };
+    const runResync = async () => {
       try {
-        const remote = await firestoreLoad(user.uid);
-        if (!remote || remote === 'error') return;
-        const dsh = remote.settings?.dayStartHour ?? 3;
-        const { tasks: updatedTasks, changed } = runRecurrenceEngine(remote.tasks || [], dsh);
-        const freshTasks = changed ? updatedTasks : remote.tasks;
-
-        // Refresh all data types, not just tasks
-        setData(prev => ({
-          ...prev,
-          settings: remote.settings || prev.settings,
-          tasks: freshTasks,
-        }));
-
-        if (changed) {
-          firestoreWriteTasksNow(user.uid, freshTasks).catch(e =>
-            console.warn('AVI: visibility refresh engine write failed', e)
-          );
+        // S1: merged into what's on screen, so edits not yet saved survive.
+        // T4: if the read fails (offline), the pipeline check below still
+        // runs on the cards already in memory, so a day flip isn't missed.
+        let refreshed = null;
+        try {
+          refreshed = await refreshFromRemote(user.uid);
+        } catch (e) {
+          console.warn('AVI: visibility refresh failed', e);
         }
+        const dsh = (refreshed || dataRef.current).settings?.dayStartHour ?? 3;
 
         // Daily card/deck freshness (self-gated to one server read per logical
         // day). Awaited so the day-flip refresh below reads an already-updated
         // local cache instead of racing it.
-        await refreshFlashcardsIfStale();
+        if (refreshed) await refreshFlashcardsIfStale();
 
         // Day-flip detection: if the pipeline ran for a different date, reset it
-        // and refresh cards so the pipeline re-runs for the new logical day.
+        // and re-run it for the new logical day. P2: the daily refresh above
+        // has already read the cards from the server for the new day, so
+        // they're not read a second time; the tick re-runs the pipeline.
         const currentLogicalDate = getLogicalDateStr(dsh);
+        resyncDayRef.current = currentLogicalDate;
         const currentKey = `${user.uid}:${currentLogicalDate}`;
         if (pipelineRanForUid.current && pipelineRanForUid.current !== currentKey) {
           pipelineRanForUid.current = null;
-          const { getDocs: gd, collection: col } = await import('firebase/firestore');
-          const cardSnap = await gd(col(db, 'users', user.uid, 'flashcards'));
-          const refreshedRows = cardSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-            .filter(c => c.type === 'grammar' || (c.back !== '' && c.back != null));
-          updateCards(refreshedRows);
+          setPipelineTick(t => t + 1);
         }
       } catch (e) {
         console.warn('AVI: visibility refresh failed', e);
       }
     };
+    resyncRef.current = resync;
     document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      resyncRef.current = null;
+    };
   }, [dataLoaded, user?.uid]);
+
+  // T4: day flip while the app is open → the resync above (unless one has
+  // already run for the new day, e.g. the tab return that noticed the flip).
+  const lastDayRef = useRef(appDayStr);
+  useEffect(() => {
+    if (lastDayRef.current === appDayStr) return;
+    lastDayRef.current = appDayStr;
+    if (!resyncRef.current || resyncDayRef.current === appDayStr) return;
+    lastVisibilityRefresh.current = Date.now();
+    resyncRef.current();
+  }, [appDayStr]);
 
   // ── Helpers ───────────────────────────────────────────────────
   const updateData  = useCallback(u => setData(prev => u(prev)), []);
@@ -1441,12 +1557,24 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
             try {
               const secRef  = doc(db, 'users', uid, 'content_sections', task.linkedSectionId);
               const secSnap = await getDoc(secRef);
-              const prevSt  = secSnap.data()?.status || 'Not started';
-              if (prevSt === 'Done') return;
-              const now     = new Date().toISOString();
-              const updates = { status: 'Done', previousStatus: prevSt, lastActivityAt: now };
+              const secData = secSnap.data() || {};
+              if ((secData.status || 'Not started') === 'Done') return;
+              // K6: stamp the source too (and flag it for archive when this
+              // was its last open section), as the Library's own Done does.
+              const live = clLiveRef.current;
+              const { sectionUpdates: updates, sourceId, sourceUpdates } = sectionDoneWrites({
+                section:  { id: task.linkedSectionId, ...secData },
+                sections: live.sections,
+                source:   live.sources.find(s => s.id === secData.resourceId) || null,
+                nowIso:   new Date().toISOString(),
+                logicalToday: getLogicalDateStr(prev.settings?.dayStartHour ?? 3),
+              });
               await updateDoc(secRef, updates);
               sectionUpdateCallbackRef.current?.(task.linkedSectionId, updates);
+              if (sourceId && sourceUpdates) {
+                await updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), sourceUpdates);
+                setAviSources(p => p.map(s => s.id === sourceId ? { ...s, ...sourceUpdates } : s));
+              }
             } catch (e) { console.error('Section auto-complete failed:', e); }
           })();
         }
@@ -1504,7 +1632,9 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         if (completing && t.recurrence && t.recurrence.type !== 'none' && t.date) {
           const dsh = prev.settings?.dayStartHour ?? 3;
           const logicalToday = getLogicalToday(dsh);
-          const nextDue = getNextOccurrence(t, logicalToday);
+          // T7: where the engine will actually move it (counted from the
+          // due date), not today + the interval.
+          const nextDue = nextDueAfterCompletion(t, logicalToday);
           return {
             ...t,
             completed: true,
@@ -1640,6 +1770,17 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
       }
     });
 
+    // K6: a section placement is activity for its source too, as scheduling a
+    // section in the Library already is.
+    const placedSecSources = new Set(secWrites
+      .map(w => aviSections.find(s => s.id === w.id)?.resourceId)
+      .filter(Boolean));
+    placedSecSources.forEach(srcId => {
+      const w = srcWrites.find(x => x.id === srcId);
+      if (w) w.updates = { ...w.updates, lastActivityAt: now };
+      else if (aviSources.some(s => s.id === srcId)) srcWrites.push({ id: srcId, updates: { lastActivityAt: now } });
+    });
+
     if (!createdTasks.length && !Object.keys(taskPatches).length) return false;
 
     // Tasks flow through the normal debounced whole-doc sync.
@@ -1701,25 +1842,37 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
     sectionUpdateCallbackRef.current = fn;
   }, []);
 
-  const saveTask = useCallback((updatedTask) => {
+  const saveTask = useCallback((updatedTask, baseTask) => {
     // followUpQueue is a transient carrier from EditTaskModal's appointment
     // variant — it belongs on the appointment doc, never on the task doc.
     const { followUpQueue: fuQueue, ...taskToStore } = updatedTask;
+    const { followUpQueue: fuBase, ...baseToApply } = baseTask || {};
+    // N1/K3: apply only the fields the modal changed (vs baseTask, the task
+    // as it was when the modal opened) onto the task as it is now, without
+    // render-only markers. A completion, roll or refresh that landed while
+    // the modal was open is kept.
+    if (!(dataRef.current.tasks || []).some(t => t.id === taskToStore.id)) {
+      showToast('This task was deleted, so the edit was not saved.');
+      return;
+    }
     updateData(prev => ({
       ...prev,
-      tasks: prev.tasks.map(t => t.id === taskToStore.id ? taskToStore : t),
+      tasks: prev.tasks.map(t => t.id === taskToStore.id ? (applyTaskEdit(t, baseTask ? baseToApply : baseTask, taskToStore) || t) : t),
     }));
     if (updatedTask.isAppointmentTask && updatedTask.appointmentId) {
       const uid = auth.currentUser?.uid;
       if (uid) {
-        const apptSync = {
-          results:     updatedTask.notes    || '',
-          category:    updatedTask.category,
-          lastUpdated: new Date().toISOString(),
-        };
-        if (updatedTask.date) apptSync.date = updatedTask.date;
-        if (updatedTask.time != null) apptSync.time = updatedTask.time || '';
-        if (fuQueue !== undefined) {
+        // K3: only fields changed in the modal reach the appointment, so a
+        // follow-up promotion that landed while Edit Task was open keeps its
+        // new date and visit stamps (writing the old date back made the next
+        // promotion stamp the same visit again, K5). No base: all, as before.
+        const changed = (k) => !baseTask || !sameValue(taskToStore[k], baseTask[k]);
+        const apptSync = { lastUpdated: new Date().toISOString() };
+        if (changed('notes'))    apptSync.results  = updatedTask.notes || '';
+        if (changed('category')) apptSync.category = updatedTask.category;
+        if (updatedTask.date && changed('date')) apptSync.date = updatedTask.date;
+        if (updatedTask.time != null && changed('time')) apptSync.time = updatedTask.time || '';
+        if (fuQueue !== undefined && (!baseTask || fuBase === undefined || !sameValue(fuQueue, fuBase))) {
           // Queue edited from the task modal — legacy single-date fields
           // are nulled so the promotion effect and AppointmentModal read
           // only the queue (null is falsy at both check sites).
@@ -1753,7 +1906,9 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
     showToast('Task deleted.');
   }, [updateData, showToast]);
 
-  const openEdit    = useCallback((task) => { setEditTask(task); setEditOpen(true); }, []);
+  // N1: open the stored task, never the row copy that was clicked (Upcoming's
+  // per-day copies carry another date and render-only markers).
+  const openEdit    = useCallback((task) => { setEditTask(resolveEditTarget(task, dataRef.current.tasks)); setEditOpen(true); }, []);
   const closeEdit   = useCallback(() => { setEditOpen(false); setTimeout(() => setEditTask(null), 300); }, []);
   const openAddTask = useCallback((cat = null) => { setAddCat(cat); setAddOpen(true); }, []);
 
@@ -1787,6 +1942,10 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
   // ── Derived values ────────────────────────────────────────────
   const dsh          = data.settings?.dayStartHour ?? 3;
 
+  // T4: the logical day from render, so the follow-up promotion below
+  // re-runs on the day flip.
+  const todayStr = toDateStr(getLogicalToday(dsh));
+
 // ── Content Library sources/sections — live listeners ─────────
   useEffect(() => {
     if (!user?.uid) return;
@@ -1816,36 +1975,88 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
     return unsub;
   }, [user?.uid]);
 
-  const saveAppointment = useCallback(async (appt) => {
+  // K3: the latest appointments, for saves that land after a modal was open.
+  const appointmentsRef = useRef(appointments);
+  appointmentsRef.current = appointments;
+
+  // saveAppointment(appt)       — writes the whole doc (new appointments).
+  // saveAppointment(appt, base) — Appointment modal save: base is the payload
+  //   the modal would have saved untouched, so only the fields changed in the
+  //   modal are applied onto the appointment as it is now. A follow-up
+  //   promotion or another device's edit that landed meanwhile is kept.
+  const saveAppointment = useCallback(async (appt, base) => {
     const uid = user?.uid;
     if (!uid) return;
-    if (DEMO && !appointments.some(a => a.id === appt.id) &&
-        demoCapReached(appointments, 'appointments')) {
+    if (DEMO && !(appointmentsRef.current || []).some(a => a.id === appt.id) &&
+        demoCapReached(appointmentsRef.current || [], 'appointments')) {
       showToast(DEMO_LIMIT_NOTE);
       return;
     }
+    let toWrite = appt;
+    if (base) {
+      const latest = (appointmentsRef.current || []).find(a => a.id === appt.id);
+      if (!latest) {
+        showToast('This appointment was deleted, so the edit was not saved.');
+        return;
+      }
+      const { lastUpdated: _lu, ...latestDoc } = latest;
+      const { merged, changed } = applyFieldEdits(latestDoc, base, appt);
+      // The modal works from the follow-up queue and the costs list; once it
+      // saves either, the legacy single fields it migrated from go.
+      if (Array.isArray(merged.followUpQueue)) { delete merged.followUpDate; delete merged.followUpTime; }
+      if (changed.includes('costs')) { merged.cost = null; merged.costCurrency = null; }
+      toWrite = merged;
+    }
     try {
-      await setDoc(doc(db, 'users', uid, 'appointments', appt.id), {
-        ...appt, lastUpdated: new Date().toISOString(),
+      await setDoc(doc(db, 'users', uid, 'appointments', toWrite.id), {
+        ...toWrite, lastUpdated: new Date().toISOString(),
       });
     } catch (e) {
       console.error('App: saveAppointment failed', e);
     }
-  }, [user?.uid, appointments, showToast]);
+  }, [user?.uid, showToast]);
+
+  // Field-level write (merge) for app-side updates to one appointment, so
+  // they never write a stale copy of the rest of the doc.
+  const patchAppointment = useCallback(async (id, fields) => {
+    const uid = user?.uid;
+    if (!uid || !id) return;
+    try {
+      await setDoc(doc(db, 'users', uid, 'appointments', id), {
+        ...fields, lastUpdated: new Date().toISOString(),
+      }, { merge: true });
+    } catch (e) {
+      console.error('App: patchAppointment failed', e);
+      throw e;
+    }
+  }, [user?.uid]);
 
   const handleSectionComplete = useCallback(async (sectionId, sourceId, currentApptId) => {
     const uid = user?.uid;
     if (!uid || !sectionId) return;
-    const alreadyDone = aviSections.find(s => s.id === sectionId)?.status === 'Done';
-    if (alreadyDone) return;
+    const section = aviSections.find(s => s.id === sectionId);
+    if (section?.status === 'Done') return;
+    const todayStr = toDateStr(getLogicalToday(dsh));
+    // K6: previous status, activity stamps on the section and its source,
+    // and the archive flag when it was the source's last open section.
+    const srcId = section?.resourceId || sourceId || null;
+    const { sectionUpdates, sourceUpdates } = sectionDoneWrites({
+      section:  { id: sectionId, status: section?.status, resourceId: srcId },
+      sections: aviSections,
+      source:   aviSources.find(s => s.id === srcId) || null,
+      nowIso:   new Date().toISOString(),
+      logicalToday: todayStr,
+    });
     try {
-      await setDoc(doc(db, 'users', uid, 'content_sections', sectionId),
-        { status: 'Done' }, { merge: true });
+      await setDoc(doc(db, 'users', uid, 'content_sections', sectionId), sectionUpdates, { merge: true });
     } catch (e) {
       console.error('handleSectionComplete: write failed', e);
       return;
     }
-    const todayStr = toDateStr(getLogicalToday(dsh));
+    if (srcId && sourceUpdates) {
+      setDoc(doc(db, 'users', uid, 'content_sources', srcId), sourceUpdates, { merge: true })
+        .catch(e => console.error('handleSectionComplete: source stamp failed', e));
+    }
     const nextAppt = [...appointments]
       .filter(a => a.id !== currentApptId && a.mainSourceId === sourceId && a.date >= todayStr)
       .sort((a, b) => a.date.localeCompare(b.date))[0];
@@ -1853,8 +2064,8 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
     const ordered     = getOrderedSectionsForSource(aviSections, aviSources, sourceId);
     const currentIdx  = ordered.findIndex(s => s.id === sectionId);
     const nextSection = currentIdx >= 0 ? ordered[currentIdx + 1] : null;
-    await saveAppointment({ ...nextAppt, mainSectionId: nextSection?.id || null });
-  }, [user?.uid, appointments, aviSections, aviSources, dsh, saveAppointment]);
+    await patchAppointment(nextAppt.id, { mainSectionId: nextSection?.id || null }).catch(() => {});
+  }, [user?.uid, appointments, aviSections, aviSources, dsh, patchAppointment]);
 
   const deleteAppointment = useCallback(async (id) => {
     const uid = user?.uid;
@@ -1871,55 +2082,38 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
   }, [user?.uid, appointments, updateData]);
 
 // ── Appointment follow-up queue promotion ─────────────────────
+  // T4: re-runs on the day flip (todayStr from render), so a follow-up due
+  // today is promoted without waiting for an appointments change.
+  // K5: the plan (apptPromotion.js) stamps each visit date once, even if it
+  // runs again on an older copy; the write is field-level (merge), so it
+  // can't put back a stale copy of fields it didn't change; and a promotion
+  // already written for this appointment and date isn't written again while
+  // the snapshot catches up.
+  const promotingRef = useRef(new Map()); // appt id -> date it was promoted from
   useEffect(() => {
     if (!user?.uid || !dataLoaded || appointments.length === 0) return;
-    const logicalToday = getLogicalToday(dsh);
-    const todayStr = toDateStr(logicalToday);
 
-    const toPromote = appointments.filter(appt => {
-      if (!appt.date || appt.date >= todayStr) return false;
-      if (appt.followUpDate && !appt.followUpQueue) return true; // legacy migration
-      return (appt.followUpQueue || []).length > 0;
-    });
+    const inFlight = promotingRef.current;
+    for (const [id, fromDate] of inFlight) {
+      const a = appointments.find(x => x.id === id);
+      if (!a || a.date !== fromDate) inFlight.delete(id);
+    }
 
-    if (toPromote.length === 0) return;
+    appointments.forEach(appt => {
+      if (inFlight.get(appt.id) === appt.date) return;
+      const plan = planFollowUpPromotion(appt, todayStr);
+      if (!plan) return;
+      const { date: newDate, time: newTime, results } = plan.fields;
 
-    toPromote.forEach(appt => {
-      // Migrate legacy single followUpDate field to queue format
-      let queue = appt.followUpQueue
-        ? [...appt.followUpQueue]
-        : [{ date: appt.followUpDate, time: appt.followUpTime || '' }];
-
-      queue.sort((a, b) => a.date.localeCompare(b.date));
-
-      const pastItems   = queue.filter(q => q.date <  todayStr);
-      const futureItems = queue.filter(q => q.date >= todayStr);
-
-      // All past dates in chronological order (original appt date first)
-      const datesToLog = [appt.date, ...pastItems.map(q => q.date)].sort();
-
-      // Accumulate results — oldest processed first so newest ends on top
-      let results = appt.results || '';
-      datesToLog.forEach(d => {
-        const trimmed = results.trim();
-        if (!trimmed)                results = `[${d}]`;
-        else if (trimmed.startsWith('[')) results = `[${d}]\n${trimmed}`;
-        else                         results = `[${d}] ${trimmed}`;
-      });
-
-      const lastVisitDate  = datesToLog[datesToLog.length - 1];
-      const newDate        = futureItems.length > 0 ? futureItems[0].date         : lastVisitDate;
-      const newTime        = futureItems.length > 0 ? (futureItems[0].time || '') : (appt.time || '');
-      const remainingQueue = futureItems.length > 0 ? futureItems.slice(1)        : [];
-
-      // Strip legacy fields before writing
-      const { followUpDate: _fd, followUpTime: _ft, ...apptBase } = appt;
-      const updatedAppt = { ...apptBase, date: newDate, time: newTime, results, followUpQueue: remainingQueue, lastVisitDate };
-
-      saveAppointment(updatedAppt);
+      inFlight.set(appt.id, appt.date);
+      patchAppointment(appt.id, {
+        ...plan.fields,
+        followUpDate: deleteField(),
+        followUpTime: deleteField(),
+      }).catch(() => { if (inFlight.get(appt.id) === appt.date) inFlight.delete(appt.id); });
 
       if (appt.taskId) {
-        const hasUpcoming = futureItems.length > 0;
+        const hasUpcoming = plan.hasUpcoming;
         updateData(prev => {
           const exists = prev.tasks.some(t => t.id === appt.taskId);
           if (exists) {
@@ -1958,7 +2152,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         });
       }
     });
-  }, [appointments, dataLoaded, user?.uid, dsh, saveAppointment, updateData]);
+  }, [appointments, dataLoaded, user?.uid, todayStr, patchAppointment, updateData]);
 
   const todayBadgeStr = toDateStr(getLogicalToday(dsh));
   const todayCount   = tasks.filter(t => taskOccursOn(t, todayBadgeStr) && !isDateDone(t, todayBadgeStr)).length;
@@ -2038,7 +2232,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         editTask={editTask} editOpen={editOpen}
         openEdit={openEdit} closeEdit={closeEdit}
         saveTask={saveTask} deleteTask={deleteTask}
-        toast={toast} dsh={dsh} tasks={tasks}
+        toast={toast} showToast={showToast} dsh={dsh} logicalDay={appDayStr} tasks={tasks}
         todayCount={todayCount} overdueCount={overdueCount}
         toggleTask={toggleTask} addTask={addTask} openAddTask={openAddTask}
         patchTask={patchTask}
@@ -2076,6 +2270,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         aviInputsLoaded={aviInputsLoaded}
         onAVISourceUpdate={handleAVISourceUpdate}
         onAVIInputsChange={handleAVIInputsChange}
+        onAviSettingsChange={handleAviSettingsChange}
         onSourceRename={handleSourceRename}
         onSourceCascadeComplete={handleSourceCascadeComplete}
         onSourcesChange={handleSourcesChange}

@@ -12,8 +12,8 @@ import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
-  uuid, normalizeLemma, cleanStagingText, extractLemmaFromText,
-  fetchDefinition, fetchDefinitionWithFallback,
+  uuid, normalizeLemma, extractLemmaFromText,
+  fetchDefinitionWithFallback,
   getSourceSections, resolveLemmaDetailed,
   writeGlobalLemma, updateLinkedCards,
   filterNewSentenceRows, filterNewWordRows, filterNewLemmas,
@@ -21,13 +21,24 @@ import {
 import { SentenceEditModal } from '../../components/avi/SentenceEditModal.jsx';
 import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
 import { DEMO, DEMO_CAPS, DEMO_LIMIT_NOTE, demoCapReached } from '../../demo/demoConfig.js';
+import { isSkippedInSource, inheritedSentenceSkip, withOwnSentenceSkip } from '../../utils/wordSkip.js';
 import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { Icons } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
 import { useSearchAssist } from '../../hooks/useSearchAssist.js';
 import { SearchAnchorNote, DidYouMean } from '../../components/avi/SearchAssist.jsx';
+import { scrollListToTop } from '../../utils/scrollUtils.js';
 import { findLemmaEntryAny, canonicalLemma, otherReadings } from '../../utils/lemmaSuggest.js';
+import { planDef2Moves, applyDef2Moves, def2CardUpdate } from '../../utils/def2Cascade.js';
+
+// The Lemma Master entry a picked term lands on (exact, cleaned or variant
+// match) — the same lookup handlePopupDone uses to decide "existing".
+function findPickEntry(lemmaMaster, lemma) {
+  const norm = normalizeLemma(lemma);
+  return (lemmaMaster || []).find(l => l.cleanedLemma === norm || l.lemma === lemma)
+    || findLemmaEntryAny(lemmaMaster || [], lemma) || null;
+}
 
 const SI_PAGE_SIZE = 50;
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -37,7 +48,7 @@ const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || w
 // (leaf module — Fable sweep Round D, W7).
 
 // ── PickWordPopup — 2-step new-word confirmation ──────────────
-function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose, lemmaMaster, C, S }) {
+export function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose, lemmaMaster, C, S }) {
   const [editedTerms, setEditedTerms] = useState(() =>
     terms.map(t => ({ ...t, skipped: false }))
   );
@@ -179,6 +190,26 @@ function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, onClose,
                         Shared with {sameLemmaInputs(i).join(', ')} (same lemma)
                       </div>
                     )}
+                    {(() => {
+                      // A5: a def2 that differs from the one Lemma Master
+                      // already has replaces it everywhere on Done; say so,
+                      // and offer to keep Lemma Master's instead.
+                      const entry = findPickEntry(lemmaMaster, t.lemma);
+                      if (!entry?.def2 || !t.def2 || t.def2 === entry.def2) return null;
+                      return (
+                        <div style={{ marginTop: '6px', padding: '8px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.surface, fontSize: '11.5px', color: C.textM, lineHeight: 1.5 }}>
+                          <span style={{ fontFamily: SH.fk, color: C.text }}>{entry.lemma}</span> already has a different Definition 2:{' '}
+                          <span style={{ color: C.text, whiteSpace: 'pre-wrap' }}>{entry.def2}</span>
+                          <div style={{ marginTop: '2px' }}>Done uses yours for this word everywhere: Lemma Master, its other rows and its cards.</div>
+                          <button
+                            onClick={() => updateTerm(i, 'def2', entry.def2)}
+                            style={{ marginTop: '6px', padding: '4px 10px', borderRadius: '5px', fontSize: '11px', fontWeight: 600, border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, cursor: 'pointer' }}
+                          >
+                            Keep Lemma Master's
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </>
               )}
@@ -382,7 +413,9 @@ export function AVISentenceInputPage({
   const [popupFetching,   setPopupFetching]   = useState(false);
 
   const scrollRef = useRef(null);
-  const scrollToTop = () => scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  // U2: on mobile the list flows inside AVI's scroll shell, so scrolling the
+  // list box itself did nothing; this moves whichever box actually scrolls.
+  const scrollToTop = () => scrollListToTop(scrollRef.current);
   const [sentEditUid, setSentEditUid] = useState(null);
 
   // Re-pick context: rows added while re-picking an existing sentence keep
@@ -528,7 +561,7 @@ export function AVISentenceInputPage({
         cardBack,
         inputForm,
         source: effSource, section: effSection,
-        uploaded: false, skipUpload: false,
+        uploaded: false, ...inheritedSentenceSkip(isSkippedInSource(data.wordInputs, effSource, safeTarget)),
         lastUncheckReason: dup.note || '',
         lastUncheckDate:   dup.note ? new Date().toISOString() : '',
       });
@@ -563,7 +596,9 @@ export function AVISentenceInputPage({
       const dup = classifySentenceDup(sentence, safeTarget, effSource);
       if (dup.skip) { skippedDupes.push(safeTarget); continue; }
       const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
-      const cardBack   = lEntry.def2 || t.def2 || ''; // L6: waits for a def2
+      // A5: the def2 from the pop-up (prefilled with Lemma Master's, so it
+      // differs only when you changed it) — Done makes it the lemma's.
+      const cardBack   = t.def2 || lEntry.def2 || ''; // L6: waits for a def2
       const inputForm  = t.input && sentence.includes(t.input) ? t.input : '';
       const sid        = uuid();
       newRows.push({
@@ -573,7 +608,7 @@ export function AVISentenceInputPage({
         cardBack,
         inputForm,
         source: effSource, section: effSection,
-        uploaded: false, skipUpload: false,
+        uploaded: false, ...inheritedSentenceSkip(isSkippedInSource(data.wordInputs, effSource, safeTarget)),
         lastUncheckReason: dup.note || '',
         lastUncheckDate:   dup.note ? new Date().toISOString() : '',
       });
@@ -588,7 +623,7 @@ export function AVISentenceInputPage({
       }));
     }
     return newRows;
-  }, [data.lemmaMaster, effSource, effSection, classifySentenceDup, showAVIToast, updateData]);
+  }, [data.wordInputs, data.lemmaMaster, effSource, effSection, classifySentenceDup, showAVIToast, updateData]);
 
   // ── Add Selected ─────────────────────────────────────────────
   const handleAddSelected = useCallback(async () => {
@@ -653,7 +688,7 @@ export function AVISentenceInputPage({
       if (newWI.def2) {
         autoCreateWordCard({
           entry: newWI, lemmaMaster: data.lemmaMaster,
-          cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+          cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6: cards feed the duplicate guard
         }).then(() => {
           updateData(prev => ({
             ...prev,
@@ -716,7 +751,7 @@ export function AVISentenceInputPage({
         if (row.cardBack && !row.skipUpload) {
           autoCreateSentenceCard({
             entry: row, lemmaMaster: data.lemmaMaster,
-            cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+            cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
           }).then(() => {
             updateData(prev => ({
               ...prev,
@@ -742,7 +777,7 @@ export function AVISentenceInputPage({
     }
   }, [pickTokens, allSelected, pickPhrase, pickSentence, currentSource, currentSection,
             effSource, effSection,
-            data, decks, uid, updateCards, updateDecks, aviSources,
+            data, cards, decks, uid, updateCards, updateDecks, aviSources,
             createSentenceRows, updateData, setSiPage]);
 
   // ── Popup step 1: fetch definitions ─────────────────────────
@@ -792,9 +827,7 @@ export function AVISentenceInputPage({
 
     for (const t of terms) {
       const norm = normalizeLemma(t.lemma);
-      const existingLM = data.lemmaMaster.find(
-        l => l.cleanedLemma === norm || l.lemma === t.lemma
-      ) || findLemmaEntryAny(data.lemmaMaster, t.lemma); // L4d: variant match
+      const existingLM = findPickEntry(data.lemmaMaster, t.lemma); // L4d: variant match
       if (!existingLM) {
         newLemmas.push({
           lemma: t.lemma, def1: t.def1, def2: t.def2 || '',
@@ -808,17 +841,37 @@ export function AVISentenceInputPage({
           uid: uuid(), ts: now, input: t.input,
           source: effSource, section: effSection,
           lemma: t.lemma, def1: t.def1, def2: t.def2 || '',
-          uploaded: false, skipUpload: false,
+          uploaded: false, skipUpload: isSkippedInSource(data.wordInputs, effSource, t.lemma),
           lastUncheckReason: '', lastUncheckDate: '',
         });
       }
     }
 
-    updateData(prev => ({
-      ...prev,
-      wordInputs:  [...filterNewWordRows(prev.wordInputs, newWordInputs), ...prev.wordInputs],
-      lemmaMaster: [...filterNewLemmas(prev.lemmaMaster, newLemmas), ...prev.lemmaMaster],
-    }));
+    // A5: a def2 from the pop-up for a lemma Lemma Master already has
+    // becomes that lemma's def2 (before, it reached only the new word row and
+    // its card). An entry with no def2 gets it, which also releases sentence
+    // rows waiting for one; a different one replaces it — the pop-up says so
+    // and offers to keep Lemma Master's. Like a def2 edit in Lemma Master,
+    // the lemma's other rows follow, sentence backs taken from the old def2
+    // follow (hand-edited ones are kept), and so do its cards.
+    const def2Moves = planDef2Moves(terms, data.lemmaMaster, findPickEntry);
+
+    updateData(prev => {
+      const moved = applyDef2Moves({
+        lemmaMaster:    [...filterNewLemmas(prev.lemmaMaster, newLemmas), ...prev.lemmaMaster],
+        wordInputs:     [...filterNewWordRows(prev.wordInputs, newWordInputs), ...prev.wordInputs],
+        sentenceInputs: prev.sentenceInputs,
+      }, def2Moves, now, 'Definition 2 updated in Sentence Input');
+      return { ...prev, ...moved };
+    });
+    for (const { entry, def2 } of def2Moves.values()) {
+      if (!entry.def2) continue; // no cards carry a def2 back for it yet
+      updateLinkedCards({
+        lemmaID: entry.lemmaID, lemmaText: entry.lemma,
+        buildUpdates: (c) => def2CardUpdate(c, entry.def2, def2),
+        cards, uid, updateCards,
+      }).catch(e => console.error('Sentence Input: card back update failed', e));
+    }
 
     // Create sentence rows using confirmed lemmas
     const rows = createSentenceRowsWithLemma(terms, sentence);
@@ -831,7 +884,7 @@ export function AVISentenceInputPage({
       if (row.cardBack && !row.skipUpload) {
         autoCreateSentenceCard({
         entry: row, lemmaMaster: [...data.lemmaMaster, ...newLemmas],
-        cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+        cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
         }).then(() => {
           updateData(prev => ({
             ...prev,
@@ -844,10 +897,10 @@ export function AVISentenceInputPage({
     }
 
     for (const wi of newWordInputs) {
-      if (wi.def2) {
+      if (wi.def2 && !wi.skipUpload) {
         autoCreateWordCard({
                   entry: wi, lemmaMaster: [...data.lemmaMaster, ...newLemmas],
-                  cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+                  cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
                 }).then(() => {
           updateData(prev => ({
             ...prev,
@@ -866,7 +919,7 @@ export function AVISentenceInputPage({
  }, [
     reopenFor, pickSentence, data, currentSource, currentSection,
     effSource, effSection,
-    decks, uid, updateCards, updateDecks, aviSources,
+    cards, decks, uid, updateCards, updateDecks, aviSources,
     updateData, createSentenceRowsWithLemma, setSiPage,
   ]);
 
@@ -907,7 +960,8 @@ export function AVISentenceInputPage({
       ...prev,
       sentenceInputs: prev.sentenceInputs.map(s => {
         if (s.uid !== rowUid) return s;
-        const next = { ...s, ...edits };
+        // A10: a Skip change here is this row's own (drops the word's marker).
+        const next = skipChanged ? { ...withOwnSentenceSkip(s, edits.skipUpload), ...edits } : { ...s, ...edits };
         if (targetChanged) next.cardFront = (edits.targetWord || s.targetWord) + '\n' + (s.sentence || '');
         if (autoBack !== null) next.cardBack = autoBack;
         if ((targetChanged || backChanged) && s.uploaded) {
@@ -947,8 +1001,9 @@ export function AVISentenceInputPage({
   const toggleSkip = useCallback((uid, val) => {
     updateData(prev => ({
       ...prev,
+      // A10: skipped or un-skipped on its own (drops the word's marker).
       sentenceInputs: prev.sentenceInputs.map(s =>
-        s.uid === uid ? { ...s, skipUpload: val } : s
+        s.uid === uid ? withOwnSentenceSkip(s, val) : s
       ),
     }));
   }, [updateData]);

@@ -1,10 +1,9 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { TaskItem } from '../components/TaskItem.jsx';
-import { parseDate, isPast, getLogicalToday, toDateStr, getTaskDates, taskAnchorDate, taskLastDate, isDateDone } from '../utils/dateUtils.js';
+import { parseDate, isPast, getLogicalToday, getLogicalDateStr, toDateStr, getTaskDates, taskAnchorDate, taskLastDate, isDateDone } from '../utils/dateUtils.js';
 import { getWindowEnd } from '../utils/recurrenceEngine.js';
 import { SH } from '../theme/buildStyles.js';
-import { useDragSort } from '../hooks/useDragSort.js';
 import { compareByPriorityPushCategoryTitle } from '../utils/dragSort.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -135,11 +134,14 @@ function hexToRgb(hex) {
   return `${r}, ${g}, ${b}`;
 }
 
-export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData }) {
+export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile }) {
   const { C, S } = useAppTheme();
 
+  // T4: keyed on the logical day (read per render; App re-renders when the
+  // day flips), not dsh alone, so the list moves on with the day.
+  const logicalDayStr = getLogicalDateStr(dsh);
   const overdue = useMemo(() => {
-    const today = getLogicalToday(dsh);
+    const today = parseDate(logicalDayStr);
     return tasks.filter(t => {
       if (t.completed) return false;
       // Overdue = the LAST due date has passed (multi-date model).
@@ -156,18 +158,15 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile, update
       // 2. Priority > push > category > title
       return compareByPriorityPushCategoryTitle(a, b);
     });
-  }, [tasks, dsh]);
+  }, [tasks, dsh, logicalDayStr]);
 
   const unscheduled = useMemo(() => {
     return tasks.filter(t => getTaskDates(t).length === 0 && !t.persistent).sort(compareByPriorityPushCategoryTitle);
   }, [tasks]);
 
-  const handleReorder = useCallback((updatedAllTasks) => {
-    updateData(prev => ({ ...prev, tasks: updatedAllTasks }));
-  }, [updateData]);
 
-  const { getDragHandlers: getOverdueDrag }     = useDragSort(overdue,     tasks, handleReorder);
-  const { getDragHandlers: getUnscheduledDrag } = useDragSort(unscheduled, tasks, handleReorder);
+  // Overdue and Unscheduled sort by date and priority, so a manual order never
+  // applied here, and N6 orders are per day: these rows don't drag.
 
   return (
     <>
@@ -196,7 +195,7 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile, update
           {overdue.length === 0
             ? <div style={S.emptyState}>No overdue tasks.</div>
             : overdue.map(t => (
-              <TaskItem key={t.id} task={t} onToggle={onToggle} onEdit={onEdit} dsh={dsh} soundProfile={soundProfile} dragHandlers={getOverdueDrag(t)} />
+              <TaskItem key={t.id} task={t} onToggle={onToggle} onEdit={onEdit} dsh={dsh} soundProfile={soundProfile} />
             ))
           }
         </div>
@@ -220,7 +219,7 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile, update
           {unscheduled.length === 0
             ? <div style={S.emptyState}>Nothing unscheduled.</div>
             : unscheduled.map(t => (
-              <TaskItem key={t.id} task={t} onToggle={onToggle} onEdit={onEdit} dsh={0} soundProfile={soundProfile} dragHandlers={getUnscheduledDrag(t)} />            ))
+              <TaskItem key={t.id} task={t} onToggle={onToggle} onEdit={onEdit} dsh={dsh} soundProfile={soundProfile} />            ))
           }
         </div>
       </div>
@@ -244,7 +243,6 @@ export function OverduePage({ tasks, onToggle, onEdit, dsh, soundProfile, update
       </div>
 
     </div>
-    {isMobile && <div style={{ height: '80px' }} />}
     </>
   );
 }

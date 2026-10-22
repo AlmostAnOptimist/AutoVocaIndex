@@ -10,12 +10,14 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { useKeyShortcuts } from '../hooks/useKeyShortcuts.js';
 import { SH } from '../theme/buildStyles.js';
 import {
-  fsrsGrade, isDueToday, isNewCard, triageBucket, compressInterval,
+  fsrsGrade, isDueToday, isNewCard,
   getDueDateStr, AGAIN, FSRS_DEFAULTS,
 } from '../utils/fsrs.js';
 import { playSound } from '../utils/soundEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
+import { planCardDedupe } from '../utils/cardDedupe.js';
 import { getLogicalDateStr } from '../utils/dateUtils.js';
+import { queueWrite, isNotFound } from '../utils/queuedWrite.js';
 import { runSpikeForecast, DAILY_CAP } from '../utils/srsEngine.js';
 import { ActivityHeatmap, shiftMonth } from '../components/ActivityHeatmap.jsx';
 import { applyReviewToStats, getEffectiveCurrentStreak, EMPTY_REVIEW_STATS } from '../utils/reviewStatsEngine.js';
@@ -130,6 +132,9 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   const [successCount, setSuccessCount] = useState(0); // cards resolved with non-Again grade
   const [againTotal,   setAgainTotal]   = useState(0); // total Again presses
   const [carriedOver,  setCarriedOver]  = useState(0); // cards that hit the cap
+  // U7: cards resolved before the current phase began, so the counter counts
+  // this phase only (a skipped phase resolved nothing).
+  const [phaseBase,    setPhaseBase]    = useState(0);
 
   const card = queue[0];
 
@@ -139,6 +144,9 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   const [playingKey,   setPlayingKey]   = useState(null);
   const cancelAudioRef = useRef(null);
   const gradingRef     = useRef(false); // true while a grade is resolving; reset on next flip
+  // S6: bumped every time a grade resolves, so the swipe fling is cleared even
+  // when the same card comes back (an Again on the last card in the queue).
+  const [turn,         setTurn]         = useState(0);
 
   const stopAudio = useCallback(() => {
     cancelAudioRef.current?.();
@@ -176,13 +184,14 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 
   const startPhase = useCallback((newPhase) => {
     setPhase(newPhase);
+    setPhaseBase(successCount + carriedOver);
     setAgainCounts({});
     setRevealed(false);
     setRevealedSections({});
     if (newPhase === 'due')   setQueue([...dueCards]);
     if (newPhase === 'new')   setQueue([...newCards]);
     if (newPhase === 'extra') setQueue([...extraCards]);
-  }, [dueCards, newCards, extraCards]);
+  }, [dueCards, newCards, extraCards, successCount, carriedOver]);
 
   const transitionPhase = useCallback((currentPhase) => {
     setRevealed(false);
@@ -210,10 +219,22 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     // onGrade writes to Firestore and returns the updated card object.
     // Overlap the write with the pulse window so the animation is visible
     // before the card advances (total wait is the max of the two, not the sum).
-    const [updatedCard] = await Promise.all([
-      onGrade(card, rating),
-      new Promise((resolve) => setTimeout(resolve, GRADE_ANIM_MS)),
-    ]);
+    // S6: onGrade queues its write and returns at once (offline included); if
+    // it throws, the card stays put and can be graded again.
+    let updatedCard;
+    try {
+      [updatedCard] = await Promise.all([
+        onGrade(card, rating),
+        new Promise((resolve) => setTimeout(resolve, GRADE_ANIM_MS)),
+      ]);
+    } catch (e) {
+      console.error('ReviewSession: grading failed', e);
+      gradingRef.current = false;
+      setGradedRating(null);
+      setTurn(t => t + 1);
+      return;
+    }
+    setTurn(t => t + 1);
 
     if (rating === AGAIN) {
       const newCount = (againCounts[card.id] || 0) + 1;
@@ -404,7 +425,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     el.style.transition = '';
     el.style.transform = '';
     el.style.opacity = '';
-  }, [cardId]);
+  }, [cardId, turn]);
 
   // ── Finished ─────────────────────────────────────────────
   if (phase === 'finished') {
@@ -555,13 +576,10 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   // Show the original phase array length as the total, not the (growing) queue length.
   // This prevents the progress indicator from jumping when Again cards are re-queued.
   const phaseTotal    = phase === 'manual' ? manualCards.length : phase === 'due' ? dueCards.length : phase === 'new' ? newCards.length : extraCards.length;
-  const phaseResolved = phase === 'manual'
-    ? successCount + carriedOver
-    : phase === 'due'
-    ? (successCount + carriedOver) - manualCards.length
-    : phase === 'new'
-    ? (successCount + carriedOver) - manualCards.length - dueCards.length  // subtract manual + due-phase resolutions
-    : (successCount + carriedOver) - manualCards.length - dueCards.length - newCards.length;
+  // U7: resolved in this phase = resolved overall minus what was resolved
+  // before it began. Subtracting every earlier phase's full size counted a
+  // skipped phase as done, so "Skip to full deck" sat at 1/N for a while.
+  const phaseResolved = (successCount + carriedOver) - phaseBase;
   const phaseProgress = Math.min(Math.max(phaseResolved, 0) + 1, phaseTotal);
 
   // Per-card Again indicator
@@ -844,7 +862,7 @@ function DeckCard({ deck, totalCount, dueCount, newCount, masteryBreakdown, last
 }
 
 // ── Deck manager ──────────────────────────────────────────────
-function DeckManager({ decks, onDelete, onClose, C, S }) {
+function DeckManager({ decks, cards, onDelete, onClose, C, S }) {
   const [selected,   setSelected]   = useState(new Set());
   const [confirming, setConfirming] = useState(false);
 
@@ -859,6 +877,11 @@ function DeckManager({ decks, onDelete, onClose, C, S }) {
 
   const selectedDecks = decks.filter(d => selected.has(d.id));
   const totalCards    = selectedDecks.reduce((sum, d) => sum + (d.totalCards || 0), 0);
+  // P5: cards that are also in a deck you're keeping stay in it.
+  const keptShared = (cards || []).filter(c => {
+    const ids = c.deckIds || [];
+    return ids.some(id => selected.has(id)) && ids.some(id => !selected.has(id));
+  }).length;
 
   // Both returns portal to document.body — DeckManager mounts inside
   // FlashcardsPage's `.fade-up` wrapper, whose persistent transform creates a
@@ -869,7 +892,7 @@ function DeckManager({ decks, onDelete, onClose, C, S }) {
         <div style={{ background: C.surface, borderRadius: '16px', padding: '28px', maxWidth: '480px', width: '100%' }}>
           <div style={{ fontFamily: SH.fd, fontSize: '20px', fontWeight: 300, color: C.text, marginBottom: '6px' }}>Confirm deletion</div>
           <p style={{ fontSize: '13px', color: C.textM, marginBottom: '16px', lineHeight: 1.6 }}>
-            The following deck{selectedDecks.length !== 1 ? 's' : ''} and all their cards will be permanently deleted:
+            The following deck{selectedDecks.length !== 1 ? 's' : ''} and their cards will be permanently deleted:
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
             {selectedDecks.map(d => (
@@ -879,10 +902,15 @@ function DeckManager({ decks, onDelete, onClose, C, S }) {
               </div>
             ))}
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: C.textM, padding: '4px 12px', marginBottom: '20px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: C.textM, padding: '4px 12px', marginBottom: keptShared ? '6px' : '20px' }}>
             <span>Total</span>
             <span>{totalCards} cards</span>
           </div>
+          {keptShared > 0 && (
+            <p style={{ fontSize: '12px', color: C.textM, padding: '0 12px', marginBottom: '20px', lineHeight: 1.6 }}>
+              {keptShared} card{keptShared !== 1 ? 's are' : ' is'} also in another deck and will stay there with {keptShared !== 1 ? 'their' : 'its'} review history.
+            </p>
+          )}
           <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
             <button style={S.btnGhost} onClick={() => setConfirming(false)}>Back</button>
             <button
@@ -934,7 +962,7 @@ function DeckManager({ decks, onDelete, onClose, C, S }) {
 
 // ── Main page ─────────────────────────────────────────────────
 // onEchoDeck(deckId) (X3): opens the Echo setup on the Quizzes page with that deck chosen.
-export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {}, onEchoDeck = null }) {
+export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {}, onEchoDeck = null, onNotice = null }) {
   const { C, S } = useAppTheme();
   const [session,           setSession]           = useState(null);
   const [managing,          setManaging]          = useState(false);
@@ -1113,7 +1141,8 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       });
     });
     return stats;
-  }, [enrichedCards, dsh]);
+  // T4: todayStr so due counts move on when the day flips with the page open.
+  }, [enrichedCards, dsh, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Recently studied decks (up to 4, sorted by lastStudied desc) ─
   const recentDecks = useMemo(() => {
@@ -1236,6 +1265,19 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   // Grammar cards track when they're studied and how they're graded, but never
   // get an FSRS due date — they're surfaced by manual pick or the mastery-floor
   // nudge (nextDueDate), not by being "due."
+  // S6: the card write is queued, not awaited — the persistent cache keeps it
+  // and sends it when there's a connection, so grading never waits on the
+  // network. A write the server refuses is reported; a card that no longer
+  // exists (deleted on another page or device) leaves the session.
+  const gradeFailed = useCallback((card) => (e) => {
+    if (isNotFound(e)) {
+      updateCards(prev => prev ? prev.filter(c => c.id !== card.id) : prev);
+      onNotice?.('That card no longer exists, so its review was not saved.');
+    } else {
+      onNotice?.("A review didn't save. The card will be due again after a reload.");
+    }
+  }, [updateCards, onNotice]);
+
   const handleGrade = useCallback(async (card, rating) => {
     if (!uid) return null;
 
@@ -1244,15 +1286,17 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       const history = [...(card.gapEvents || []), { date: now, grade: rating }].slice(-100);
       const updates = { due: null, lastReview: now, lastGrade: rating, reps: (card.reps || 0) + 1, gapEvents: history };
       if (DEMO) return { ...card, ...updates }; // demo: inert grading — nothing persists (D5)
-      await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates);
       updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, ...updates } : c) : prev);
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates),
+        'FlashcardsPage: grade write failed', gradeFailed(card));
       return { ...card, ...updates };
     }
 
-    const updates = fsrsGrade(card, rating, fsrsSettings);
+    const updates = fsrsGrade(card, rating, fsrsSettings, dsh ?? 3); // T1: logical-day due dates
     if (DEMO) return { ...card, ...updates }; // demo: inert grading — no card write, no reviewLog, no reviewStats (D5)
-    await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates);
     updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, ...updates } : c) : prev);
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates),
+      'FlashcardsPage: grade write failed', gradeFailed(card));
 
     const logDate     = getLogicalDateStr(dsh ?? 3);
     const newDayCount = (reviewLogRef.current[logDate] || 0) + 1;
@@ -1268,7 +1312,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     setReviewStats(newStats);
 
     return { ...card, ...updates };
-  }, [uid, updateCards, fsrsSettings, dsh]);
+  }, [uid, updateCards, fsrsSettings, dsh, gradeFailed]);
 
   // ── End a session ─────────────────────────────────────────
   // Again cards still in the queue when the session ends are already written to
@@ -1277,8 +1321,11 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   const handleEndSession = useCallback(async () => {
     if (!DEMO && uid && session?.deckId && !['all', 'all_words', 'all_sentences'].includes(session.deckId)) {
       const now = new Date().toISOString();
-      await updateDoc(doc(db, 'users', uid, 'decks', session.deckId), { lastStudied: now });
-      updateDecks(prev => prev.map(d => d.id === session.deckId ? { ...d, lastStudied: now } : d));
+      // S6: queued, so ending a session never waits on the network.
+      const deckId = session.deckId;
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'decks', deckId), { lastStudied: now }),
+        'FlashcardsPage: lastStudied write failed');
+      updateDecks(prev => prev.map(d => d.id === deckId ? { ...d, lastStudied: now } : d));
     }
     setSession(null);
     // On mobile the topbar is hidden, so the contentArea's scrollTop from
@@ -1295,7 +1342,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     // batch of new cards reviewed today is immediately factored into the 7-day forecast.
     if (!DEMO && uid && cards && session?.deckId !== 'deck_grammar') {
       try {
-        const result = await runSpikeForecast(uid, cards, dsh || 3, addTask, tasks || [], [...pausedDeckIds], settings?.srsSpikeCap ?? DAILY_CAP);
+        const result = await runSpikeForecast(uid, cards, dsh ?? 3, addTask, tasks || [], [...pausedDeckIds], settings?.srsSpikeCap ?? DAILY_CAP);
         if (onPipelineResult) onPipelineResult(result);
       } catch (e) {
         console.error('FlashcardsPage: post-session spike forecast failed', e);
@@ -1308,7 +1355,17 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     if (!uid) return;
     setManaging(false);
     const deckIdSet = new Set(deckIds);
-    const toDelete  = (cards || []).filter(c => (c.deckIds || []).some(id => deckIdSet.has(id)));
+    // P5: a card that's also in a deck you're keeping only leaves
+    // the deleted decks, with its review history (Cleanup's rule); a card in
+    // no other deck is deleted, as before.
+    const inDeleted = (cards || []).filter(c => (c.deckIds || []).some(id => deckIdSet.has(id)));
+    const toDelete  = [];
+    const toMove    = new Map(); // card id → remaining deck ids
+    for (const c of inDeleted) {
+      const remaining = (c.deckIds || []).filter(id => !deckIdSet.has(id));
+      if (remaining.length) toMove.set(c.id, remaining);
+      else toDelete.push(c);
+    }
 
     let batch = writeBatch(db);
     let ops   = 0;
@@ -1324,6 +1381,11 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       ops++;
       if (ops >= 490) await flush();
     }
+    for (const [cardId, remaining] of toMove) {
+      batch.update(doc(db, 'users', uid, 'flashcards', cardId), { deckIds: remaining });
+      ops++;
+      if (ops >= 490) await flush();
+    }
     for (const deckId of deckIds) {
       batch.delete(doc(db, 'users', uid, 'decks', deckId));
       ops++;
@@ -1331,19 +1393,28 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     }
     await flush();
 
-    updateCards(prev => prev ? prev.filter(c => !(c.deckIds || []).some(id => deckIdSet.has(id))) : prev);
+    const deleted = new Set(toDelete.map(c => c.id));
+    updateCards(prev => prev
+      ? prev.filter(c => !deleted.has(c.id)).map(c => toMove.has(c.id) ? { ...c, deckIds: toMove.get(c.id) } : c)
+      : prev);
     updateDecks(prev => prev.filter(d => !deckIdSet.has(d.id)));
   }, [uid, cards, updateCards, updateDecks]);
 
   // ── Cleanup orphaned / backless cards + resync backs ──────
   const handleCleanup = useCallback(async () => {
     if (!uid) return;
-    const deckIdSet = new Set(decks.map(d => d.id));
 
-    let allCardsForCleanup;
+    // S5: decks are read fresh along with the cards. The in-memory list can
+    // miss a deck made on another device since the last refresh, and every
+    // card in it then looked "orphaned" and was deleted.
+    let allCardsForCleanup, deckIdSet;
     try {
-      const snap = await getDocs(collection(db, 'users', uid, 'flashcards'));
+      const [snap, deckSnap] = await Promise.all([
+        getDocs(collection(db, 'users', uid, 'flashcards')),
+        getDocs(collection(db, 'users', uid, 'decks')),
+      ]);
       allCardsForCleanup = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      deckIdSet = new Set([...deckSnap.docs.map(d => d.id), ...decks.map(d => d.id)]);
     } catch (e) {
       console.error('Flashcards: cleanup read failed', e);
       return;
@@ -1356,44 +1427,25 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       return isBackless || isOrphaned;
     });
 
-    // ── Duplicate cards (one card per lemma per deck; sentence cards
-    // additionally keyed by sentence — mirroring the cardFactory guards).
-    // Survivor preference: reviewed over new, then earliest createdAt,
-    // then id. Multi-deck cards are never auto-deleted (removing them
-    // here would also remove them from their other decks). Deck
-    // totalCards is decremented for these deletions, since unlike
-    // backless/orphaned cards they live in real decks.
+    // ── Duplicate cards: one card per word per deck (cardDedupe, shared
+    // with the Lemma Master merge and Word Input corrections). The
+    // survivor keeps the older review history (reviewed over new, then
+    // earliest createdAt, then id). A duplicate that is also in other decks
+    // only leaves this deck (before: it was skipped, so the duplicate
+    // stayed). Deck totalCards is decremented for these removals, since
+    // unlike backless/orphaned cards they live in real decks.
     const deletingIds = new Set(toDelete.map(c => c.id));
-    const dupGroups   = new Map();
-    for (const c of allCardsForCleanup) {
-      if (c.type === 'grammar' || !c.lemma || deletingIds.has(c.id)) continue;
-      for (const deckId of (c.deckIds || [])) {
-        if (!deckIdSet.has(deckId)) continue;
-        const key = c.type === 'sentence'
-          ? `${deckId}|s|${normalizeLemma(c.lemma)}|${(c.sentence || '').normalize('NFC')}`
-          : `${deckId}|w|${normalizeLemma(c.lemma)}`;
-        if (!dupGroups.has(key)) dupGroups.set(key, []);
-        dupGroups.get(key).push(c);
-      }
+    const dupPlan = planCardDedupe(
+      allCardsForCleanup.filter(c => !deletingIds.has(c.id)),
+      { deckIds: [...deckIdSet] },
+    );
+    const byIdForCleanup = new Map(allCardsForCleanup.map(c => [c.id, c]));
+    for (const id of dupPlan.deletes) {
+      deletingIds.add(id);
+      toDelete.push(byIdForCleanup.get(id));
     }
-    const deckDecrements = new Map();
-    for (const group of dupGroups.values()) {
-      if (group.length < 2) continue;
-      const sorted = [...group].sort((a, b) => {
-        const ar = isNewCard(a) ? 1 : 0, br = isNewCard(b) ? 1 : 0;
-        if (ar !== br) return ar - br;
-        const ac = a.createdAt || '', bc = b.createdAt || '';
-        if (ac !== bc) return ac.localeCompare(bc);
-        return a.id.localeCompare(b.id);
-      });
-      for (const c of sorted.slice(1)) {
-        if ((c.deckIds || []).length > 1 || deletingIds.has(c.id)) continue;
-        deletingIds.add(c.id);
-        toDelete.push(c);
-        const deckId = (c.deckIds || [])[0];
-        deckDecrements.set(deckId, (deckDecrements.get(deckId) || 0) + 1);
-      }
-    }
+    const deckLeaves     = dupPlan.deckUpdates;
+    const deckDecrements = dupPlan.decrements;
 
     // ── Resync card backs from Lemma Master (def2 → back) ─────
     // Repairs cards whose back has drifted from their lemma's Definition 2.
@@ -1428,7 +1480,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       console.error('Flashcards: def resync failed', e);
     }
 
-    if (!toDelete.length && !resyncPairs.length) {
+    if (!toDelete.length && !resyncPairs.length && !deckLeaves.length) {
       setCleanupResult('Nothing to clean up.');
       setTimeout(() => setCleanupResult(null), 5000);
       return;
@@ -1453,6 +1505,11 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       ops++;
       if (ops >= 490) await flush();
     }
+    for (const { id, deckIds } of deckLeaves) {
+      batch.update(doc(db, 'users', uid, 'flashcards', id), { deckIds });
+      ops++;
+      if (ops >= 490) await flush();
+    }
     for (const [deckId, n] of deckDecrements) {
       batch.update(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(-n) });
       ops++;
@@ -1462,10 +1519,12 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
 
     const toDeleteIds = new Set(toDelete.map(c => c.id));
     const resyncById  = new Map(resyncPairs);
+    const leaveById   = new Map(deckLeaves.map(u => [u.id, u.deckIds]));
     updateCards(prev => prev
       ? prev
           .filter(c => !toDeleteIds.has(c.id))
           .map(c => resyncById.has(c.id) ? { ...c, ...resyncById.get(c.id) } : c)
+          .map(c => leaveById.has(c.id) ? { ...c, deckIds: leaveById.get(c.id) } : c)
       : prev);
     if (deckDecrements.size) {
       updateDecks(prev => prev.map(d =>
@@ -1476,6 +1535,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     }
     const doneParts = [];
     if (toDelete.length)    doneParts.push(`${toDelete.length} card${toDelete.length !== 1 ? 's' : ''} removed`);
+    if (deckLeaves.length)  doneParts.push(`${deckLeaves.length} duplicate${deckLeaves.length !== 1 ? 's' : ''} taken out of a deck`);
     if (resyncPairs.length) doneParts.push(`${resyncPairs.length} back${resyncPairs.length !== 1 ? 's' : ''} resynced`);
     setCleanupResult(doneParts.join(' · ') + '.');
     setTimeout(() => setCleanupResult(null), 5000);
@@ -1827,6 +1887,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       {managing && (
         <DeckManager
           decks={decks}
+          cards={cards}
           onDelete={handleDeleteDecks}
           onClose={() => setManaging(false)}
           C={C} S={S}

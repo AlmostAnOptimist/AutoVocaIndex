@@ -1,8 +1,9 @@
 // src/pages/NotesPage.jsx
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  collection, getDocs, doc, addDoc, updateDoc, deleteDoc,
+  collection, getDocs, doc, setDoc, updateDoc, deleteDoc,
 } from 'firebase/firestore';
+import { queueWrite } from '../utils/queuedWrite.js';
 import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
@@ -10,6 +11,7 @@ import { Icons } from '../components/Icons.jsx';
 import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { DEMO } from '../demo/demoConfig.js';
 import { stripHtml, sanitizePastedHtml } from '../utils/contentUtils.js';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 
 const PRESET_TAGS = ['vocabulary', 'grammar', 'reading', 'listening', 'speaking', 'writing', 'culture', 'review', 'question'];
 const TAB_KEY = 'avi_notes_tab';
@@ -442,30 +444,71 @@ function NoteEditor({ note, initialTags, initialSourceId, initialSectionId, init
   const isNew = !note?.id;
   const isQuestion = tags.includes('question');
 
+  // S7: the fields as they are now (state plus any change made in this
+  // event, before React re-renders), whether a change is waiting to be
+  // saved, and the latest note and save handler. Closing the editor (✕,
+  // Cancel, opening another note, leaving the page) or hiding the app saves
+  // a waiting change at once instead of dropping it with the timer.
+  const draftRef    = useRef(null);
+  draftRef.current  = {
+    title, bodyHtml, tags, answered, linkedGrammarIds: linkedGrammar,
+    linkedSourceId: linkedSourceId || null, linkedSectionId: linkedSectionId || null, linkedApptId: linkedApptId || null,
+  };
+  const dirtyRef    = useRef(false);
+  const noteRef     = useRef(note);
+  noteRef.current   = note;
+  const onSaveRef   = useRef(onSave);
+  onSaveRef.current = onSave;
+  const mountedRef  = useRef(true);
+
+  // Saves a waiting change now. Returns the save's promise, or null when
+  // nothing was waiting (new notes are saved with Create only).
+  const saveNow = useCallback(() => {
+    clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = null;
+    if (!noteRef.current?.id || !dirtyRef.current) return null;
+    dirtyRef.current = false;
+    return Promise.resolve(onSaveRef.current({ ...noteRef.current, ...draftRef.current }));
+  }, []);
+
   // Auto-save: fires 2s after last change, only for existing notes.
   const scheduleAutoSave = useCallback((overrides = {}) => {
     if (isNew) return;
+    const next = { ...draftRef.current, ...overrides };
+    for (const k of ['linkedSourceId', 'linkedSectionId', 'linkedApptId']) next[k] = next[k] || null;
+    draftRef.current = next;
+    dirtyRef.current = true;
     clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current = setTimeout(async () => {
-      setSaveIndicator('saving');
-      await onSave({
-        ...(note || {}),
-        title:            overrides.title      ?? title,
-        bodyHtml:         overrides.bodyHtml   ?? bodyHtml,
-        tags:             overrides.tags       ?? tags,
-        answered:         overrides.answered   ?? answered,
-        linkedGrammarIds: overrides.linkedGrammarIds ?? linkedGrammar,
-        linkedSourceId:   'linkedSourceId'  in overrides ? (overrides.linkedSourceId  ?? null) : (linkedSourceId  || null),
-        linkedSectionId:  'linkedSectionId' in overrides ? (overrides.linkedSectionId ?? null) : (linkedSectionId || null),
-        linkedApptId:     'linkedApptId'    in overrides ? (overrides.linkedApptId    ?? null) : (linkedApptId    || null),
-      });
+      const pending = saveNow();
+      if (!pending) return;
+      if (mountedRef.current) setSaveIndicator('saving');
+      await pending;
+      if (!mountedRef.current) return;
       setSaveIndicator('saved');
-      setTimeout(() => setSaveIndicator(null), 2000);
+      setTimeout(() => { if (mountedRef.current) setSaveIndicator(null); }, 2000);
     }, 2000);
-  }, [isNew, note, title, bodyHtml, tags, answered, linkedGrammar, onSave]);
+  }, [isNew, saveNow]);
 
-  // Clean up timer on unmount
-  useEffect(() => () => clearTimeout(autoSaveTimer.current), []);
+  // Closing or switching away saves a waiting change (S7; before, the
+  // pending save was cancelled here).
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; saveNow(); };
+  }, [saveNow]);
+
+  // Hiding or closing the app saves a waiting change too (iOS suspends
+  // timers in the background).
+  useEffect(() => {
+    const flushIfWaiting = () => { if (autoSaveTimer.current) saveNow(); };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flushIfWaiting(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', flushIfWaiting);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', flushIfWaiting);
+    };
+  }, [saveNow]);
 
   const addTag = () => {
     const t = tagInput.trim();
@@ -492,6 +535,9 @@ function NoteEditor({ note, initialTags, initialSourceId, initialSectionId, init
   const handleSave = async () => {
     if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!title.trim() && !stripHtml(bodyHtml)) return;
+    clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = null;
+    dirtyRef.current = false;
     setSaving(true);
         await onSave({ ...(note || {}), title: title.trim(), bodyHtml, tags, answered, linkedGrammarIds: linkedGrammar, linkedSourceId: linkedSourceId || null, linkedSectionId: linkedSectionId || null, linkedApptId: linkedApptId || null });
     setSaving(false);
@@ -647,7 +693,7 @@ function NoteEditor({ note, initialTags, initialSourceId, initialSectionId, init
           <div style={{ display: 'flex', gap: '8px' }}>
             <input style={{ ...S.formInput, flex: 1 }} placeholder="Custom tag…" value={tagInput}
               onChange={e => setTagInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }} />
+              onKeyDown={e => { if (isSubmitEnter(e)) { e.preventDefault(); addTag(); } }} />
             <button style={S.btnGhost} onClick={addTag}>Add</button>
           </div>
           {customTags.length > 0 && (
@@ -755,7 +801,14 @@ function NoteEditor({ note, initialTags, initialSourceId, initialSectionId, init
       {showDelete && (
         <DeleteConfirm C={C} S={S}
           onCancel={() => setShowDelete(false)}
-          onConfirm={() => { setShowDelete(false); onDelete(note.id); }} />
+          onConfirm={() => {
+            // A change waiting to save must not land on the deleted note.
+            clearTimeout(autoSaveTimer.current);
+            autoSaveTimer.current = null;
+            dirtyRef.current = false;
+            setShowDelete(false);
+            onDelete(note.id);
+          }} />
       )}
       {showGrammarPicker && (
         <MultiPickerModal
@@ -1247,7 +1300,7 @@ function CorrectionCard({ session, active, onClick, onRename, C }) {
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onBlur={commitEdit}
-          onKeyDown={e => { if (e.key === 'Enter') commitEdit(e); if (e.key === 'Escape') { e.stopPropagation(); setEditing(false); } }}
+          onKeyDown={e => { if (isSubmitEnter(e)) commitEdit(e); if (e.key === 'Escape') { e.stopPropagation(); setEditing(false); } }}
           onClick={e => e.stopPropagation()}
           style={{
             ...{ fontSize: '13.5px', fontWeight: 500, color: C.text, width: '100%', padding: '2px 6px', borderRadius: '6px', border: `1px solid ${C.accent}`, background: C.bg, outline: 'none', marginBottom: '4px' },
@@ -1405,17 +1458,22 @@ useEffect(() => {
     const now = new Date().toISOString();
     if (data.id) {
       const updates = { ...data, updatedAt: now };
-      await updateDoc(doc(db, 'users', uid, 'notes', data.id), updates);
+      // S7: shown at once and written in the background (a closing editor
+      // saves here, and offline the write's promise doesn't settle).
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'notes', data.id), updates), 'Note save failed:');
       if (data.type === 'correction') {
         setCorrections(prev => prev.map(n => n.id === data.id ? { ...n, ...updates } : n));
       } else {
         setNotes(prev => prev.map(n => n.id === data.id ? { ...n, ...updates } : n));
       }
-      setSelected({ ...data, updatedAt: now });
+      // Only while that note is still the open one: a save from an editor
+      // that was just closed, or left for another note, must not reopen it.
+      setSelected(prev => (prev?.id === data.id ? { ...data, updatedAt: now } : prev));
     onNoteUpdated?.({ id: data.id, ...updates });
     } else {
       const payload = { ...data, createdAt: now, updatedAt: now };
-      const ref = await addDoc(collection(db, 'users', uid, 'notes'), payload);
+      const ref = doc(collection(db, 'users', uid, 'notes'));
+      queueWrite(() => setDoc(ref, payload), 'Note create failed:');
       const newItem = { id: ref.id, ...payload };
       if (data.type === 'correction') {
         setCorrections(prev => [newItem, ...prev]);
@@ -1440,7 +1498,7 @@ useEffect(() => {
   const handleDelete = useCallback(async (id) => {
     if (DEMO) return; // demo: Notes are read-only (7C addendum)
     if (!uid) return;
-    await deleteDoc(doc(db, 'users', uid, 'notes', id));
+    queueWrite(() => deleteDoc(doc(db, 'users', uid, 'notes', id)), 'Note delete failed:');
     setNotes(prev => prev.filter(n => n.id !== id));
     setCorrections(prev => prev.filter(n => n.id !== id));
     setSelected(null);

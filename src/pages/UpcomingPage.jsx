@@ -3,10 +3,10 @@ import { createPortal } from 'react-dom';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { isPassiveMediaExcluded } from '../utils/contentUtils.js';
 import { TaskItem } from '../components/TaskItem.jsx';
-import { parseDate, isThisWeek, fmtDate, getLogicalToday, toDateStr, getTaskDates, isDateDone } from '../utils/dateUtils.js';
+import { parseDate, fmtDate, getLogicalToday, getLogicalDateStr, toDateStr, getTaskDates, isDateDone } from '../utils/dateUtils.js';
 import { SH, frameBevel, frameBevelFilled } from '../theme/buildStyles.js';
 import { useDragSort } from '../hooks/useDragSort.js';
-import { taskSortComparator } from '../utils/dragSort.js';
+import { makeTaskSortComparator, applyDragOrder } from '../utils/dragSort.js';
 import { getNextOccurrence } from '../utils/recurrenceEngine.js';
 import { CATEGORIES } from '../constants.js';
 
@@ -19,6 +19,9 @@ const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || w
 // tray (scrim 1500 / panel 1501), B-1 frame language. Tapping a row closes
 // the popup and opens that task's edit modal (navigation wins). Virtual /
 // projected occurrences are shown but not editable.
+// N6: the day an Upcoming week row is shown on (its group).
+const rowDay = (t) => t.date;
+
 function DayDetailPopup({ dateStr, tasks, C, S, onClose, onEditTask }) {
   if (!dateStr) return null;
   const headDate = parseDate(dateStr);
@@ -707,8 +710,10 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
   // treatment as upcoming recurring occurrences: visible but not the real
   // task until the promotion engine rolls them in. In-memory only; these
   // copies are never written back.
+  // T4: keyed on the day (read per render), not dsh alone.
+  const followUpDayStr = getLogicalDateStr(dsh);
   const followUpVirtuals = useMemo(() => {
-    const todayStr = toDateStr(getLogicalToday(dsh));
+    const todayStr = followUpDayStr;
     const out = [];
     (appointments || []).forEach(a => {
       const queue = a.followUpQueue || [];
@@ -731,7 +736,7 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
       });
     });
     return out;
-  }, [appointments, tasks, dsh]);
+  }, [appointments, tasks, followUpDayStr]);
 
   const filtered = useMemo(() => {
     const results = [];
@@ -802,7 +807,8 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
       }
     });
 
-    return results.sort(taskSortComparator);
+    // N6: each row sorts by the manual order made for its own day, if any.
+    return results.sort(makeTaskSortComparator(rowDay));
   }, [tasks, followUpVirtuals, dsh, today, weekEnd]);
 
   const grouped = useMemo(() => {
@@ -813,10 +819,12 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
 
   // Drag sort only applies to real tasks
   const realFiltered = useMemo(() => filtered.filter(t => !t._virtual && !t._dateOcc), [filtered]);
-  const handleReorder = useCallback((updatedAllTasks) => {
-    updateData(prev => ({ ...prev, tasks: updatedAllTasks }));
+  // N6: a drop reorders that day's rows; the order is stamped with the day
+  // and applied to the latest tasks.
+  const handleReorder = useCallback((ranks, day) => {
+    updateData(prev => ({ ...prev, tasks: applyDragOrder(prev.tasks, ranks, day) }));
   }, [updateData]);
-  const { getDragHandlers } = useDragSort(realFiltered, tasks, handleReorder);
+  const { getDragHandlers } = useDragSort(realFiltered, handleReorder, rowDay);
 
   return (
     <div className="fade-up">
@@ -901,7 +909,6 @@ export function UpcomingPage({ tasks, onToggle, onEdit, dsh, soundProfile, updat
           </div>
         </div>
       )}
-      {isMobile && <div style={{ height: '80px' }} />}
     </div>
   );
 }

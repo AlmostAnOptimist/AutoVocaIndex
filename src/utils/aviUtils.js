@@ -10,7 +10,7 @@
 //   - Four active modes: krdict, krdict-ko, krdict-bi, api (Claude)
 
 import { doc, getDoc, setDoc, writeBatch } from 'firebase/firestore';
-import { toDateStr, computeStreak } from './dateUtils.js';
+import { toDateStr, computeStreak, logicalDateOf } from './dateUtils.js';
 import { db } from '../firebase.js';
 import { DEMO } from '../demo/demoConfig.js';
 import { apiFetch } from './apiFetch.js';
@@ -1177,7 +1177,13 @@ export async function writeGlobalLemma(surface, cleanedLemma) {
 // matched cards as a side-effect unless the caller's updates already set it.
 // Accepts either a static `updates` object or a per-card `buildUpdates(card)`
 // function — return null/undefined from buildUpdates to skip that card.
-export async function updateLinkedCards({ lemmaID, lemmaText, updates, buildUpdates, cards, uid, updateCards }) {
+// A8: what runs after cards are renamed (AVIPage registers the TTS refresh,
+// ttsUtils.refreshRenamedCardAudio). Set from outside so this module's
+// imports, and the golden harnesses that bundle it, stay as they were.
+let renamedCardsHandler = null;
+export function setRenamedCardsHandler(fn) { renamedCardsHandler = typeof fn === 'function' ? fn : null; }
+
+export async function updateLinkedCards({ lemmaID, lemmaText, updates, buildUpdates, cards, uid, updateCards, memoryFirst = false }) {
   if ((!lemmaID && !lemmaText) || !cards || !uid) return;
 
   const byIdMatch = lemmaID ? cards.filter(c => c.linkedAVILemmaId === lemmaID) : [];
@@ -1205,15 +1211,33 @@ export async function updateLinkedCards({ lemmaID, lemmaText, updates, buildUpda
   }
   if (!pairs.length) return;
 
+  // memoryFirst: the cards change on screen in the same update as the
+  // caller's rows (the merge uses it, so the 동의어 card effect sees the
+  // renamed card instead of making a second one); the write follows.
+  const byId = new Map(pairs.map(([c, u]) => [c.id, u]));
+  const applyInMemory = () => updateCards(prev => {
+    if (!prev) return prev;
+    return prev.map(c => byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c);
+  });
+  if (memoryFirst) applyInMemory();
+
   const batch = writeBatch(db);
   pairs.forEach(([c, u]) => batch.update(doc(db, 'users', uid, 'flashcards', c.id), u));
   await batch.commit();
 
-  const byId = new Map(pairs.map(([c, u]) => [c.id, u]));
-  updateCards(prev => {
-    if (!prev) return prev;
-    return prev.map(c => byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c);
-  });
+  if (!memoryFirst) applyInMemory();
+
+  // A8: renamed cards get word audio for the new word (Echo's Dictation and
+  // audio prompts reuse it). Runs in the background.
+  const renamed = pairs
+    .filter(([c, u]) => c.type !== 'grammar' && u.lemma !== undefined &&
+      normalizeLemma(u.lemma || '') !== normalizeLemma(c.lemma || ''))
+    .map(([c, u]) => ({ ...c, ...u }));
+  if (renamed.length && renamedCardsHandler) {
+    Promise.resolve()
+      .then(() => renamedCardsHandler({ cards: renamed, uid, updateCards }))
+      .catch(e => console.error('updateLinkedCards: audio refresh failed', e));
+  }
 }
 
 // ── Rate limiter for Claude API ───────────────────────────────
@@ -1365,6 +1389,10 @@ async function fetchKrDictBilingual(lemma) {
 
 // ── Claude API via Netlify function ───────────────────────────
 // No client-side API key needed — key is configured in Netlify env.
+// A12: like KRDict mode (L1), a failed call (offline, timeout, expired
+// sign-in, server error) returns '' — "couldn't reach the dictionary" — so
+// callers keep the existing def1 instead of saving a fake miss. Only an
+// answer with no definition in it is a real "Definition not found."
 async function fetchClaudeDefinition(lemma, apiRateLimit = 5) {
   if (!lemma || lemma.length > 80) return '';
   if (!apiRateLimitOk(apiRateLimit)) return '__RATE_LIMITED__';
@@ -1377,8 +1405,9 @@ async function fetchClaudeDefinition(lemma, apiRateLimit = 5) {
     if (!resp.ok) throw new Error('Function error: ' + resp.status);
     const json = await resp.json();
     return json.definition?.trim() || 'Definition not found.';
-  } catch {
-    return 'Definition not found.';
+  } catch (e) {
+    console.warn('API dictionary unreachable:', e?.message || e);
+    return '';
   }
 }
 
@@ -1406,11 +1435,43 @@ export async function fetchDefinition(lemma, aviSettings = {}) {
   // Composite: fetch each expanded term and merge
   const raw = await Promise.all(terms.map(t => fetchOne(t)));
   if (raw.includes('__RATE_LIMITED__')) return '__RATE_LIMITED__';
-  // L1: a KRDict-mode block that could not be reached makes the whole
-  // composite unreachable, so a partial merge is never saved as def1.
-  if (mode !== 'api' && raw.some(d => d === '')) return '';
+  // L1: a block that could not be reached makes the whole composite
+  // unreachable, so a partial merge is never saved as def1 (A12: API mode too).
+  if (raw.some(d => d === '')) return '';
   const blocks = raw.map(def => def || 'Definition not found.');
   return blocks.join('\n\n-----\n\n');
+}
+
+// ── Lemma-correction definition rules (bug sweep A1–A3) ───────
+// A lookup result may replace a definition only when it is a real hit.
+// '' (dictionary unreachable), the __RATE_LIMITED__ / __NO_API_KEY__
+// sentinels, and results made only of "Definition not found." blocks
+// (a miss, including every block of a composite) never count.
+export function isRealDefinition(d) {
+  if (!d || typeof d !== 'string' || d.startsWith('__')) return false;
+  return d.replace(/definition not found\.?/gi, '').replace(/[\s\-·]/g, '') !== '';
+}
+
+// Two lemmas that differ only in parentheticals and spacing
+// (날리다 → (주먹을) 날리다) name the same headword, so the old def1 still
+// applies when the dictionary has nothing for the new form.
+export function isLemmaVariant(a, b) {
+  const core = s => String(s || '').normalize('NFC').replace(/\([^)]*\)/g, '').replace(/\s+/g, '');
+  const ca = core(a);
+  return !!ca && ca === core(b);
+}
+
+// def1 after a lemma correction or rename, when there is no typed def1
+// and no existing entry with a real def1 to take it from:
+//   real hit                       → the hit
+//   same headword (variant)        → keep the current def1
+//   different word, real miss      → "Definition not found."
+//   different word, lookup failed  → '' so a later refresh fills it
+export function resolveCorrectedDef1(fetched, currentDef1, oldLemma, newLemma) {
+  if (isRealDefinition(fetched)) return fetched;
+  if (isLemmaVariant(oldLemma, newLemma)) return currentDef1 || '';
+  if (fetched && typeof fetched === 'string' && !fetched.startsWith('__')) return fetched;
+  return '';
 }
 
 // ── Shared lemma-relation mutation logic ──────────────────────
@@ -1418,7 +1479,56 @@ export async function fetchDefinition(lemma, aviSettings = {}) {
 // pins on lemmaMaster entries: AVILemmaMasterPage's MiniSearchPopup, AVIMiniSearchPopup
 // (Word Input), AVISearchPage, and AVISearchPage's ConnectListModal.
 
-export const NUANCE_SOURCE_TITLE = '동의어/유의어';
+// The synonym word list (source, deck and rows share this title). It was
+// '동의어/유의어' until Oct 2026; rows and decks still under the old title
+// (before the Library rename runs its cascade) are recognized as the same
+// list, and new rows join whichever title the list's rows already use.
+export const NUANCE_SOURCE_TITLE = '동의어';
+export const LEGACY_NUANCE_SOURCE_TITLE = '동의어/유의어';
+export const isNuanceSourceTitle = (title) =>
+  title === NUANCE_SOURCE_TITLE || title === LEGACY_NUANCE_SOURCE_TITLE;
+export function nuanceSourceTitleIn(wordInputs) {
+  return (wordInputs || []).find(w => isNuanceSourceTitle(w.source))?.source || NUANCE_SOURCE_TITLE;
+}
+
+// Relation ids that point at an existing Lemma Master entry (R2: a deleted
+// entry's id can linger in other entries' relations; it doesn't count).
+const relationIds = (field) => String(field || '').split(',').map(s => s.trim()).filter(Boolean);
+export function liveMeaningIds(entry, lemmaIds) {
+  return relationIds(entry?.relatedMeaning).filter(id => id !== entry.lemmaID && lemmaIds.has(id));
+}
+
+// R2: removes (or, with `remap`, repoints) relation ids on every entry —
+// for a lemma delete (removedIds) or a merge (remap: edited id → survivor).
+// Self-references the remap produces are dropped. Pure; entries that don't
+// change keep their reference. Returns the ids of entries whose
+// relatedMeaning changed, for syncNuanceSource.
+export function stripLemmaRelations(lemmaMaster, removedIds = [], remap = {}) {
+  const gone = new Set(removedIds);
+  const affected = [];
+  const now = new Date().toISOString();
+  const next = lemmaMaster.map(l => {
+    const clean = (field, skip = new Set()) =>
+      [...new Set(relationIds(l[field]).map(id => remap[id] || id))]
+        .filter(id => !gone.has(id) && id !== l.lemmaID && !skip.has(id));
+    const formIds    = clean('relatedForm');
+    const meaningIds = clean('relatedMeaning');
+    // A remap can land one id in both a pin and the hidden list; the pin wins.
+    const hiddenIds  = clean('hiddenRelated', new Set([...formIds, ...meaningIds]));
+    const changed = (field, ids) => (ids.join(',') === relationIds(l[field]).join(',') ? null : ids.join(','));
+    const form = changed('relatedForm', formIds), meaning = changed('relatedMeaning', meaningIds), hidden = changed('hiddenRelated', hiddenIds);
+    if (form === null && meaning === null && hidden === null) return l;
+    if (meaning !== null) affected.push(l.lemmaID);
+    return {
+      ...l,
+      ...(form    !== null ? { relatedForm:    form    } : {}),
+      ...(meaning !== null ? { relatedMeaning: meaning } : {}),
+      ...(hidden  !== null ? { hiddenRelated:  hidden  } : {}),
+      lastUpdated: now,
+    };
+  });
+  return { lemmaMaster: next, affected };
+}
 
 function relationSets(entry) {
   return {
@@ -1438,31 +1548,35 @@ function withRelationSets(entry, { form, meaning, hidden }) {
   };
 }
 
-// Keeps 동의어/유의어 membership consistent with each affected lemma's current
+// Keeps 동의어 membership consistent with each affected lemma's current
 // relatedMeaning state: adds a capture if meaning is non-empty and none exists
 // yet, removes the capture if meaning is now empty, and collapses duplicates
 // down to one (covers the lemma-merge case, where both sides could have had
 // their own capture before merging). Runs after every pin/connect action,
 // regardless of relation type — checking final state rather than trying to
 // detect "did meaning specifically change" is simpler and correct either way.
+// R2: only links to entries that still exist count as meaning links.
+// R1: a capture removed here takes its card out of the deck too (AVIPage).
 export function syncNuanceSource(wordInputs, lemmaMaster, affectedLemmaIDs) {
   const added = [];
   const removed = [];
   let next = wordInputs;
+  const lemmaIds = new Set(lemmaMaster.map(l => l.lemmaID));
+  const title = nuanceSourceTitleIn(wordInputs);
 
   affectedLemmaIDs.forEach(lemmaID => {
     const entry = lemmaMaster.find(l => l.lemmaID === lemmaID);
     if (!entry) return;
-    const hasMeaning = (entry.relatedMeaning || '').split(',').map(s => s.trim()).filter(Boolean).length > 0;
+    const hasMeaning = liveMeaningIds(entry, lemmaIds).length > 0;
     const norm = normalizeLemma(entry.lemma);
-    const existing = next.filter(w => w.source === NUANCE_SOURCE_TITLE && normalizeLemma(w.lemma) === norm);
+    const existing = next.filter(w => isNuanceSourceTitle(w.source) && normalizeLemma(w.lemma) === norm);
 
     if (hasMeaning && existing.length === 0) {
       const newRow = {
         uid: uuid(),
         ts: new Date().toISOString(),
         input: entry.lemma,
-        source: NUANCE_SOURCE_TITLE,
+        source: title,
         section: null,
         lemma: entry.lemma,
         def1: entry.def1 || '',
@@ -1487,15 +1601,15 @@ export function syncNuanceSource(wordInputs, lemmaMaster, affectedLemmaIDs) {
   return { wordInputs: next, added, removed };
 }
 
-function notifyNuanceSync(showAVIToast, added, removed) {
+export function notifyNuanceSync(showAVIToast, added, removed) {
   if (!showAVIToast) return;
-  if (added.length)   showAVIToast(`Added to 동의어/유의어: ${added.join(', ')}`, 'goToNuanceSource');
-  if (removed.length) showAVIToast(`Removed from 동의어/유의어: ${removed.join(', ')}`, 'goToNuanceSource');
+  if (added.length)   showAVIToast(`Added to ${NUANCE_SOURCE_TITLE}: ${added.join(', ')}`, 'goToNuanceSource');
+  if (removed.length) showAVIToast(`Removed from ${NUANCE_SOURCE_TITLE}: ${removed.join(', ')}`, 'goToNuanceSource');
 }
 
 // Bidirectional pin/hide toggle between two lemmas (the per-row checkboxes).
 // `type` is 'pinForm' | 'pinMeaning' | 'hide'. `showAVIToast` is optional —
-// pass it to get feedback when this action adds/removes a 동의어/유의어 capture.
+// pass it to get feedback when this action adds/removes a 동의어 capture.
 export function applyRelationPin(prevData, anchorLemmaId, otherLemmaId, type, isChecked, showAVIToast) {
   const update = (entry, otherID) => {
     const { form, meaning, hidden } = relationSets(entry);
@@ -1586,14 +1700,17 @@ export function getSourceSections(aviSources, aviSections, sourceTitle) {
 // Builds a { 'YYYY-MM-DD': count } map of word/sentence mining activity —
 // used by AVIOverviewPage's heatmap, and shared with anything else that
 // wants the same day-by-day activity signal (e.g. a streak computation).
-export function buildWordsByDay(wordInputs, sentenceInputs) {
+// T2: rows count on the logical day they were added (local time, before
+// the day-start hour = the day before). `ts` is a UTC ISO stamp, so its
+// first ten characters put anything added before 9 AM KST on the day before.
+export function buildWordsByDay(wordInputs, sentenceInputs, dsh = 3) {
   const map = {};
   for (const w of wordInputs || []) {
-    const d = w.ts?.slice(0, 10);
+    const d = logicalDateOf(w.ts, dsh);
     if (d) map[d] = (map[d] || 0) + 1;
   }
   for (const s of sentenceInputs || []) {
-    const d = s.ts?.slice(0, 10);
+    const d = logicalDateOf(s.ts, dsh);
     if (d) map[d] = (map[d] || 0) + 1;
   }
   return map;

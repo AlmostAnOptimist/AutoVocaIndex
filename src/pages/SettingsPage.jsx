@@ -5,8 +5,10 @@ import { playSound } from '../utils/soundEngine.js';
 import { SH } from '../theme/buildStyles.js';
 import { APPOINTMENT_TYPES } from '../constants.js';
 import { useRef } from 'react';
-import { backfillCardAudio } from '../utils/ttsUtils.js';
+import { backfillCardAudio, cardNeedsAudio } from '../utils/ttsUtils.js';
 import { DEMO } from '../demo/demoConfig.js';
+import { isSubmitEnter } from '../utils/keyUtils.js';
+import { getLogicalDateStr } from '../utils/dateUtils.js';
 
 // ── Built-in stopwords (always active in AVI Search) ─────────
 const BUILT_IN_STOPWORDS = [
@@ -31,12 +33,10 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
   const [backfill,      setBackfill]      = useState(null); // null | { running, done, total }
   const backfillAbort = useRef(null);
 
+  // N7: the backfill's own rule, so the count matches what it will generate.
   const missingAudioCount = useMemo(() => {
     if (!cards) return null;
-    return cards.filter(c => {
-      if (c.type === 'grammar') return !c.audioUrl && !!c.notes?.split('\n\n')[1]?.trim();
-      return !c.audioUrl;
-    }).length;
+    return cards.filter(cardNeedsAudio).length;
   }, [cards]);
 
   const handleBackfill = async () => {
@@ -182,14 +182,14 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
         <p style={{ fontSize: '13px', color: C.textS, marginBottom: '12px', lineHeight: 1.6 }}>
           Tasks won't flip to the next day until this hour — designed for night owls.
         </p>
-        <select style={S.formSelect} value={settings.dayStartHour || 3}
+        <select style={S.formSelect} value={settings.dayStartHour ?? 3}
           onChange={e => onUpdate({ ...settings, dayStartHour: Number(e.target.value) })}>
           {[0,1,2,3,4,5,6].map(h => (
             <option key={h} value={h}>{h === 0 ? 'Midnight (12:00 AM)' : `${h}:00 AM`}</option>
           ))}
         </select>
         <p style={{ fontSize: '11px', color: C.textM, marginTop: '8px' }}>
-          Currently flips at {settings.dayStartHour || 3}:00 AM
+          Currently flips at {(settings.dayStartHour ?? 3) === 0 ? 'midnight' : `${settings.dayStartHour ?? 3}:00 AM`}
         </p>
       </div>
 
@@ -222,7 +222,7 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
               onChange={e => onUpdate({
                 ...settings,
                 exchangeRates: { ...settings.exchangeRates, USD: Number(e.target.value) },
-                ratesUpdated: new Date().toISOString().slice(0, 10),
+                ratesUpdated: getLogicalDateStr(settings.dayStartHour ?? 3), // T3: was the UTC date
               })}
               style={{ ...S.formInput, width: '120px' }}
             />
@@ -238,7 +238,7 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
               onChange={e => onUpdate({
                 ...settings,
                 exchangeRates: { ...settings.exchangeRates, EUR: Number(e.target.value) },
-                ratesUpdated: new Date().toISOString().slice(0, 10),
+                ratesUpdated: getLogicalDateStr(settings.dayStartHour ?? 3), // T3: was the UTC date
               })}
               style={{ ...S.formInput, width: '120px' }}
             />
@@ -322,7 +322,7 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
                   placeholder={`Add ${catLabel} type…`}
                   value={inputVal}
                   onChange={e => setNewApptInputs(p => ({ ...p, [cat]: e.target.value }))}
-                  onKeyDown={e => { if (e.key === 'Enter') addType(); }}
+                  onKeyDown={e => { if (isSubmitEnter(e)) addType(); }}
                   style={{ ...S.formInput, flex: 1, padding: '6px 10px', fontSize: '12px' }}
                 />
                 <button

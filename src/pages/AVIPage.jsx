@@ -4,7 +4,7 @@
 // come in as props from App.jsx (from data.settings.aviCurrentSource/Section).
 // Tab content rendered by child page components (built in Phase 5).
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { useAVIData } from '../hooks/useAVIData.js';
@@ -21,7 +21,14 @@ import { AVISearchPage } from './avi/AVISearchPage.jsx';
 import { useSearchStore } from '../hooks/useLemmaSearch.js';
 import { AVIRecentPage } from './avi/AVIRecentPage.jsx';
 import { AVIMobileNav } from '../components/avi/AVIMobileNav.jsx';
-import { NUANCE_SOURCE_TITLE, normalizeLemma } from '../utils/aviUtils.js';
+import {
+  isNuanceSourceTitle, nuanceSourceTitleIn, liveMeaningIds, normalizeLemma, setRenamedCardsHandler,
+} from '../utils/aviUtils.js';
+import { planDeckLeave, planIsEmpty, applyCardDedupe } from '../utils/cardDedupe.js';
+import { refreshRenamedCardAudio } from '../utils/ttsUtils.js';
+
+// A8: cards renamed through updateLinkedCards get word audio for their new word.
+setRenamedCardsHandler(refreshRenamedCardAudio);
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -101,11 +108,11 @@ export function AVIPage({
   // Content Library sources and sections (loaded by App.jsx)
   aviSources, aviSections,
   // Pre-loaded AVI data from App.jsx (eliminates duplicate Firestore reads)
-  wordInputs, sentenceInputs, settings, inputsLoaded, onAVIInputsChange,
+  wordInputs, sentenceInputs, settings, inputsLoaded, onAVIInputsChange, onAviSettingsChange,
   onNavigateToFlashcards,
 }) {
   const { C } = useAppTheme();
-    const { data, updateData, loading, syncStatus } = useAVIData({ wordInputs, sentenceInputs, settingsData: settings, inputsLoaded, onInputsChange: onAVIInputsChange });
+    const { data, updateData, loading, syncStatus } = useAVIData({ wordInputs, sentenceInputs, settingsData: settings, inputsLoaded, onInputsChange: onAVIInputsChange, onAviSettingsChange });
 
 
   // ── Tab state — persists to localStorage ─────────────────────
@@ -169,7 +176,7 @@ export function AVIPage({
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
-  // Reactive sync: ensure every 동의어/유의어-tagged lemma has its own
+  // Reactive sync: ensure every 동의어-tagged lemma has its own
   // flashcard in that deck. Catches up on rows created by auto-add, merge,
   // or the one-time backfill — none of which pass through the edit
   // transition that normally triggers card creation.
@@ -187,7 +194,7 @@ export function AVIPage({
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     data.wordInputs
-      .filter(w => w.source === NUANCE_SOURCE_TITLE)
+      .filter(w => isNuanceSourceTitle(w.source))
       .forEach(row => {
         const key = normalizeLemma(row.lemma);
         if (nuanceInFlight.current.has(key)) return;
@@ -203,11 +210,50 @@ export function AVIPage({
       });
   }, [data.wordInputs, data.lemmaMaster, cards, decks, aviSources, loading]);
 
+  // R1: a word that leaves 동의어 because it lost its last synonym (unpinned,
+  // or its only synonym was deleted or merged away) leaves the deck too, so
+  // its card stops coming up. Only a change seen while AVI is open counts:
+  // the set of 동의어 words is taken once loading finishes, and a word that
+  // drops out of it afterwards is checked. Its card stays when the word still
+  // has a synonym (a row deleted by hand keeps its card, as everywhere else
+  // in AVI) or when the word itself was deleted or merged (the delete keeps
+  // linked cards; the merge moves them). The latest cards and decks are
+  // read through a ref, since the effect runs on row changes only.
+  const nuanceWordsRef = useRef(null);
+  const nuanceLive     = useRef({ cards, decks });
+  nuanceLive.current   = { cards, decks };
+  useEffect(() => {
+    if (loading) { nuanceWordsRef.current = null; return; }
+    const now  = new Set(data.wordInputs.filter(w => isNuanceSourceTitle(w.source)).map(w => normalizeLemma(w.lemma)));
+    const prev = nuanceWordsRef.current;
+    nuanceWordsRef.current = now;
+    if (!prev) return;
+    const lemmaIds = new Set(data.lemmaMaster.map(l => l.lemmaID));
+    const leaving = [...prev].filter(k => {
+      if (now.has(k)) return false;
+      const entry = data.lemmaMaster.find(l => normalizeLemma(l.lemma) === k);
+      return !!entry && liveMeaningIds(entry, lemmaIds).length === 0;
+    });
+    if (!leaving.length) return;
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const deckIds = (nuanceLive.current.decks || []).filter(d => isNuanceSourceTitle(d.name)).map(d => d.id);
+    const plan = planDeckLeave(nuanceLive.current.cards, deckIds, leaving);
+    if (planIsEmpty(plan)) return;
+    applyCardDedupe({ uid, plan, updateCards, updateDecks })
+      .catch(e => console.error('동의어: removing cards failed', e));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.wordInputs, loading]);
+
   // ── Sentence cardBack cascade ─────────────────────────────────
   // When a lemmaMaster entry gains def1 or def2 after sentence rows were
   // committed (lazy import defs), propagate the new cardBack and trigger
   // card creation. Mirrors the nuanceInFlight guard pattern exactly.
   const cardBackInFlight = useRef(new Set());
+  // A6: the effect runs on Lemma Master / sentence changes only, so it reads
+  // the latest decks and cards (for the duplicate guard) through a ref.
+  const cascadeLive = useRef({ decks, cards });
+  cascadeLive.current = { decks, cards };
   useEffect(() => {
     if (loading) return;
     const uid = auth.currentUser?.uid;
@@ -247,7 +293,8 @@ export function AVIPage({
       autoCreateSentenceCard({
         entry: { ...row, cardBack },
         lemmaMaster: data.lemmaMaster,
-        cards, decks, uid, updateCards, updateDecks, aviSources,
+        decks: cascadeLive.current.decks, cards: cascadeLive.current.cards,
+        uid, updateCards, updateDecks, aviSources,
         dsh: settings?.dayStartHour ?? 3,
       }).then(() => {
         updateData(prev => ({
@@ -313,6 +360,12 @@ export function AVIPage({
   const MOBILE_FLOWING_TABS = ['word', 'sentence', 'import'];
   const isFlowing = FLOWING_TABS.includes(activeTab) || (isMobile && MOBILE_FLOWING_TABS.includes(activeTab));
 
+  // U3: each tab opens at the top of the shared scroll shell.
+  const shellRef = useRef(null);
+  useLayoutEffect(() => {
+    if (shellRef.current) shellRef.current.scrollTop = 0;
+  }, [activeTab]);
+
   if (loading) {
     return (
       <div style={{
@@ -330,7 +383,7 @@ export function AVIPage({
       {/* ── Scroll shell: sticky tab strip + tab content share one
            scrolling ancestor so flowing tabs can stack sticky layers
            on top of the tab strip. ─────────────────────────────── */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+      <div ref={shellRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
 
       {/* ── Sub-nav tab row — matches NotesPage style ─────────── */}
       {/* Mobile gets the Nav button + radial fan instead, portaled into
@@ -438,7 +491,7 @@ export function AVIPage({
           actionLabel={toast.action === 'goToNuanceSource' ? 'View →' : toast.action === 'goToFlashcards' ? 'Study →' : toast.action === 'goToRecent' ? 'Review →' : null}
           onAction={() => {
             if (toast.action === 'goToNuanceSource') {
-              setSrcFilter(NUANCE_SOURCE_TITLE);
+              setSrcFilter(nuanceSourceTitleIn(data.wordInputs));
               setSecFilter('(All)');
               handleSetTab('source');
               dismissToast();
@@ -453,29 +506,6 @@ export function AVIPage({
           C={C}
         />
       )}
-    </div>
-  );
-}
-
-// ── Placeholder tab components (replaced in Phase 5) ─────────
-function TabPlaceholder({ label, data, currentSource, C }) {
-  return (
-    <div style={{ padding: '32px 0', color: C.textM, fontSize: '13px' }}>
-      <div style={{
-        fontFamily: SH.fd, fontSize: '18px',
-        color: C.text, marginBottom: '20px',
-      }}>
-        {label}
-      </div>
-      <div style={{ fontFamily: SH.fm, fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-        <div>Words: {data.wordInputs.length}</div>
-        <div>Sentences: {data.sentenceInputs.length}</div>
-        <div>Lemmas: {data.lemmaMaster.length}</div>
-        <div>Current source: {currentSource || '(none)'}</div>
-        <div style={{ marginTop: '8px', color: C.textM, fontStyle: 'italic' }}>
-          Tab content coming in Phase 5.
-        </div>
-      </div>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 // src/pages/GrammarIndexPage.jsx
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, getDoc, setDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, getDoc, setDoc, query, where, arrayRemove } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
@@ -13,7 +13,21 @@ import { GRAMMAR_MASTERY as MASTERY } from '../constants.js';
 import { DEMO } from '../demo/demoConfig.js';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
 import { usePaginationKeys } from '../hooks/usePaginationKeys.js';
+import { getLogicalToday, toDateStr } from '../utils/dateUtils.js';
+import { queueWrite } from '../utils/queuedWrite.js';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 const GRAMMAR_CACHE_KEY = 'avi_grammar_entries';
+// P1: fingerprint of the grammar corpus this device last wrote, so the corpus
+// doc is rewritten only when its content changes (not on every visit).
+const CORPUS_SIG_KEY = 'avi_grammar_corpus_sig';
+function corpusSignature(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${text.length}:${(h >>> 0).toString(16)}`;
+}
 
 const GRAMMAR_DECK_ID = 'deck_grammar';
 const GRAMMAR_PAGE_SIZE = 25;
@@ -401,7 +415,7 @@ function EntryDetail({
                 value={titleDraft}
                 onChange={e => setTitleDraft(e.target.value)}
                 onBlur={commitTitle}
-                onKeyDown={e => { if (e.key === 'Enter') commitTitle(); if (e.key === 'Escape') { setTitleDraft(entry.glossaryTerm); setEditingTitle(false); } }}
+                onKeyDown={e => { if (isSubmitEnter(e)) commitTitle(); if (e.key === 'Escape') { setTitleDraft(entry.glossaryTerm); setEditingTitle(false); } }}
                 style={{
                   fontFamily: SH.fk, fontSize: '22px', fontWeight: 600, color: C.text,
                   background: 'transparent', border: 'none', borderBottom: `2px solid ${C.accent}`,
@@ -827,10 +841,31 @@ function EntryDetail({
 
 // ── Main page ─────────────────────────────────────────────────
 export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNavigateToContent, defaultOpenEntryId,
-  onMasteryCounts, onEntriesChange, getCardNextDueDate, onCardNextDueDateChanged, updateCards, cards }) {
+  onMasteryCounts, onEntriesChange, getCardNextDueDate, onCardNextDueDateChanged, updateCards, cards, dsh = 3 }) {
   const { C, S } = useAppTheme();
   const [entries,     setEntries]     = useState([]);
-  const [cardMap,     setCardMap]     = useState({});
+  // P1: which entry has which grammar card comes from App's in-memory cards
+  // (grammar cards are always kept there). Firestore is read only when the
+  // cards haven't loaded yet. Creates and deletes made on this page are
+  // layered on top until the in-memory cards reflect them.
+  const [fallbackCardMap, setFallbackCardMap] = useState(null);
+  const [cardMapEdits,    setCardMapEdits]    = useState({});
+  const cardsLoadedRef = useRef(Array.isArray(cards));
+  cardsLoadedRef.current = Array.isArray(cards);
+  const cardMap = useMemo(() => {
+    const map = {};
+    if (Array.isArray(cards)) {
+      cards.forEach(c => {
+        if (c.type === 'grammar' && c.linkedGrammarEntryId) map[c.linkedGrammarEntryId] = c.id;
+      });
+    } else if (fallbackCardMap) {
+      Object.assign(map, fallbackCardMap);
+    }
+    for (const [entryId, cardId] of Object.entries(cardMapEdits)) {
+      if (cardId) map[entryId] = cardId; else delete map[entryId];
+    }
+    return map;
+  }, [cards, fallbackCardMap, cardMapEdits]);
   const [notes,       setNotes]       = useState([]);
   const [sections,    setSections]    = useState([]);
   const [loading,     setLoading]     = useState(true);
@@ -864,13 +899,17 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       try { localStorage.setItem(GRAMMAR_CACHE_KEY, JSON.stringify(rows)); } catch {}
 
       // ── Flashcards (for cardMap cross-reference) ──
-      const cardSnap = await getDocs(collection(db, 'users', uid, 'flashcards'));
-      const cardDocs = cardSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      const map = {};
-      cardDocs.forEach(d => {
-        if (d.type === 'grammar' && d.linkedGrammarEntryId) map[d.linkedGrammarEntryId] = d.id;
-      });
-      setCardMap(map);
+      // P1: only when App's cards haven't loaded; otherwise cardMap is
+      // built from them.
+      if (!cardsLoadedRef.current) {
+        const cardSnap = await getDocs(collection(db, 'users', uid, 'flashcards'));
+        const map = {};
+        cardSnap.docs.forEach(d => {
+          const c = d.data();
+          if (c.type === 'grammar' && c.linkedGrammarEntryId) map[c.linkedGrammarEntryId] = d.id;
+        });
+        setFallbackCardMap(map);
+      }
 
       // ── Notes ──
       const notesSnap = await getDocs(collection(db, 'users', uid, 'notes'));
@@ -895,7 +934,8 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
 
   // ── Grammar corpus: rebuild whenever entries change ───────────────────────
   // Writes a compact grammar_corpus document to Firestore for grammar quiz API calls.
-  // Debounced 2 seconds so rapid edits don't spam writes.
+  // Debounced 2 seconds so rapid edits don't spam writes. P1: skipped when the
+  // corpus is the same as the one this device last wrote.
   const corpusTimerRef = useRef(null);
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -910,10 +950,16 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
           compareTo:   e.compareTo      || '',
           explanation: e.explanation    || '',
         }));
+        const sigKey = `${CORPUS_SIG_KEY}_${uid}`;
+        const sig = corpusSignature(JSON.stringify(corpusEntries));
+        let lastSig = null;
+        try { lastSig = localStorage.getItem(sigKey); } catch { /* no storage: write */ }
+        if (sig === lastSig) return;
         await setDoc(doc(db, 'users', uid, 'grammar_corpus', 'index'), {
           entries:   corpusEntries,
           updatedAt: new Date().toISOString(),
         });
+        try { localStorage.setItem(sigKey, sig); } catch { /* no storage */ }
       } catch (e) {
         console.error('GrammarIndex: corpus rebuild failed', e);
       }
@@ -1142,9 +1188,11 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
         } else {
           const newFloor  = MASTERY_FLOORS[newMastery] || 5;
           const oldFloor  = MASTERY_FLOORS[oldMastery] || 0;
-          const floorDate = new Date();
+          // T3: the floor is a logical day (it was a UTC date, a day early
+          // before 9 AM KST).
+          const floorDate = getLogicalToday(dsh);
           floorDate.setDate(floorDate.getDate() + newFloor);
-          const floorStr = floorDate.toISOString().split('T')[0];
+          const floorStr = toDateStr(floorDate);
 
           if (newFloor > oldFloor) {
             // Promotion: push nextDueDate out to the new floor only if it's currently sooner.
@@ -1161,7 +1209,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
         }
       }
     }
-  }, [entries, cardMap, syncCompareTo, updateCache, getCardNextDueDate, onCardNextDueDateChanged, updateCards]);
+  }, [entries, cardMap, syncCompareTo, updateCache, getCardNextDueDate, onCardNextDueDateChanged, updateCards, dsh]);
 
   // Link/unlink a content section to a grammar entry bidirectionally.
   // add=true links, add=false unlinks.
@@ -1191,12 +1239,35 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     const deletedTerm   = deleted?.glossaryTerm || '';
     const deletedNumber = deleted?.entryNumber  || 0;
 
-    try {
-      await deleteDoc(doc(db, 'users', uid, 'grammar_entries', entryId));
-      if (cardId) await deleteDoc(doc(db, 'users', uid, 'flashcards', cardId));
-    } catch (e) {
-      console.error('Delete entry failed:', e);
+    // S6: every write below is queued, so deleting never waits on the
+    // network. G2: the deleted card also leaves the in-memory cards, so it
+    // stops coming up in this session's Grammar Deck.
+    queueWrite(() => deleteDoc(doc(db, 'users', uid, 'grammar_entries', entryId)), 'Delete entry failed:');
+    if (cardId) {
+      queueWrite(() => deleteDoc(doc(db, 'users', uid, 'flashcards', cardId)), 'Delete card failed:');
+      updateCards?.(prev => (prev ? prev.filter(c => c.id !== cardId) : prev));
     }
+
+    // G2: the entry's id leaves every section, section-less source and note
+    // that links it (they kept it as a dead link).
+    // Found with array-contains, so links made on another device since this
+    // page loaded are covered too; the removals are queued (S6).
+    for (const [col, field] of [
+      ['content_sections', 'glossaryTermIds'],
+      ['content_sources',  'glossaryTermIds'],
+      ['notes',            'linkedGrammarIds'],
+    ]) {
+      getDocs(query(collection(db, 'users', uid, col), where(field, 'array-contains', entryId)))
+        .then(snap => snap.docs.forEach(d => queueWrite(
+          () => updateDoc(d.ref, { [field]: arrayRemove(entryId) }),
+          `Unlinking the deleted grammar entry from ${col}/${d.id} failed:`,
+        )))
+        .catch(e => console.error(`Grammar unlink lookup in ${col} failed`, e));
+    }
+    setSections(prev => prev.map(sec => (sec.glossaryTermIds || []).includes(entryId)
+      ? { ...sec, glossaryTermIds: sec.glossaryTermIds.filter(x => x !== entryId) } : sec));
+    setNotes(prev => prev.map(n => (n.linkedGrammarIds || []).includes(entryId)
+      ? { ...n, linkedGrammarIds: n.linkedGrammarIds.filter(x => x !== entryId) } : n));
 
     // Remove from local state first
     const remaining = entries.filter(e => e.id !== entryId);
@@ -1207,11 +1278,8 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       const hasRef = chips.some(c => c.toLowerCase().trim() === deletedTerm.toLowerCase().trim());
       if (hasRef) {
         const next = chips.filter(c => c.toLowerCase().trim() !== deletedTerm.toLowerCase().trim()).join(' | ');
-        try {
-          await updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { compareTo: next });
-        } catch (e) {
-          console.error('compareTo cleanup failed for', other.id, e);
-        }
+        queueWrite(() => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { compareTo: next }),
+          `compareTo cleanup failed for ${other.id}`);
       }
     }
 
@@ -1219,11 +1287,8 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     const toRenumber = remaining.filter(e => (e.entryNumber || 0) > deletedNumber);
     for (const other of toRenumber) {
       const newNum = (other.entryNumber || 0) - 1;
-      try {
-        await updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { entryNumber: newNum });
-      } catch (e) {
-        console.error('Renumber failed for', other.id, e);
-      }
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { entryNumber: newNum }),
+        `Renumber failed for ${other.id}`);
     }
 
     // Update local state all at once
@@ -1242,9 +1307,9 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       updateCache(next);
       return next;
     });
-    setCardMap(prev => { const next = { ...prev }; delete next[entryId]; return next; });
+    setCardMapEdits(prev => ({ ...prev, [entryId]: null }));
     setSelected(null); setPanelOpen(false);
-  }, [entries, updateCache]);
+  }, [entries, updateCache, updateCards]);
 
   const handleRename = useCallback(async (entryId, newTerm) => {
     const uid = auth.currentUser?.uid;
@@ -1283,40 +1348,62 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     }
   }, [entries, cardMap, updateCache, updateCards]);
 
+  // G1: a new entry's doc id must never be one already in use. Ids are
+  // `grammar_N`, but deleting an entry renumbers the entries after it without
+  // renaming their docs, so ids run ahead of entryNumber and "highest
+  // entryNumber + 1" can name an existing entry. The id now starts past every
+  // id in use (and every entryNumber), and each candidate is checked against
+  // Firestore before it is taken. entryNumber still follows the numbering.
+  const nextFreeEntryId = useCallback(async (uid, maxNum) => {
+    const maxIdNum = entries.reduce((m, e) => {
+      const hit = /^grammar_(\d+)$/.exec(e.id || '');
+      return hit ? Math.max(m, Number(hit[1])) : m;
+    }, 0);
+    let n = Math.max(maxIdNum, maxNum) + 1;
+    for (let tries = 0; tries < 50; tries++, n++) {
+      const snap = await getDoc(doc(db, 'users', uid, 'grammar_entries', `grammar_${n}`));
+      if (!snap.exists()) return `grammar_${n}`;
+    }
+    // Fifty taken ids in a row would be very odd; fall back to a random id.
+    return doc(collection(db, 'users', uid, 'grammar_entries')).id;
+  }, [entries]);
+
   const handleCreate = useCallback(async (fields) => {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     const maxNum      = entries.reduce((m, e) => Math.max(m, e.entryNumber || 0), 0);
     const entryNumber = maxNum + 1;
-    const entryId     = `grammar_${entryNumber}`;
-    await updateDoc(doc(db, 'users', uid, 'grammar_entries', entryId), {
-      ...fields, entryNumber, createdAt: new Date().toISOString(),
-    }).catch(async () => {
-      const { setDoc } = await import('firebase/firestore');
-      await setDoc(doc(db, 'users', uid, 'grammar_entries', entryId), {
-        ...fields, entryNumber, createdAt: new Date().toISOString(),
-      });
+    const entryId     = await nextFreeEntryId(uid, maxNum);
+    const now         = new Date().toISOString();
+    // setDoc on an id confirmed free above — never updateDoc, which would
+    // write onto an existing entry if the id were taken.
+    await setDoc(doc(db, 'users', uid, 'grammar_entries', entryId), {
+      ...fields, entryNumber, createdAt: now,
     });
-    const cardRef = await addDoc(collection(db, 'users', uid, 'flashcards'), {
+    const cardData = {
       type: 'grammar', front: fields.glossaryTerm, back: fields.compareTo || '', notes: '',
       deckIds: [GRAMMAR_DECK_ID], linkedGrammarEntryId: entryId, linkedAVILemmaId: null,
       easeFactor: 2.5, interval: 1, repetitions: 0,
       nextDueDate: null, // Set only after the card's first review in the Grammar Deck session.
       lastGrade: null, lastReviewed: null, gapEvents: [],
-      triageBucket: null, lastTriageDate: null, createdAt: new Date().toISOString(),
-    });
-    const newEntry = { id: entryId, ...fields, entryNumber, createdAt: new Date().toISOString() };
+      triageBucket: null, lastTriageDate: null, createdAt: now,
+    };
+    const cardRef = await addDoc(collection(db, 'users', uid, 'flashcards'), cardData);
+    // G2 (create half): the new card joins the in-memory deck now, so it is
+    // in the Grammar Deck without waiting for the next refresh or reload.
+    updateCards?.(prev => (prev ? [...prev, { id: cardRef.id, ...cardData }] : prev));
+    const newEntry = { id: entryId, ...fields, entryNumber, createdAt: now };
     setEntries(prev => {
       const next = [...prev, newEntry].sort((a, b) => (a.entryNumber || 0) - (b.entryNumber || 0));
       updateCache(next);
       return next;
     });
-    setCardMap(prev => ({ ...prev, [entryId]: cardRef.id }));
+    setCardMapEdits(prev => ({ ...prev, [entryId]: cardRef.id }));
     setShowNewForm(false);
     setSelected(newEntry);
     setPanelOpen(true);
-  }, [entries, updateCache]);
+  }, [entries, updateCache, updateCards, nextFreeEntryId]);
 
   // Add question: create a question-tagged note linked to this grammar entry
   const handleAddQuestion = useCallback(async (entry) => {

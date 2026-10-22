@@ -1,9 +1,9 @@
 // src/utils/fsrs.js
 // FSRS-5 spaced repetition algorithm.
 // Reference weights: open-spaced-repetition/fsrs5 (published defaults).
-// Replaces sm2.js — update every import that references sm2.js to point here.
+// Replaced sm2.js (removed, bug sweep P3).
 
-import { getLogicalDateStr } from './dateUtils.js';
+import { getLogicalDateStr, getLogicalToday, toDateStr } from './dateUtils.js';
 
 // ── Published FSRS-5 default weights (w0–w18) ─────────────────
 const W = [
@@ -175,32 +175,46 @@ export function triageBucket(card) {
   }
 }
 
-export function compressInterval(card) {
+// ── Logical-day due dates (bug sweep T1) ──────────────────────
+// A due date is a logical day: the day-start hour (dsh) decides which day
+// "today" is, exactly as isDueToday reads it. Counting from the wall-clock
+// date instead put every review done between midnight and dsh one day late
+// (1:30 AM on Oct 21 is still Oct 20; interval 1 must land on Oct 21).
+// Returns local midnight of (logical today + days), as an ISO timestamp.
+export function logicalDueISO(days, dsh = 3) {
+  const d = getLogicalToday(dsh);
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+}
+
+// Backlog triage deferral for an overdue "defer" card: push it out without a
+// review. T9: only the due date moves — same spacing as
+// before (70% of the stability or interval, less below 30 days) — and the
+// stability / interval is left alone; FSRS already accounts for lateness
+// when the card is next reviewed. T1/T3: dates are logical days.
+export function compressInterval(card, dsh = 3) {
+  const today  = toDateStr(getLogicalToday(dsh));
   const isFSRS = !!card.stability;
   if (isFSRS) {
     const s     = card.stability || 1;
     const ratio = Math.min(1, s / 30);
-    const newS  = Math.max(1, parseFloat((s * ratio * 0.7).toFixed(4)));
-    const next  = new Date();
-    next.setDate(next.getDate() + Math.round(newS));
+    const days  = Math.max(1, Math.round(s * ratio * 0.7));
     return {
-      stability:      newS,
-      due:            next.toISOString(),
+      due:            logicalDueISO(days, dsh),
       triageBucket:   'defer',
-      lastTriageDate: new Date().toISOString().split('T')[0],
+      lastTriageDate: today,
     };
   } else {
     // SM-2 legacy
     const iv    = card.interval || 1;
     const ratio = Math.min(1, iv / 30);
-    const newIv = Math.max(1, Math.round(iv * ratio * 0.7));
-    const next  = new Date();
-    next.setDate(next.getDate() + newIv);
+    const days  = Math.max(1, Math.round(iv * ratio * 0.7));
+    const next  = getLogicalToday(dsh);
+    next.setDate(next.getDate() + days);
     return {
-      interval:       newIv,
-      nextDueDate:    next.toISOString().split('T')[0],
+      nextDueDate:    toDateStr(next),
       triageBucket:   'defer',
-      lastTriageDate: new Date().toISOString().split('T')[0],
+      lastTriageDate: today,
     };
   }
 }
@@ -211,10 +225,12 @@ export function compressInterval(card) {
 // rating   — AGAIN | HARD | GOOD | EASY
 // settings — from data.settings.fsrs (falls back to FSRS_DEFAULTS for each key)
 //
+// dsh      — day-start hour; the next due date counts from the logical day (T1)
+//
 // Returns a plain object of updated fields to write to Firestore.
 // Never mutates the input card.
 
-export function fsrsGrade(card, rating, settings = {}) {
+export function fsrsGrade(card, rating, settings = {}, dsh = 3) {
   const {
     desiredRetention   = FSRS_DEFAULTS.desiredRetention,
     maximumInterval    = FSRS_DEFAULTS.maximumInterval,
@@ -295,10 +311,7 @@ export function fsrsGrade(card, rating, settings = {}) {
     // card is resolved, it surfaces at the very start of the next session.
     due = new Date(now.getTime() - 1000).toISOString();
   } else {
-    const d = new Date(now);
-    d.setDate(d.getDate() + intervalDays);
-    d.setHours(0, 0, 0, 0);
-    due = d.toISOString();
+    due = logicalDueISO(intervalDays, dsh);
   }
 
   return {

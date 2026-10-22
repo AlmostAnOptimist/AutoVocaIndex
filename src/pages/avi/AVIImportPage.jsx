@@ -17,6 +17,7 @@ import {
 import { prewarmTtsAudio } from '../../utils/ttsUtils.js';
 import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
 import { DEMO } from '../../demo/demoConfig.js';
+import { setWordSkip, isSkippedInSource } from '../../utils/wordSkip.js';
 import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
 import { makeUpdateRow } from '../../utils/wordRowUpdater.js';
@@ -24,12 +25,13 @@ import { buildLemmaIndex, buildSurfaceMap } from '../../utils/lemmaSearchEngine.
 import { lemmaChoicesForTerm, findLemmaEntryAny, canonicalLemma, otherReadings } from '../../utils/lemmaSuggest.js';
 import { LemmaChoiceChips } from '../../components/avi/SearchAssist.jsx';
 import {
-  segmentSentences, segmentWords, segmentWordsDetailed, chunkItems, IMPORT_LIMITS,
+  segmentSentences, segmentWordsDetailed, chunkItems, IMPORT_LIMITS,
   buildImportPlan, buildCommitRows,
   stripSubtitleMarkup, detectUploadKind,
 } from '../../utils/importEngine.js';
 import { openEpub } from '../../utils/epubUtils.js';
 import { ProgressBar } from '../../components/ProgressBar.jsx';
+import { updateAviIfOpen, saveDef1WhileClosed } from '../../hooks/useAVIData.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -248,7 +250,8 @@ export function AVIImportPage({
 
   // Auto-TTS is a convenience queue — navigating away cancels the
   // remainder (audio stays fetchable on demand). The Def1 queue is data
-  // and deliberately survives navigation.
+  // and deliberately survives navigation; its results reach the AVI page
+  // that's open, or Firestore while AVI is closed (S8).
   React.useEffect(() => () => { ttsCancelRef.current = true; }, []);
 
   // ── File upload (Stages 9.5/9.6) ─────────────────────────────
@@ -296,24 +299,17 @@ export function AVIImportPage({
     return hit;
   };
 
-  // Skip in the Fill-Def2 modal carries to the sentence rows this import
-  // created for the same term (both directions), so a skipped word doesn't
-  // leave its sentence queued for a card. Sentence cards already created at
-  // commit (the lemma had defs then) are left as they are.
+  // Skip in the Fill-Def2 modal works the same as on Word Input: the
+  // word's rows and sentence rows in this source follow, an existing card
+  // can be removed, and unskipping restores cards (utils/wordSkip.js).
+  const skipCtx = useRef(null);
+  skipCtx.current = { data, updateData, cards, decks, uid, updateCards, updateDecks, aviSources, dsh, showAVIToast };
   const toggleSkip = useCallback((rowUid, val) => {
-    const linked = new Set(summary?.sentencesByWord?.[rowUid] || []);
-    updateData(prev => ({
-      ...prev,
-      wordInputs: prev.wordInputs.map(w =>
-        w.uid === rowUid ? { ...w, skipUpload: val } : w
-      ),
-      ...(linked.size ? {
-        sentenceInputs: prev.sentenceInputs.map(s =>
-          linked.has(s.uid) ? { ...s, skipUpload: val } : s
-        ),
-      } : {}),
-    }));
-  }, [updateData, summary]);
+    const ctx = skipCtx.current;
+    const row = (ctx.data.wordInputs || []).find(w => w.uid === rowUid);
+    setWordSkip({ ...ctx, row, val })
+      .catch(e => console.error('Import: skip update failed', e));
+  }, []);
 
   // ── Step 1: parse ────────────────────────────────────────────
   const handleParse = () => {
@@ -605,7 +601,11 @@ export function AVIImportPage({
       if (def1) {
         const normL = normalizeLemma(g.lemma);
         const uidSet = new Set(g.uids);
-        updateData(prev => ({
+        // S8: through whichever AVI page is open now (this one, or one
+        // opened again after leaving), else straight to Firestore. Before,
+        // a result that arrived after leaving AVI went to the closed page
+        // and was lost.
+        const applied = updateAviIfOpen(prev => ({
           ...prev,
           wordInputs: prev.wordInputs.map(w =>
             (uidSet.has(w.uid) && !w.def1) ? { ...w, def1 } : w
@@ -616,6 +616,10 @@ export function AVIImportPage({
               : l
           ),
         }));
+        if (!applied) {
+          saveDef1WhileClosed({ rowUids: g.uids, lemmaNorm: normL, def1 })
+            .catch(e => console.error('S8: background definition not saved', e));
+        }
       }
       done += 1;
       setDefProgress({ done, total: groups.length, stopped: false, missed });
@@ -672,6 +676,7 @@ export function AVIImportPage({
         includeKnownSentences: mode === 'sentence' && !!data.aviSettings?.importKnownSentences,
         // L4d: lemmas typed in review still find 입사(하다)-style entries.
         findEntry: (text) => findLemmaEntryAny(data.lemmaMaster || [], text),
+        isSkipped: (lemma) => isSkippedInSource(data.wordInputs || [], currentSource, lemma),
       });
 
       updateData(prev => ({
@@ -695,10 +700,10 @@ export function AVIImportPage({
       // the same def2/cardBack conditions as live staging.
       const mergedLM = [...(data.lemmaMaster || []), ...newLemmas];
       for (const wi of newWordInputs) {
-        if (wi.def2) {
+        if (wi.def2 && !wi.skipUpload) {
           autoCreateWordCard({
             entry: wi, lemmaMaster: mergedLM,
-            cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+            cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6: cards feed the duplicate guard
           }).then(() => {
             updateData(prev => ({
               ...prev,
@@ -713,7 +718,7 @@ export function AVIImportPage({
         if (row.cardBack && !row.skipUpload) {
           autoCreateSentenceCard({
             entry: row, lemmaMaster: mergedLM,
-            cards, decks, uid, updateCards, updateDecks, aviSources, dsh,
+            cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
           }).then(() => {
             updateData(prev => ({
               ...prev,
@@ -733,12 +738,6 @@ export function AVIImportPage({
         skippedKnown: review.knownTerms.length,
         remainder: parsed?.remainder?.length || 0,
         committedUids: newWordInputs.map(w => w.uid),
-        // word row uid → the sentence rows committed for the same term, so
-        // the Fill-Def2 modal's Skip can carry over to them.
-        sentencesByWord: Object.fromEntries(newWordInputs.map(w => [
-          w.uid,
-          newSentenceRows.filter(s => s.targetWord === w.lemma).map(s => s.uid),
-        ])),
       });
       setStep('done');
       fetchDefsInBackground(newWordInputs);

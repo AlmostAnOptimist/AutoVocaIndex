@@ -17,7 +17,6 @@ function fmtTime(t) {
 
 export function TaskItem({ task, onToggle, onEdit, dsh, soundProfile, dragHandlers }) {
   const { C, S } = useAppTheme();
-  const d = parseDate(task.date);
   // Overdue keys off the LAST due date (multi-date model); identical to d
   // for single-date tasks.
   const last = parseDate(taskLastDate(task));
@@ -34,6 +33,9 @@ export function TaskItem({ task, onToggle, onEdit, dsh, soundProfile, dragHandle
     : task._dateOcc ? task.date
     : taskDates.includes(todayStr) ? todayStr
     : taskLastDate(task);
+  // N7: the date label shows this row's date (a later day of a multi-date
+  // task showed the first date).
+  const d = parseDate(rowDate);
   const rowIsLast  = !isMulti || isLastDate(task, rowDate);
   const rowChecked = rowIsLast ? !!task.completed : isDateDone(task, rowDate);
   const catLabel = CATEGORIES.find(c => c.id === task.category)?.label || task.category;

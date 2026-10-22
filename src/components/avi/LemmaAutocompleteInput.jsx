@@ -6,6 +6,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { normalizeLemma } from '../../utils/aviUtils.js';
 import { SH } from '../../theme/buildStyles.js';
+import { isSubmitEnter } from '../../utils/keyUtils.js';
 
 // ── Substring matching ────────────────────────────────────────
 // Returns all lemmas containing `query` as a substring (min 2 chars).
@@ -154,7 +155,7 @@ export function LemmaAutocompleteInput({
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActiveIdx(i => Math.max(i - 1, 0));
-    } else if (e.key === 'Enter' && activeIdx >= 0) {
+    } else if (isSubmitEnter(e) && activeIdx >= 0) {
       e.preventDefault();
       handleSelect(matches[activeIdx]);
     } else if (e.key === 'Escape') {

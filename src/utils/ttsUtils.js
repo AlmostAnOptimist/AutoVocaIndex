@@ -45,24 +45,33 @@ export async function prewarmTtsAudio(text) {
 // ── Card-type generators ──────────────────────────────────────
 // All are called fire-and-forget after card creation (no await at call site).
 
-export async function generateVocabCardAudio({ lemma, cardId, uid }) {
+// A8: onComplete(updates), if given, runs once the audio is saved, so the
+// caller can put it on the in-memory card (cards load once per day, so a
+// card made today otherwise had no audio button until a reload). It runs
+// as soon as the URL is known: offline, the Firestore write settles only
+// when the connection is back, but it is already kept on the device.
+export async function generateVocabCardAudio({ lemma, cardId, uid, onComplete }) {
   if (!lemma?.trim() || !cardId || !uid) return;
   try {
     const audioUrl = await fetchAudioUrl(sayLemma(lemma));
-    await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { audioUrl });
+    const write = updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { audioUrl });
+    onComplete?.({ audioUrl });
+    await write;
   } catch (err) {
     console.error('generateVocabCardAudio failed:', err);
   }
 }
 
-export async function generateSentenceCardAudio({ lemma, sentence, cardId, uid }) {
+export async function generateSentenceCardAudio({ lemma, sentence, cardId, uid, onComplete }) {
   if (!cardId || !uid) return;
   try {
     const updates = {};
     if (lemma?.trim())    updates.audioUrl         = await fetchAudioUrl(sayLemma(lemma));
     if (sentence?.trim()) updates.sentenceAudioUrl = await fetchAudioUrl(sentence);
     if (Object.keys(updates).length > 0) {
-      await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), updates);
+      const write = updateDoc(doc(db, 'users', uid, 'flashcards', cardId), updates);
+      onComplete?.(updates);
+      await write;
     }
   } catch (err) {
     console.error('generateSentenceCardAudio failed:', err);
@@ -114,6 +123,51 @@ export async function regenerateLemmaAudio({ card, uid }) {
   } catch (err) {
     console.error('regenerateLemmaAudio failed:', err);
     return null;
+  }
+}
+
+// ── A8: does a card's word audio say its word? ────────────────
+// generate-tts stores each clip as tts/<first 16 hex of sha256(text)>.mp3,
+// so the file name tells which text it was made from. Returns true when it
+// matches the word's spoken form, false when it doesn't, null when it can't
+// tell (no audio, or no Web Crypto).
+async function ttsFileKey(text) {
+  const t = String(text || '').trim();
+  if (!t || typeof crypto === 'undefined' || !crypto.subtle) return null;
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+}
+
+export async function wordAudioMatches(card) {
+  const word = card?.type === 'sentence' ? card?.lemma : card?.front;
+  if (!card?.audioUrl || !word?.trim()) return null;
+  const key = await ttsFileKey(sayLemma(word));
+  if (!key) return null;
+  const m = /\/tts\/([0-9a-f]+)\.mp3/.exec(card.audioUrl);
+  return m ? m[1] === key : null;
+}
+
+// A8: after cards are renamed, their word audio is re-recorded for the new
+// word (Lemma Master rename, Word Input correction, merge, sentence
+// retarget all rename through updateLinkedCards). Only cards whose spoken
+// word actually changed are touched; the in-memory cards follow.
+export async function refreshRenamedCardAudio({ cards, uid, updateCards }) {
+  if (!uid) return;
+  for (const card of cards || []) {
+    if (!card?.id || card.type === 'grammar') continue;
+    const word = card.type === 'sentence' ? card.lemma : card.front;
+    if (!word?.trim()) continue;
+    try {
+      const audioUrl = await fetchAudioUrl(sayLemma(word));
+      if (audioUrl === card.audioUrl) continue;
+      const write = updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { audioUrl });
+      if (updateCards) {
+        updateCards(prev => (prev ? prev.map(c => (c.id === card.id ? { ...c, audioUrl } : c)) : prev));
+      }
+      await write;
+    } catch (err) {
+      console.error('refreshRenamedCardAudio failed:', card.id, err);
+    }
   }
 }
 
@@ -190,11 +244,19 @@ export function playCardAudio(card, ttsSpeed = 0.9) {
 // onProgress(done, total) fires after each card.
 // Pass an AbortSignal via `signal` to support cancellation.
 
+// A card the backfill would generate audio for: a grammar card with example
+// sentences and no example audio; any other card without audioUrl. Settings'
+// "N cards missing audio" uses the same rule (bug sweep N7: it still read
+// grammar examples from the old `notes` field and grammar audio from
+// audioUrl, so its count disagreed with what the backfill would do).
+export function cardNeedsAudio(c) {
+  if (!c) return false;
+  if (c.type === 'grammar') return !c.exampleAudio?.length && !!c.examples?.trim();
+  return !c.audioUrl;
+}
+
 export async function backfillCardAudio({ cards, uid, onProgress, signal }) {
-  const eligible = (cards || []).filter(c => {
-    if (c.type === 'grammar') return !c.exampleAudio?.length && !!c.examples?.trim();
-    return !c.audioUrl;
-  });
+  const eligible = (cards || []).filter(cardNeedsAudio);
 
   const total = eligible.length;
   let done = 0;

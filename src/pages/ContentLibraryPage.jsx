@@ -8,13 +8,13 @@ import { Icons } from '../components/Icons.jsx';
 import { DatePicker } from '../components/DatePicker.jsx';
 import { playSound } from '../utils/soundEngine.js';
 import { toDateStr, getLogicalToday, getLogicalDateStr } from '../utils/dateUtils.js';
-import { fmtApptDate, fmtTime } from '../components/AppointmentModal.jsx';
 import { NotesPage } from './NotesPage.jsx';
 import { ContentLibraryGazette } from '../components/ContentLibraryGazette.jsx';
 import { decoDividerSrc, decoBlockStyle } from '../utils/decoAssets.js';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
-import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded, stripHtml } from '../utils/contentUtils.js';
+import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded } from '../utils/contentUtils.js';
 import { DEMO } from '../demo/demoConfig.js';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 
 // ── Family grouping (D1) ──────────────────────────────────────
 const FAMILY_ORDER    = ['grammar', 'reading', 'listening', 'reference'];
@@ -143,10 +143,10 @@ function EditableTitle({ value, url, onSave, style }) {
     return (
       <div onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', gap: '5px', flex: 1 }}>
         <input ref={inputRef} value={draftTitle} onChange={e => setDraftTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') save(e); if (e.key === 'Escape') close(e); }}
+          onKeyDown={e => { if (isSubmitEnter(e)) save(e); if (e.key === 'Escape') close(e); }}
           style={{ fontSize: style?.fontSize || '13px', fontWeight: style?.fontWeight, padding: '2px 6px', borderRadius: '6px', border: `1px solid ${C.accent}`, background: C.bg, color: C.text, outline: 'none', width: '100%' }} placeholder="Title…" />
         <input value={draftUrl} onChange={e => setDraftUrl(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') save(e); if (e.key === 'Escape') close(e); }}
+          onKeyDown={e => { if (isSubmitEnter(e)) save(e); if (e.key === 'Escape') close(e); }}
           style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '6px', border: `1px solid ${C.border}`, background: C.bg, color: C.textM, outline: 'none', width: '100%' }} placeholder="URL (optional)…" />
         <div style={{ display: 'flex', gap: '6px' }}>
           <button onMouseDown={save} style={{ ...S.btnPrimary, fontSize: '11px', padding: '2px 10px', borderRadius: '6px' }}>Save</button>
@@ -615,7 +615,7 @@ function EditableOrigin({ value, onSave, placeholder, C }) {
     return (
       <div onClick={e => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
         <input ref={inputRef} value={draft} onChange={e => setDraft(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') commit(e); if (e.key === 'Escape') cancel(e); }} onBlur={commit}
+          onKeyDown={e => { if (isSubmitEnter(e)) commit(e); if (e.key === 'Escape') cancel(e); }} onBlur={commit}
           style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '6px', width: '120px', border: `1px solid ${C.accent}`, background: C.bg, color: C.textM, outline: 'none' }}
           placeholder={placeholder || 'Origin…'} />
       </div>
@@ -739,7 +739,7 @@ function FamilyHeader({ family }) {
 // ── Source detail panel ────────────────────────────────────────
 function SourceDetailPanel({
   source, sections, grammarEntries, allNotes, correctionSessions,
-  aviWordCounts, aviSentenceCounts, aviWordSectionCounts, aviSentSectionCounts, tasks, allSources,
+  aviWordSectionCounts, aviSentSectionCounts, tasks, allSources,
   onNavigateToGrammar, onNavigateToNote, onNavigateToCorrection,
   onSectionToggle, onSectionTitleSave, onSourceTitleSave, onSourceFieldSave,
   onScheduleSection, onCycleStatus, onSectionFieldSave, onSectionOrderSave,
@@ -968,7 +968,7 @@ function SourceDetailPanel({
                 style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '6px', width: '130px', border: `1px solid ${C.accent}`, background: C.bg, color: C.textM, outline: 'none' }}
                 placeholder="series name…"
                 onKeyDown={e => {
-                  if (e.key === 'Enter' && e.target.value.trim()) { onSourceFieldSave(source, { series: e.target.value.trim() }); setAddingToSeries(false); }
+                  if (isSubmitEnter(e) && e.target.value.trim()) { onSourceFieldSave(source, { series: e.target.value.trim() }); setAddingToSeries(false); }
                   if (e.key === 'Escape') setAddingToSeries(false);
                 }}
                 onBlur={e => { if (!e.target.value.trim()) setAddingToSeries(false); }} />
@@ -1219,7 +1219,7 @@ function SourceDetailPanel({
                 <input autoFocus type="number" min="1" max="999"
                   style={{ ...S.formInput, fontSize: '12px', margin: 0, padding: '4px 8px' }}
                   value={addSecCount} onChange={e => setAddSecCount(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') handleAddSecs(); if (e.key === 'Escape') setAddSecOpen(false); }} />
+                  onKeyDown={e => { if (isSubmitEnter(e)) handleAddSecs(); if (e.key === 'Escape') setAddSecOpen(false); }} />
               </div>
               <button onClick={handleAddSecs} disabled={!parseInt(addSecCount) || addSecSaving}
                 style={{ ...S.btnPrimary, fontSize: '12px', padding: '4px 14px', height: '30px', opacity: (!parseInt(addSecCount) || addSecSaving) ? 0.5 : 1 }}>
@@ -1459,7 +1459,7 @@ function AddSourceModal({ onSave, onClose, C, S }) {
         <div style={S.formGroup}>
           <label style={S.formLabel}>Title *</label>
           <input style={S.formInput} value={title} autoFocus onChange={e => setTitle(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSave()}
+            onKeyDown={e => isSubmitEnter(e) && handleSave()}
             placeholder="e.g. HTSK Unit 1, KSI 5A…" />
         </div>
 
@@ -1588,7 +1588,7 @@ function QuickQuestionModal({ onSave, onClose, C, S }) {
             style={S.formInput}
             value={title}
             onChange={e => setTitle(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && canSave) handleSave(); if (e.key === 'Escape') onClose(); }}
+            onKeyDown={e => { if (isSubmitEnter(e) && canSave) handleSave(); if (e.key === 'Escape') onClose(); }}
             placeholder="Q: what does X mean…"
           />
         </div>
@@ -1600,426 +1600,6 @@ function QuickQuestionModal({ onSave, onClose, C, S }) {
           <button style={{ ...S.btnPrimary, ...S.btnMetallic, opacity: canSave ? 1 : 0.6 }} onClick={() => handleSave('notes')} disabled={!canSave}>
             {saving ? 'Saving…' : 'Notes'}
           </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Passive-media sources excluded from Overview and auto-archive unless intent is mining
-
-// ── Content Library Overview tab ──────────────────────────────
-function CLOverviewTab({
-  sources, sections, sectionsBySource,
-  allNotes, correctionSessions,
-  grammarEntries, grammarMasteryCounts,
-  appointments, cards, decks,
-  adriftDays, dsh,
-  onNavigateToSource,
-}) {
-  const { C } = useAppTheme();
-  const [queueOpen,   setQueueOpen]   = useState(false);
-  const [tierShown,   setTierShown]   = useState({ grammar: 2, mining: 2, casual: 2 });
-  const [carouselIdx, setCarouselIdx] = useState(0);
-
-  const CEFR    = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
-  const cefrIdx = (level) => CEFR.indexOf(level);
-
-  // ── Date math ──────────────────────────────────────────────
-  const logicalToday = useMemo(() => getLogicalToday(dsh), [dsh]);
-  const todayStr     = useMemo(() => toDateStr(logicalToday), [logicalToday]);
-  const todayMs      = useMemo(() => logicalToday.getTime(), [logicalToday]);
-  const adriftMs     = (adriftDays ?? 14) * 86400000;
-
-  const fmtDaysAgo = (iso) => {
-    if (!iso) return '';
-    const days = Math.floor((todayMs - new Date(iso).getTime()) / 86400000);
-    if (days === 0) return 'today';
-    if (days === 1) return 'yesterday';
-    return `${days} days ago`;
-  };
-
-  // ── Source classification ───────────────────────────────────
-  const isComplete = useCallback((src) => {
-    if (src.archived || src.pendingArchive) return true;
-    const st = getSourceStatus(src);
-    if (st === 'Done') return true;
-    const secs = sectionsBySource[src.id] || [];
-    if (!secs.length) return st === 'Skip';
-    return secs.every(s => s.status === 'Done' || s.status === 'Skip');
-  }, [sectionsBySource]);
-
-  const isActive = useCallback((src) => {
-    if (isComplete(src)) return false;
-    const st = getSourceStatus(src);
-    if (st === 'In Progress' || st === 'Scheduled') return true;
-    return (sectionsBySource[src.id] || []).some(s =>
-      s.status === 'In Progress' || s.status === 'Scheduled' || s.status === 'Done'
-    );
-  }, [sectionsBySource, isComplete]);
-
-  const isAdrift = useCallback((src) => {
-    if (isActive(src) || isComplete(src)) return false;
-    if (!src.lastActivityAt) return false;
-    return (todayMs - new Date(src.lastActivityAt).getTime()) > adriftMs;
-  }, [isActive, isComplete, todayMs, adriftMs]);
-
-  const activeSources = useMemo(() => sources.filter(s => isActive(s) && !isPassiveMediaExcluded(s)),  [sources, isActive]);
-  const adriftSources = useMemo(() => sources.filter(s => isAdrift(s) && !isPassiveMediaExcluded(s)), [sources, isAdrift]);
-
-  // ── Active CEFR range for Queue sort ───────────────────────
-  const activeRange = useMemo(() => {
-    const pool = activeSources.length ? activeSources : adriftSources;
-    let min = Infinity, max = -Infinity;
-    pool.forEach(src => {
-      const lo = cefrIdx(src.levelMin);
-      const hi = cefrIdx(src.levelMax ?? src.levelMin);
-      if (lo >= 0) min = Math.min(min, lo);
-      if (hi >= 0) max = Math.max(max, hi);
-    });
-    return (min <= max && isFinite(min)) ? { min, max } : null;
-  }, [activeSources, adriftSources]);
-
-  // ── Queue ───────────────────────────────────────────────────
-  const queueByTier = useMemo(() => {
-    const notQueue = (s) => isActive(s) || isAdrift(s) || isComplete(s);
-
-    const candidates = sources.filter(s =>
-      !notQueue(s) && !isPassiveMediaExcluded(s)
-    ).map(src => {
-      const totalSections = (sectionsBySource[src.id] || []).length;
-      // Series gate: hide if a lower-order sibling is also in candidates
-      const seriesBlocked = src.series && src.seriesOrder != null &&
-        sources.some(o =>
-          o.id !== src.id && o.series === src.series &&
-          o.seriesOrder != null && parseFloat(o.seriesOrder) < parseFloat(src.seriesOrder) &&
-          !notQueue(o)
-        );
-      if (seriesBlocked) return null;
-      // Faded if lower-order sibling is Active/Adrift
-      const waiting = src.series && src.seriesOrder != null &&
-        [...activeSources, ...adriftSources].some(o =>
-          o.series === src.series && o.seriesOrder != null &&
-          parseFloat(o.seriesOrder) < parseFloat(src.seriesOrder)
-        );
-      // CEFR distance sort key
-      const lo = cefrIdx(src.levelMin);
-      const hi = cefrIdx(src.levelMax ?? src.levelMin);
-      let bucket = 2, dist = 0, exactMatch = false;
-      if (lo >= 0 && hi >= 0) {
-        bucket = 0;
-        if (!activeRange) {
-          dist = lo;
-        } else if (lo >= activeRange.min && hi <= activeRange.max) {
-          dist = 0; exactMatch = true;
-        } else if (hi < activeRange.min) {
-          dist = activeRange.min - hi;
-        } else if (lo > activeRange.max) {
-          dist = lo - activeRange.max;
-        }
-        // overlapping-but-extending case: dist stays 0, no outline
-      }
-      return { ...src, _total: totalSections, _waiting: waiting, _exact: exactMatch, _key: [bucket, dist, totalSections] };
-    }).filter(Boolean);
-
-    // Grammar:Practice sources are sub-items; exclude from standalone list
-    const practiceIds = new Set(
-      candidates.filter(s => s.type === 'Grammar').flatMap(s => s.linkedPracticeSourceIds || [])
-    );
-
-    const sortFn = (a, b) => {
-      for (let i = 0; i < 3; i++) if (a._key[i] !== b._key[i]) return a._key[i] - b._key[i];
-      return 0;
-    };
-
-    const tiers = { grammar: [], mining: [], casual: [] };
-    candidates.forEach(src => {
-      const tier = src.studyIntent; // 'grammar'|'mining'|'casual'
-      if (!tier || !tiers[tier] || practiceIds.has(src.id)) return;
-      tiers[tier].push({
-        ...src,
-        _practiceItems: (src.linkedPracticeSourceIds || [])
-          .map(id => candidates.find(c => c.id === id))
-          .filter(Boolean),
-      });
-    });
-    Object.keys(tiers).forEach(k => tiers[k].sort(sortFn));
-    return tiers;
-  }, [sources, sectionsBySource, isActive, isAdrift, isComplete, activeSources, adriftSources, activeRange]);
-
-  // ── Grammar recent reviews ──────────────────────────────────
-  const recentGrammarReviews = useMemo(() => (cards || [])
-    .filter(c => c.type === 'grammar' && (c.lastReview || c.lastReviewed))
-    .sort((a, b) => (b.lastReview || b.lastReviewed).localeCompare(a.lastReview || a.lastReviewed))
-    .slice(0, 3)
-    .map(c => {
-      const entry = grammarEntries.find(e => e.id === c.linkedGrammarEntryId);
-      const ml    = ['introduced', 'practicing', 'confident', 'mastered'].indexOf(entry?.masteryLevel || 'introduced');
-      // Compute the logical review date respecting the day-flip hour.
-      const rd = new Date(c.lastReview || c.lastReviewed);
-      if (rd.getHours() < dsh) rd.setDate(rd.getDate() - 1);
-      return {
-        entry,
-        masteryLevel: ml === -1 ? 0 : ml,
-        reviewDate:   rd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      };
-    })
-    .filter(r => r.entry),
-    [cards, grammarEntries, dsh]
-  );
-
-  // ── Recent 한국어 appointment ────────────────────────────────
-  const recentLangAppt = useMemo(() =>
-    (appointments || [])
-      .filter(a => a.category === 'lang' && a.date < todayStr)
-      .sort((a, b) => b.date.localeCompare(a.date))[0] || null,
-    [appointments, todayStr]
-  );
-
-  // ── Open questions ──────────────────────────────────────────
-  const openQuestions = useMemo(() =>
-    allNotes
-      .filter(n => (n.tags || []).includes('question') && !n.answered)
-      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')),
-    [allNotes]
-  );
-
-  // ── Notes carousel (8 most recent, questions excluded) ──────
-  const carouselNotes = useMemo(() =>
-    [...allNotes.filter(n => !(n.tags || []).includes('question')), ...correctionSessions]
-      .sort((a, b) => (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''))
-      .slice(0, 8),
-    [allNotes, correctionSessions]
-  );
-
-  const carouselNote    = carouselNotes[carouselIdx] || null;
-  const carouselPreview = carouselNote
-    ? carouselNote.type === 'correction'
-      ? ((carouselNote.rows || []).map(r => r.topic).filter(Boolean).join(', ') || stripHtml(carouselNote.bodyHtml).slice(0, 500))
-      : stripHtml(carouselNote.bodyHtml).slice(0, 500)
-    : '';
-
-  const MASTERY_COLORS = ['#888', '#e0a030', '#c97d3a', '#5ba05b', '#2a8fb0', '#7b6cf6'];
-
-  // ── Shared Active/Adrift card renderer ─────────────────────
-  const renderSourceCard = (src) => {
-    const secs   = sectionsBySource[src.id] || [];
-    const done   = secs.filter(s => s.status === 'Done').length;
-    const active = secs.filter(s => s.status !== 'Skip').length;
-    const skip   = secs.filter(s => s.status === 'Skip').length;
-    const noSecs = !secs.length;
-    const col    = typeColor(src.type);
-    const level  = src.levelMin
-      ? (src.levelMax && src.levelMax !== src.levelMin ? `${src.levelMin}–${src.levelMax}` : src.levelMin)
-      : null;
-    return (
-      <div key={src.id} onClick={() => onNavigateToSource('library', src.id)}
-        style={{ padding: '10px 12px', borderRadius: '10px', border: `1px solid ${C.border}`, background: C.raised, cursor: 'pointer', marginBottom: '8px' }}
-        className="task-row">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
-          {level && <span style={{ fontSize: '10px', color: C.textM, flexShrink: 0 }}>{level}</span>}
-          <span style={{ fontSize: '13px', fontWeight: 500, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{src.title}</span>
-        </div>
-        {!noSecs && <div style={{ marginBottom: '5px' }}><ProgressBar done={done} total={active} skipped={skip} realTotal={secs.length} color={col} soundProfile={null} /></div>}
-        <div style={{ fontSize: '11px', color: C.textM }}>
-          {noSecs ? getSourceStatus(src) : `${done} of ${active} done`}
-          {src.lastActivityAt ? ` · ${fmtDaysAgo(src.lastActivityAt)}` : ''}
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '4px 0 28px' }}>
-
-      {/* ── Band 1: Grammar + Appointment | Goals ─────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-
-        {/* Left brace: grammar + appointment */}
-        <div style={{ border: `1px solid ${C.border}`, borderRadius: '12px', padding: '14px 16px', background: C.raised }}>
-          <div style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, marginBottom: '10px' }}>Recent Grammar</div>
-          {recentGrammarReviews.length === 0 ? (
-            <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic', marginBottom: '14px' }}>No grammar cards reviewed yet.</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', marginBottom: '14px' }}>
-              {recentGrammarReviews.map(({ entry, masteryLevel, reviewDate }) => (
-                <div key={entry.id} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: MASTERY_COLORS[Math.min(masteryLevel, MASTERY_COLORS.length - 1)], flexShrink: 0 }} />
-                  <span style={{ fontSize: '13px', fontFamily: SH.fk, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.glossaryTerm}</span>
-                  <span style={{ fontSize: '11px', color: C.textM, flexShrink: 0 }}>{reviewDate}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          <div style={{ borderTop: `1px solid ${C.border}`, margin: '10px 0 12px' }} />
-          <div style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, marginBottom: '10px' }}>Recent 한국어 Lesson</div>
-          {!recentLangAppt ? (
-            <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>No lessons scheduled.</div>
-          ) : (
-            <div style={{ padding: '8px 12px', borderRadius: '8px',
-              border: `1px solid ${(recentLangAppt.followUpQueue || []).length === 0 ? (C.danger || '#c0392b') : C.border}`,
-              background: (recentLangAppt.followUpQueue || []).length === 0 ? `${C.danger || '#c0392b'}0d` : 'transparent',
-            }}>
-              <div style={{ fontSize: '13px', fontWeight: 500, color: C.text }}>
-                {recentLangAppt.type
-                  ? `${recentLangAppt.type} — ${recentLangAppt.provider || ''}`
-                  : (recentLangAppt.provider || 'Tutor')}
-              </div>              <div style={{ fontSize: '11px', color: C.textM, marginTop: '2px' }}>
-                {fmtApptDate(recentLangAppt.date)}{recentLangAppt.time ? ` · ${fmtTime(recentLangAppt.time)}` : ''}
-              </div>
-              {(recentLangAppt.followUpQueue || []).length === 0 && (
-                <div style={{ fontSize: '11px', color: C.danger || '#c0392b', marginTop: '4px' }}>No follow-up scheduled</div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Right: Goals placeholder */}
-        <div style={{ border: `1px dashed ${C.border}`, borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '120px' }}>
-          <span style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>Goals placeholder</span>
-        </div>
-      </div>
-
-      {/* ── Band 2: Active | Adrift ──────────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-        <div>
-          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.accent, marginBottom: '10px' }}>Active</div>
-          {activeSources.length === 0
-            ? <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>Nothing active.</div>
-            : activeSources.map(renderSourceCard)
-          }
-        </div>
-        <div>
-          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.warning, marginBottom: '10px' }}>Adrift</div>
-          {adriftSources.length === 0
-            ? <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>Nothing adrift.</div>
-            : adriftSources.map(src => (
-                <div key={src.id} style={{ opacity: 0.8 }}>{renderSourceCard(src)}</div>
-              ))
-          }
-        </div>
-      </div>
-
-      {/* ── Band 3: Queue (collapsible) ─────────────────── */}
-      <div style={{ border: `1px solid ${C.border}`, borderRadius: '12px', overflow: 'hidden' }}>
-        <button onClick={() => setQueueOpen(o => !o)}
-          style={{ width: '100%', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '8px', background: C.raised, border: 'none', cursor: 'pointer', textAlign: 'left' }}>
-          <span style={{ fontSize: '11px', color: C.textM }}>{queueOpen ? '▾' : '▸'}</span>
-          <span style={{ fontSize: '12px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.text }}>Queue</span>
-        </button>
-        {queueOpen && (
-          <div style={{ padding: '14px 16px', borderTop: `1px solid ${C.border}`, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '20px' }}>
-            {[{ key: 'grammar', label: 'Study' }, { key: 'mining', label: 'Mining' }, { key: 'casual', label: 'Casual' }].map(({ key: tk, label }) => {
-              const items  = queueByTier[tk] || [];
-              const shown  = tierShown[tk];
-              const hasMore = items.length > shown;
-              return (
-                <div key={tk}>
-                  <div style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, marginBottom: '10px' }}>{label}</div>
-                  {items.length === 0 ? (
-                    <div style={{ fontSize: '11px', color: C.textM, fontStyle: 'italic' }}>No {label.toLowerCase()}-tier sources.</div>
-                  ) : (
-                    <>
-                      {items.slice(0, shown).map(src => {
-                        const col   = typeColor(src.type);
-                        const level = src.levelMin
-                          ? (src.levelMax && src.levelMax !== src.levelMin ? `${src.levelMin}–${src.levelMax}` : src.levelMin) : null;
-                        return (
-                          <div key={src.id} style={{ marginBottom: '6px', opacity: src._waiting ? 0.5 : 1 }}>
-                            <div onClick={() => onNavigateToSource('library', src.id)}
-                              style={{ padding: '8px 10px', borderRadius: '8px', cursor: 'pointer', background: C.raised,
-                                border: src._exact ? `2px solid ${col}` : `1px solid ${C.border}` }}
-                              className="task-row">
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: col, flexShrink: 0 }} />
-                                {level && <span style={{ fontSize: '10px', color: C.textM, flexShrink: 0 }}>{level}</span>}
-                                <span style={{ fontSize: '12px', color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{src.title}</span>
-                                {src._total > 0 && <span style={{ fontSize: '10px', color: C.textM, flexShrink: 0 }}>{src._total}§</span>}
-                              </div>
-                            </div>
-                            {(src._practiceItems || []).map(p => (
-                              <div key={p.id} onClick={() => onNavigateToSource('library', p.id)}
-                                style={{ marginLeft: '14px', marginTop: '3px', padding: '5px 10px', borderRadius: '7px', cursor: 'pointer', border: `1px solid ${C.border}`, background: C.raised, opacity: 0.6 }}
-                                className="task-row">
-                                <span style={{ fontSize: '11px', color: C.textM }}>{p.title}</span>
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })}
-                      {hasMore && (
-                        <button onClick={() => setTierShown(prev => ({ ...prev, [tk]: prev[tk] + 3 }))}
-                          style={{ fontSize: '11px', color: C.textM, background: 'none', border: `1px solid ${C.border}`, borderRadius: '6px', padding: '2px 10px', cursor: 'pointer', marginTop: '4px' }}>
-                          [...]
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* ── Band 4: Open Questions | Notes carousel ───────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-
-        {/* Open Questions */}
-        <div>
-          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.text, marginBottom: '10px' }}>Open Questions</div>
-          {openQuestions.length === 0 ? (
-            <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>No open questions.</div>
-          ) : openQuestions.map(n => (
-            <div key={n.id} style={{ padding: '8px 12px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.raised, marginBottom: '6px' }}>
-              <div style={{ fontSize: '12.5px', fontWeight: 500, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: '3px' }}>{n.title}</div>
-              <div style={{ fontSize: '10px', color: C.textM, fontFamily: SH.fm }}>
-                {n.createdAt ? new Date(n.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Notes carousel */}
-        <div>
-          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.text, marginBottom: '10px' }}>Recent Notes</div>
-          {carouselNotes.length === 0 ? (
-            <div style={{ fontSize: '12px', color: C.textM, fontStyle: 'italic' }}>No notes yet.</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
-                <button onClick={() => setCarouselIdx(i => (i - 1 + carouselNotes.length) % carouselNotes.length)}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textM, fontSize: '14px', padding: '2px', flexShrink: 0 }}>◀</button>
-                <div style={{ flex: 1, padding: '10px 12px', borderRadius: '8px', border: `1px solid ${C.border}`, background: C.raised, minHeight: '80px' }}>
-                  {carouselNote && (
-                    <>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '5px' }}>
-                        <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '8px',
-                          border: `1px solid ${carouselNote.type === 'correction' ? C.warning : C.border}`,
-                          color: carouselNote.type === 'correction' ? C.warning : C.textM,
-                          background: carouselNote.type === 'correction' ? `${C.warning}15` : 'transparent' }}>
-                          {carouselNote.type === 'correction' ? 'Correction' : 'Note'}
-                        </span>
-                        <span style={{ fontSize: '10px', color: C.textM, marginLeft: 'auto', fontFamily: SH.fm }}>
-                          {new Date(carouselNote.updatedAt || carouselNote.createdAt || '').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: '12.5px', fontWeight: 500, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: '4px' }}>{carouselNote.title}</div>
-                      <div style={{ fontSize: '11.5px', color: C.textS, lineHeight: 1.4 }}>{carouselPreview}</div>
-                    </>
-                  )}
-                </div>
-                <button onClick={() => setCarouselIdx(i => (i + 1) % carouselNotes.length)}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textM, fontSize: '14px', padding: '2px', flexShrink: 0 }}>▶</button>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'center', gap: '4px' }}>
-                {carouselNotes.map((_, i) => (
-                  <div key={i} onClick={() => setCarouselIdx(i)}
-                    style={{ width: carouselIdx === i ? '16px' : '6px', height: '6px', borderRadius: '3px', background: carouselIdx === i ? C.accent : C.border, cursor: 'pointer', transition: 'all 0.2s' }} />
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -2107,7 +1687,7 @@ export function ContentLibraryPage({
   defaultOpenSourceId, onNavigateToCorrection,
   noteTarget, correctionTarget, correctionSessionTarget,
   triggerAddSource, triggerAddQuestion, triggerAddNote, triggerAddCorrection,
-  aviSources, aviSections, aviWordCounts, aviSentenceCounts,
+  aviSources, aviSections,
   onSourcesChange, onSectionsChange, onSourceRename,
   tasks, onCompleteLinkedTask, patchTask, registerSectionUpdateCallback,
   aviWordSectionCounts, aviSentSectionCounts,
@@ -2116,6 +1696,7 @@ export function ContentLibraryPage({
   pendingApptLink, onApptLinkConsumed,
   wordInputs, sentenceInputs,
   updateCards, updateDecks, onSourceCascadeComplete,
+  onDeleteTask,
 }) {
   const { C, S } = useAppTheme();
   const isMobile   = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -2405,6 +1986,25 @@ export function ContentLibraryPage({
       .catch(e => console.error('Auto-archive flag failed:', e));
   }, [dsh]);
 
+  // ── N4: tasks linked to a section or section-less source ───
+  // When a section or source is deleted, or its status moves to Not started
+  // or Skip, its scheduled tasks leave the agenda: an uncompleted one-off task
+  // is deleted, a recurring one only loses its link. Completed tasks are
+  // history and stay. In Progress keeps the task (started early).
+  const releaseLinkedTasks = useCallback(({ sectionIds = [], sourceId = null, taskIds = [] }) => {
+    const secSet = new Set(sectionIds.filter(Boolean));
+    const idSet  = new Set(taskIds.filter(Boolean));
+    for (const t of tasks || []) {
+      const linked = idSet.has(t.id) ||
+        (t.linkedSectionId && secSet.has(t.linkedSectionId)) ||
+        (sourceId && t.linkedSourceId === sourceId);
+      if (!linked || t.completed) continue;
+      const recurring = !!(t.recurrence && t.recurrence.type && t.recurrence.type !== 'none');
+      if (recurring) patchTask?.(t.id, { linkedSectionId: null, linkedSourceId: null });
+      else onDeleteTask?.(t.id);
+    }
+  }, [tasks, patchTask, onDeleteTask]);
+
   // ── Section handlers ──────────────────────────────────────
   const handleSectionToggle = useCallback(async (section) => {
     if (DEMO) return; // demo: Content Library is read-only (7C addendum)
@@ -2458,13 +2058,29 @@ export function ContentLibraryPage({
     const cycle   = ['Not started', 'In Progress', 'Skip'];
     const baseIdx = Math.max(0, cycle.indexOf(sec.status || 'Not started'));
     const newStat = cycle[direction === 'forward' ? (baseIdx + 1) % cycle.length : (baseIdx - 1 + cycle.length) % cycle.length];
+    // Moving to In Progress counts as activity for Active/Adrift, so it
+    // stamps lastActivityAt on the section and its source (like Done and
+    // Scheduled already do). Other moves leave the timestamp alone.
+    const stamp = newStat === 'In Progress' ? new Date().toISOString() : null;
+    // N4: Not started or Skip takes the section's scheduled task off the agenda.
+    const release = (newStat === 'Not started' || newStat === 'Skip') && !!sec.linkedTaskId;
+    if (release) releaseLinkedTasks({ sectionIds: [sectionId], taskIds: [sec.linkedTaskId] });
+    const secUpdates = {
+      status: newStat,
+      ...(stamp ? { lastActivityAt: stamp } : {}),
+      ...(release ? { linkedTaskId: null } : {}),
+    };
     clearTimeout(statusDebounceRef.current[sectionId]);
     statusDebounceRef.current[sectionId] = setTimeout(async () => {
       if (!uid) return;
-      try { await updateDoc(doc(db, 'users', uid, 'content_sections', sectionId), { status: newStat }); }
+      try {
+        await updateDoc(doc(db, 'users', uid, 'content_sections', sectionId), secUpdates);
+        if (stamp && sec.resourceId) await updateDoc(doc(db, 'users', uid, 'content_sources', sec.resourceId), { lastActivityAt: stamp });
+      }
       catch (e) { console.error('Status cycle failed:', e); }
     }, 500);
-    setSections(prev => prev.map(s => s.id === sectionId ? { ...s, status: newStat } : s));
+    setSections(prev => prev.map(s => s.id === sectionId ? { ...s, ...secUpdates } : s));
+    if (stamp && sec.resourceId) setSources(prev => prev.map(s => s.id === sec.resourceId ? { ...s, lastActivityAt: stamp } : s));
     if (sec.resourceId) {
       const src = sources.find(s => s.id === sec.resourceId);
       if (src && !src.archived) {
@@ -2482,7 +2098,7 @@ export function ContentLibraryPage({
         }
       }
     }
-  }, [sections, sources, triggerAutoArchive]);
+  }, [sections, sources, triggerAutoArchive, releaseLinkedTasks]);
 
   const handleSectionTitleSave = useCallback(async (section, newTitle, newUrl) => {
     if (DEMO) return; // demo: Content Library is read-only (7C addendum)
@@ -2528,10 +2144,14 @@ export function ContentLibraryPage({
     if (DEMO) return; // demo: Content Library is read-only (7C addendum)
     const uid = auth.currentUser?.uid;
     if (!uid) return;
+    // N4: its scheduled tasks go too (completing one later wrote to the
+    // deleted section).
+    const sec = sections.find(s => s.id === sectionId);
+    releaseLinkedTasks({ sectionIds: [sectionId], taskIds: [sec?.linkedTaskId] });
     setSections(prev => prev.filter(s => s.id !== sectionId));
     try { await deleteDoc(doc(db, 'users', uid, 'content_sections', sectionId)); }
     catch (e) { console.error('Delete section failed:', e); }
-  }, []);
+  }, [sections, releaseLinkedTasks]);
 
   // Phase D3: routes the delete affordance through the cascade confirmation
   // modal.
@@ -2572,8 +2192,14 @@ export function ContentLibraryPage({
       getDocs(query(collection(db, 'users', uid, 'sentenceInputs'), where('source', '==', title))),
     ]);
     movedCount = wSnap.docs.length + sSnap.docs.length;
+    // N4: the source's sections go and its cards are deleted below, so the
+    // moved rows lose their section and no longer count as uploaded (AVI
+    // showed them as carded). No Recent reason: nothing to review.
     for (const d of [...wSnap.docs, ...sSnap.docs]) {
-      batch.update(d.ref, { source: 'Sourceless' });
+      batch.update(d.ref, {
+        source: 'Sourceless', section: null,
+        ...(d.data().uploaded ? { uploaded: false } : {}),
+      });
       ops++; if (ops >= 450) await flush();
     }
     await flush();
@@ -2600,6 +2226,13 @@ export function ContentLibraryPage({
     batch.delete(doc(db, 'users', uid, 'content_sources', source.id));
     ops++;
     await flush();
+
+    // N4: the source's and its sections' scheduled tasks leave the agenda.
+    releaseLinkedTasks({
+      sectionIds: [...sectionIds],
+      sourceId: source.id,
+      taskIds: [source.linkedTaskId, ...sections.filter(s => sectionIds.has(s.id)).map(s => s.linkedTaskId)],
+    });
 
     // Prune in-memory state by the exact ids we deleted
     updateCards?.(prev => prev ? prev.filter(c => !cardIdSet.has(c.id)) : prev);
@@ -2653,7 +2286,7 @@ export function ContentLibraryPage({
       `${movedCount} ${movedCount === 1 ? 'entry' : 'entries'} moved to Sourceless`
     );
     setTimeout(() => setCascadeToast(null), 6000);
-  }, [selectedSourceId, updateCards, updateDecks, onSourceCascadeComplete]);
+  }, [selectedSourceId, updateCards, updateDecks, onSourceCascadeComplete, sections, releaseLinkedTasks]);
 
   const handleSectionOrderSave = useCallback(async (sourceId, orderedIds) => {
     if (DEMO) return; // demo: Content Library is read-only (7C addendum)
@@ -2673,14 +2306,25 @@ export function ContentLibraryPage({
     const current = src.sourceStatus ?? src.watchStatus ?? 'Not started';
     const baseIdx = Math.max(0, cycle.indexOf(current));
     const newStatus = cycle[direction === 'forward' ? (baseIdx + 1) % cycle.length : (baseIdx - 1 + cycle.length) % cycle.length];
+    // Moving to In Progress counts as activity for Active/Adrift.
+    const stamp = newStatus === 'In Progress' ? new Date().toISOString() : null;
+    // N4: Not started or Skip takes a section-less source's scheduled task
+    // (Planner placement) off the agenda, as for sections.
+    const release = (newStatus === 'Not started' || newStatus === 'Skip') && !!src.linkedTaskId;
+    if (release) releaseLinkedTasks({ sourceId, taskIds: [src.linkedTaskId] });
+    const srcUpdates = {
+      sourceStatus: newStatus,
+      ...(stamp ? { lastActivityAt: stamp } : {}),
+      ...(release ? { linkedTaskId: null } : {}),
+    };
     clearTimeout(statusDebounceRef.current['src_' + sourceId]);
     statusDebounceRef.current['src_' + sourceId] = setTimeout(async () => {
       const uid = auth.currentUser?.uid;
       if (!uid) return;
-      try { await updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), { sourceStatus: newStatus }); }
+      try { await updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), srcUpdates); }
       catch (e) { console.error('Source status cycle failed:', e); }
     }, 500);
-    setSources(prev => prev.map(s => s.id === sourceId ? { ...s, sourceStatus: newStatus } : s));
+    setSources(prev => prev.map(s => s.id === sourceId ? { ...s, ...srcUpdates } : s));
     const noSecs = !sections.some(s => s.resourceId === sourceId);
     if (noSecs && !src.archived) {
       if ((newStatus === 'Done' || newStatus === 'Skip') && !src.pendingArchive && !isPassiveMediaExcluded(src)) {
@@ -2691,7 +2335,7 @@ export function ContentLibraryPage({
         if (uid) updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), { pendingArchive: null, pendingArchiveDate: null }).catch(() => {});
       }
     }
-  }, [sections, sources, triggerAutoArchive]);
+  }, [sections, sources, triggerAutoArchive, releaseLinkedTasks]);
 
   // Source-level Done toggle (section-less sources); writes sourceStatus field
   const handleSourceToggleDone = useCallback(async (source) => {
@@ -3166,8 +2810,6 @@ export function ContentLibraryPage({
                 allNotes={allNotes}
                 correctionSessions={correctionSessions}
                 allSources={sources}
-                aviWordCounts={aviWordCounts}
-                aviSentenceCounts={aviSentenceCounts}
                 aviWordSectionCounts={aviWordSectionCounts}
                 aviSentSectionCounts={aviSentSectionCounts}
                 tasks={tasks}
@@ -3236,6 +2878,7 @@ export function ContentLibraryPage({
           decks={decks}
           adriftDays={adriftDays}
           dsh={dsh}
+          tasks={tasks}
           onNavigateToSource={setTabAndSource}
           onNavigateToNote={handleNavigateToNoteInCL}
           onNavigateToCorrection={handleNavigateToCorrectionsInCL}
@@ -3331,8 +2974,6 @@ export function ContentLibraryPage({
                 allNotes={allNotes}
                 correctionSessions={correctionSessions}
                 allSources={sources}
-                aviWordCounts={aviWordCounts}
-                aviSentenceCounts={aviSentenceCounts}
                 aviWordSectionCounts={aviWordSectionCounts}
                 aviSentSectionCounts={aviSentSectionCounts}
                 tasks={tasks}
@@ -3388,7 +3029,7 @@ export function ContentLibraryPage({
           C={C} S={S}
         />
       )}
-      {showAddSource     && <AddSourceModal     onSave={handleAddSource}    onClose={() => setShowAddSource(false)}    C={C} S={S} />}
+      {showAddSource     && <AddSourceModal     onSave={handleAddSource}    onClose={() => setShowAddSource(false)}    C={C} S={S} dsh={dsh} />}
       {showQuickQuestion && <QuickQuestionModal onSave={handleQuickQuestion} onClose={() => setShowQuickQuestion(false)} C={C} S={S} />}
       {deleteSourceTarget && (
         <DeleteSourceCascadeModal

@@ -87,6 +87,35 @@ export function isPassiveMediaExcluded(src) {
   return PASSIVE_MEDIA_ORIGINS.some(kw => origin.includes(kw));
 }
 
+// ── Finishing a section outside the Library (bug sweep K6) ────
+// What finishing a section from Today or an appointment must write so it
+// matches the Library's own Done path: the section keeps its previous status
+// and gets an activity stamp; its source gets the same stamp (Adrift reads
+// the source's lastActivityAt); and when every section of the source is now
+// Done or Skip, the source gets the pending-archive flag, as the Library's
+// toggle sets it. Pure.
+//   section      — the section being finished ({ id, status, resourceId })
+//   sections     — all sections (other sections of the source are read here)
+//   source       — the source doc, or null if it isn't loaded (then only the
+//                  stamp is written)
+export function sectionDoneWrites({ section, sections, source, nowIso, logicalToday }) {
+  const sectionUpdates = { status: 'Done', previousStatus: section.status || 'Not started', lastActivityAt: nowIso };
+  const sourceId = section.resourceId || null;
+  if (!sourceId) return { sectionUpdates, sourceId: null, sourceUpdates: null };
+  const sourceUpdates = { lastActivityAt: nowIso };
+  if (source && !source.archived && !source.pendingArchive && !isPassiveMediaExcluded(source)) {
+    const ofSource = (sections || [])
+      .map(s => (s.id === section.id ? { ...s, status: 'Done' } : s))
+      .filter(s => s.resourceId === sourceId);
+    if (!ofSource.some(s => s.id === section.id)) ofSource.push({ ...section, status: 'Done' });
+    if (ofSource.every(s => s.status === 'Done' || s.status === 'Skip')) {
+      sourceUpdates.pendingArchive = true;
+      sourceUpdates.pendingArchiveDate = logicalToday;
+    }
+  }
+  return { sectionUpdates, sourceId, sourceUpdates };
+}
+
 // ── HTML text helpers (shared by Notes, Dream Log, Content Library) ─
 // Consolidated from five drifted local copies (I1-A). Plain-text extraction
 // for previews/search, and paste sanitization for the WYSIWYG editors.

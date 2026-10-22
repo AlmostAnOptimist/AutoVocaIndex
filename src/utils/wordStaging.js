@@ -32,6 +32,7 @@ import {
   resolveLemmaWithDictionary, fetchDefinitionWithFallback,
 } from './aviUtils.js';
 import { autoCreateWordCard } from './cardFactory.js';
+import { isSkippedInSource } from './wordSkip.js';
 import { findLemmaEntryAny } from './lemmaSuggest.js';
 
 export async function stageWordInput({
@@ -120,6 +121,11 @@ export async function stageWordInput({
     }
   }
 
+  // Skip is per word per source: a new row of a word already skipped in
+  // this source (another section, another form) starts skipped, so it
+  // can't release a card the word was skipped to avoid.
+  const inheritedSkip = isSkippedInSource(data.wordInputs, source, lemmaText);
+
   const newUid = uuid();
   const newEntry = {
     uid:              newUid,
@@ -131,7 +137,7 @@ export async function stageWordInput({
     def1,
     def2,
     uploaded:         false,
-    skipUpload:       false,
+    skipUpload:       inheritedSkip,
     lastUncheckReason: '',
     lastUncheckDate:   '',
   };
@@ -166,6 +172,9 @@ export async function stageWordInput({
   }
 
   if (onStaged) onStaged(newEntry);
+  if (inheritedSkip && showAVIToast) {
+    showAVIToast(`Added as skipped: ${lemmaText} is skipped in ${source}`);
+  }
 
   // Auto-create flashcard if def2 is present — unless the deck for this
   // source already holds a card for the lemma (same source, different
@@ -188,6 +197,7 @@ export async function stageWordInput({
       await autoCreateWordCard({
         entry:        newEntry,
         lemmaMaster:  data.lemmaMaster,
+        cards,        // A6: the factory's own guard sees them too
         decks,
         uid,
         updateCards,

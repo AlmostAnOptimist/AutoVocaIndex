@@ -4,9 +4,10 @@ import { RecurrenceSelector } from './RecurrenceSelector.jsx';
 import { Icons } from './Icons.jsx';
 import { CATEGORIES } from '../constants.js';
 import { playSound } from '../utils/soundEngine.js';
-import { toDateStr, getLogicalToday, parseDate, fmtDate } from '../utils/dateUtils.js';
+import { uid, toDateStr, getLogicalToday, parseDate, fmtDate } from '../utils/dateUtils.js';
 import { APPOINTMENT_TYPES } from '../constants.js';
 import { DatePicker } from './DatePicker.jsx';
+import { isSubmitEnter } from '../utils/keyUtils.js';
 
 export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointments = [], saveAppointment, settings = {} }) {
   const { C, S } = useAppTheme();
@@ -168,7 +169,7 @@ export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointme
     : '';
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+    if (isSubmitEnter(e) && e.target.tagName !== 'TEXTAREA') {
       playSound('mouse_click');
       handleSave();
     }

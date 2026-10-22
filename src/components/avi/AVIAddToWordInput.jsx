@@ -41,6 +41,7 @@ import {
 } from '../../utils/aviUtils.js';
 import { findLemmaEntryAny } from '../../utils/lemmaSuggest.js';
 import { stageWordInput } from '../../utils/wordStaging.js';
+import { isSubmitEnter } from '../../utils/keyUtils.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -141,7 +142,7 @@ export function AddToWordInputDialog({ initialSurface, data, updateData, staging
           <input
             value={surface}
             onChange={e => { setSurface(e.target.value); setNotice(null); }}
-            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && confirm()}
+            onKeyDown={e => isSubmitEnter(e) && confirm()}
             style={{ ...fieldInput, fontFamily: SH.fk }}
           />
         </div>

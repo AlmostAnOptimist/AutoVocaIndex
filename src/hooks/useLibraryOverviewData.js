@@ -1,33 +1,87 @@
 // src/hooks/useLibraryOverviewData.js
 // Active/adrift/queue/recent-activity derivation for the Content Library
-// overview surface — extracted from CLOverviewTab (src/pages/ContentLibraryPage.jsx)
-// so ContentLibraryGazette can reuse the exact same logic without copy-pasting
-// ~150 lines of it. CLOverviewTab itself is left as-is; it's unused dead code
-// now, not worth refactoring on its way out.
+// overview surface — extracted from the old CLOverviewTab in
+// ContentLibraryPage.jsx (since removed, bug sweep P3) for ContentLibraryGazette.
 
 import { useMemo, useCallback } from 'react';
-import { getLogicalToday, toDateStr } from '../utils/dateUtils.js';
+import { getLogicalDateStr, getTaskDates, isDateDone } from '../utils/dateUtils.js';
 import { isPassiveMediaExcluded, getSourceStatus, stripHtml } from '../utils/contentUtils.js';
+import { isNuanceSourceTitle } from '../utils/aviUtils.js';
 
 const CEFR = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+
+// Sources the Overview leaves out of Active, Adrift and the queues: passive
+// media, and word lists (the 동의어 list and any Reference › Word List
+// source), which are studied through AVI and flashcards rather than read
+// or watched. They stay in the Library tab.
+function isOverviewHidden(src) {
+  return isPassiveMediaExcluded(src) || src.subtype === 'Word List' || isNuanceSourceTitle(src.title);
+}
 const cefrIdx = (level) => CEFR.indexOf(level);
 
 export function useLibraryOverviewData({
   sources, sectionsBySource, allNotes, correctionSessions,
-  grammarEntries, cards, appointments, adriftDays, dsh,
+  grammarEntries, cards, appointments, adriftDays, dsh, tasks,
 }) {
-  const logicalToday = useMemo(() => getLogicalToday(dsh), [dsh]);
-  const todayStr      = useMemo(() => toDateStr(logicalToday), [logicalToday]);
+  // T4: today is read on every render (App re-renders when the day flips)
+  // and the rest keys on the string; memoizing it on dsh alone froze the
+  // Overview on the day the page was opened.
+  const todayStr      = getLogicalDateStr(dsh);
+  const logicalToday = useMemo(() => new Date(todayStr + 'T00:00:00'), [todayStr]);
   const todayMs       = useMemo(() => logicalToday.getTime(), [logicalToday]);
-  const adriftMs      = (adriftDays ?? 14) * 86400000;
+  const adriftLimit   = adriftDays ?? 14;
+
+  // Whole logical days between a timestamp and today. The timestamp is
+  // first mapped to its own logical day (before the day-start hour still
+  // belongs to the previous day), then compared to today's midnight. The
+  // old version measured from today's midnight to the exact timestamp,
+  // which ran a day short (an edit earlier today came out as -1).
+  const daysSince = useCallback((iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    if (d.getHours() < dsh) d.setDate(d.getDate() - 1);
+    const dayMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    return Math.max(0, Math.round((todayMs - dayMs) / 86400000));
+  }, [todayMs, dsh]);
 
   const fmtDaysAgo = useCallback((iso) => {
-    if (!iso) return '';
-    const days = Math.floor((todayMs - new Date(iso).getTime()) / 86400000);
+    const days = daysSince(iso);
+    if (days === null) return '';
     if (days === 0) return 'today';
     if (days === 1) return 'yesterday';
-    return `${days} days ago`;
-  }, [todayMs]);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
+  }, [daysSince]);
+
+  const tasksById = useMemo(() => {
+    const m = new Map();
+    (tasks || []).forEach(t => { if (t?.id) m.set(t.id, t); });
+    return m;
+  }, [tasks]);
+
+  // A linked task still has an unfinished due date today or later.
+  // Overdue-only, finished, or missing tasks don't count.
+  const taskIsUpcoming = useCallback((taskId) => {
+    const t = taskId ? tasksById.get(taskId) : null;
+    if (!t || t.completed) return false;
+    return getTaskDates(t).some(d => d >= todayStr && !isDateDone(t, d));
+  }, [tasksById, todayStr]);
+
+  // A Scheduled source or section whose task date hasn't passed yet is a
+  // standing plan, so it holds the source in Active regardless of age.
+  const hasUpcomingSchedule = useCallback((src) => {
+    if (getSourceStatus(src) === 'Scheduled' && taskIsUpcoming(src.linkedTaskId)) return true;
+    return (sectionsBySource[src.id] || []).some(s => s.status === 'Scheduled' && taskIsUpcoming(s.linkedTaskId));
+  }, [sectionsBySource, taskIsUpcoming]);
+
+  // No qualifying activity (Done, In Progress, or scheduling) for at least
+  // the Settings threshold, and no upcoming schedule. Sources with no
+  // timestamp at all can't be judged and never count as stale.
+  const isStale = useCallback((src) => {
+    if (hasUpcomingSchedule(src)) return false;
+    const days = daysSince(src.lastActivityAt);
+    return days !== null && days >= adriftLimit;
+  }, [hasUpcomingSchedule, daysSince, adriftLimit]);
 
   const isComplete = useCallback((src) => {
     if (src.archived || src.pendingArchive) return true;
@@ -38,7 +92,8 @@ export function useLibraryOverviewData({
     return secs.every(s => s.status === 'Done' || s.status === 'Skip');
   }, [sectionsBySource]);
 
-  const isActive = useCallback((src) => {
+  // Started and not finished, judged by status alone.
+  const isEngaged = useCallback((src) => {
     if (src.paused) return false;
     if (isComplete(src)) return false;
     const st = getSourceStatus(src);
@@ -47,6 +102,11 @@ export function useLibraryOverviewData({
       s.status === 'In Progress' || s.status === 'Scheduled' || s.status === 'Done'
     );
   }, [sectionsBySource, isComplete]);
+
+  // Staleness overrides status: a started source with no recent activity
+  // goes Adrift even though it has sections Done or In Progress. This is
+  // computed fresh on every render, so older sources need no backfill.
+  const isActive = useCallback((src) => isEngaged(src) && !isStale(src), [isEngaged, isStale]);
 
   const isAdrift = useCallback((src) => {
     if (src.paused) return false;
@@ -68,11 +128,11 @@ export function useLibraryOverviewData({
       ? secs.every(s => s.status === 'Not started')
       : getSourceStatus(src) === 'Not started';
     if (looksUntouched) return false;
-    return (todayMs - new Date(src.lastActivityAt).getTime()) > adriftMs;
-  }, [isActive, isComplete, todayMs, adriftMs, sectionsBySource]);
+    return isStale(src);
+  }, [isActive, isComplete, isStale, sectionsBySource]);
 
-  const activeSources = useMemo(() => sources.filter(s => isActive(s) && !isPassiveMediaExcluded(s)), [sources, isActive]);
-  const adriftSources  = useMemo(() => sources.filter(s => isAdrift(s) && !isPassiveMediaExcluded(s)), [sources, isAdrift]);
+  const activeSources = useMemo(() => sources.filter(s => isActive(s) && !isOverviewHidden(s)), [sources, isActive]);
+  const adriftSources  = useMemo(() => sources.filter(s => isAdrift(s) && !isOverviewHidden(s)), [sources, isAdrift]);
 
   const activeRange = useMemo(() => {
     const pool = activeSources.length ? activeSources : adriftSources;
@@ -88,7 +148,7 @@ export function useLibraryOverviewData({
 
   const queueByTier = useMemo(() => {
     const notQueue = (s) => isActive(s) || isAdrift(s) || isComplete(s);
-    const candidates = sources.filter(s => !notQueue(s) && !isPassiveMediaExcluded(s)).map(src => {
+    const candidates = sources.filter(s => !notQueue(s) && !isOverviewHidden(s)).map(src => {
       const totalSections = (sectionsBySource[src.id] || []).length;
       const seriesBlocked = src.series && src.seriesOrder != null &&
         sources.some(o => o.id !== src.id && o.series === src.series &&

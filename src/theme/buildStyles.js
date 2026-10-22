@@ -110,6 +110,10 @@ export function buildGlobalStyles(C) {
   @keyframes gradePulse { 0% { transform: scale(1); box-shadow: 0 0 0 0 currentColor; } 35% { transform: scale(1.1); box-shadow: 0 0 12px 2px currentColor; } 100% { transform: scale(1); box-shadow: 0 0 0 0 currentColor; } }
   .fade-up { animation: fadeUp 0.2s ease both; }
   .content-pad.content-pad-flush { padding-bottom: 0 !important; }
+  /* U6: on phones and tablets the room under the last row is a rendered
+     spacer (App, after the page), not padding: iOS ignores padding-bottom on
+     an overflow:auto box when it works out how far it can scroll. */
+  .content-bottom-spacer { display: none; }
   .slide-up { animation: slideUp 0.28s cubic-bezier(0.34, 1.2, 0.64, 1) both; }
   .grade-pulse { animation: gradePulse 0.22s ease; }
   .task-row:last-child { border-bottom: none !important; }
@@ -128,7 +132,8 @@ export function buildGlobalStyles(C) {
     .sidebar { display: none !important; }
     .mobile-nav { display: flex !important; }
     body.echo-active .mobile-nav { display: none !important; } /* Echo Quiz rounds (E3) */
-    .content-pad { padding: 16px !important; padding-bottom: 80px !important; }
+    .content-pad { padding: 16px !important; padding-bottom: 0 !important; }
+    .content-bottom-spacer { display: block; flex-shrink: 0; height: calc(80px + env(safe-area-inset-bottom, 0px)); }
     .today-grid { grid-template-columns: 1fr !important; }
     .stats-col { display: flex !important; flex-direction: column !important; gap: 14px !important; }
     .quiz-session { padding-bottom: 72px !important; }
@@ -139,7 +144,8 @@ export function buildGlobalStyles(C) {
     input, textarea, select { font-size: 16px !important; }
   }
   @media (pointer: coarse) and (hover: none) and (min-width: 701px) {
-    .content-pad { padding-bottom: 96px !important; }
+    .content-pad { padding-bottom: 0 !important; }
+    .content-bottom-spacer { display: block; flex-shrink: 0; height: calc(96px + env(safe-area-inset-bottom, 0px)); }
     .quiz-session { padding-bottom: 96px !important; }
   }
 `;

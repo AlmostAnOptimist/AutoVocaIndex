@@ -178,7 +178,11 @@ async function createWordCardUnchecked({
   );
 
   // Fire TTS generation without awaiting — card is usable immediately, audio arrives shortly after.
-  generateVocabCardAudio({ lemma: entry.lemma, cardId: cardRef.id, uid });
+  // A8: the audio goes onto the in-memory card too, so its button shows today.
+  generateVocabCardAudio({
+    lemma: entry.lemma, cardId: cardRef.id, uid,
+    onComplete: (u) => updateCards(prev => (prev ? prev.map(c => (c.id === cardRef.id ? { ...c, ...u } : c)) : prev)),
+  });
 
   return cardRef.id;
 }
@@ -287,7 +291,11 @@ async function createSentenceCardUnchecked({
   );
 
   // Fire TTS generation without awaiting — card is usable immediately, audio arrives shortly after.
-  generateSentenceCardAudio({ lemma: entry.targetWord, sentence: entry.sentence, cardId: cardRef.id, uid });
+  // A8: the audio goes onto the in-memory card too, so its button shows today.
+  generateSentenceCardAudio({
+    lemma: entry.targetWord, sentence: entry.sentence, cardId: cardRef.id, uid,
+    onComplete: (u) => updateCards(prev => (prev ? prev.map(c => (c.id === cardRef.id ? { ...c, ...u } : c)) : prev)),
+  });
 
   return cardRef.id;
 }
