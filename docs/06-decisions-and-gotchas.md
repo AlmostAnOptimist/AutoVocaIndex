@@ -101,9 +101,18 @@ Cause: fixing a lemma on a *row* (Word Input, the Sentence Input picker, Import 
 Rule of thumb: when a bad lemma traces back to a mis-resolution, correct it at a row if you can. Lemma Master fixes the past; only rows teach the future.
 Where: the row edit paths and `handlePopupDone` (both loops) vs. the Lemma Master save path (master loop only).
 
+**A definition has one writer** *(decision)*.
+Symptom (prevented): a word's card says one thing, its sentence cards another, and the Lemma Master a third, depending on which screen last edited it.
+Rule: every `def2` change, from any screen, goes through `applyDef2Write` in `def2Cascade.js`, and every card back through `def2CardUpdate`: the Lemma Master entries, word and 동의어 rows, sentence backs and card backs change together. A sentence card's back is the word card's back. Clearing a `def2` clears it on the entry and the word rows but leaves sentence and card backs as they were until a new one is saved (a back is never written empty). A sentence back may be the word's `def1` only while the word has no `def2`, and follows `def1` edits until then (`applyDef1BackFollow`). The Dev Dashboard's Def2 resync applies the same rule to existing data.
+Where: `def2Cascade.js`; callers in `AVILemmaMasterPage.jsx`, `AVISentenceInputPage.jsx`, `wordRowUpdater.js` and the Dev Dashboard.
+
 ---
 
 ## Dates and scheduling
+
+**Spike warnings only mean something on their own day** *(decision)*.
+Symptom (prevented): yesterday's "review spike" reminders pile up in Overdue, then drift into Unscheduled after 14 days.
+Rule: a task with `source: 'srs_forecast'` that wasn't checked off by the end of its day, or that the 14-day rule left with no date, is deleted by `runRecurrenceEngine` (`isMissedSpikeTask`). Checked-off ones stay like any finished task, and Always On tasks are never touched.
 
 **Every "what day is it" goes through the logical day.**
 Symptom: reviews done at 1 a.m. land on the wrong day; streaks break at midnight.
@@ -230,6 +239,12 @@ Symptom (prevented): the app white-screens on every load until site data is clea
 Cause: iOS Safari can evict or partially corrupt localStorage while the app is in the background, and the first render reads the persisted snapshot synchronously, so a bad value throws before anything appears.
 Rule: an error boundary wraps the app and turns a render-time crash into a screen with one button, "Reset local data and reload." It clears localStorage only: real data reloads from Firestore, and the sign-in (kept in IndexedDB) survives. It catches render and lifecycle errors, not async rejections or event handlers, which don't blank the screen.
 Where: `BootErrorBoundary` in `main.jsx`.
+
+**Every hook goes above every early return.**
+Symptom: a page shows its loading screen, then the boot error screen ("couldn't finish loading", offering to reset local data) the moment its data arrives, though nothing local is wrong.
+Cause: React needs the same hooks in the same order on every render. A `useRef` or effect placed below `if (loading) return …` runs only once loading ends, so the second render has more hooks than the first and React throws; `BootErrorBoundary` catches it and reads it as corrupted local data.
+Rule: declare every hook before the first early return. ESLint's `react-hooks/rules-of-hooks` flags this; treat a new finding as a bug, not noise.
+Where: the Dev Dashboard's tab-switch scroll effect sits above its loading return for this reason.
 
 **Search spends network reads only on an explicit search** *(decision)*.
 Symptom (prevented): typing in a search box fires a Firestore read per keystroke.

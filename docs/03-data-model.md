@@ -74,7 +74,7 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 | `push` | boolean | Push-forward behavior for non-recurring tasks; forced `false` on multi-date tasks |
 | `activeToday`, `activatedOn` | boolean, string \| null | Unscheduled-task activation |
 | `autoDatedOnComplete` | boolean | Set when a dateless, non-recurring task is completed: `date` is filled with that logical day so the task leaves Unscheduled and stays on the month calendar as a done record (struck through on desktop, a faded dot on mobile). Unchecking it clears `date` and returns it to Unscheduled |
-| `source` | string | `'srs_forecast'` on spike-warning tasks created by the daily pipeline |
+| `source` | string | `'srs_forecast'` on spike-warning tasks created by the daily pipeline. One left unchecked after its day (or left with no date by the 14-day overdue rule) is deleted by the recurrence engine instead of moving to Overdue; a checked-off one stays like any task (`isMissedSpikeTask`) |
 | `srsReconciledDate` | string | Spike tasks only. On the task's own day the pipeline rewrites the card count in its title to the actual day-start total, or completes the task if that total is at or under `srsSpikeCap`; this stamp limits that to once per day so a manual uncheck or rename is never overridden |
 | `created` | string | ISO timestamp |
 | `linkedSectionId` | string | Present on tasks created from a Content Library section |
@@ -117,8 +117,8 @@ One document per study material (a novel, a drama, a textbook). Firestore auto-I
 | Field | Type | Notes |
 |---|---|---|
 | `title` | string | Also the join key to AVI rows and decks — see the provenance note below |
-| `type` | string | From `TYPES` in `contentUtils.js`: `Grammar`, `Grammar: Practice`, `Reading: Bilingual`, `Reading: Korean Only`, `Dubbed`, `Subbed`, `Native`, `Reference` |
-| `subtype` | string \| null | |
+| `type` | string | From `TYPES` in `contentUtils.js`: `Grammar`, `Grammar: Practice`, `Reading: Bilingual`, `Reading: Korean Only`, `Dubbed`, `Subbed`, `Native`, `Reference`. A source with any other value (a removed type) is listed under Reference with a "type not set" flag, and its type picker shows "Choose type…" (`isKnownSourceType`) |
+| `subtype` | string \| null | Under Reference, `'YouTube'` marks a YouTube channel kept for listening or reinforcement: its sections are videos, it shows a watch line ("3 watched · 2 to watch · last watched Oct 12") instead of a progress bar, watched videos list below the rest, it sits in its own group below the other references, and it stays passive media (`isYouTubeReference` in `contentUtils.js`) |
 | `url`, `origin` | string | |
 | `levelMin`, `levelMax` | string \| null | |
 | `studyIntent` | string \| null | `'mining'` exempts a source from the passive-media exclusion in stats |
@@ -146,7 +146,7 @@ Chapters/episodes/units of a source. Firestore auto-ID.
 | `resourceId` | string | Parent source's document ID |
 | `status` | string | `'Not started'`, `'Scheduled'`, `'In Progress'`, `'Done'`, `'Skip'` |
 | `previousStatus` | string \| null | Stashed when marking Done so undo can restore |
-| `url` | string \| null | |
+| `url` | string \| null | On a YouTube reference's videos, the link pasted with + Add videos (one section per pasted line; a line that is a link is both the title and the `url`) |
 | `linkedTaskId` | string \| null | The task created by "Schedule". Deleting the section or its source, or moving it to Not started or Skip, deletes that task if it is an unfinished one-off (a recurring one only loses the link; a finished one is history and stays); In Progress keeps it |
 | `lastActivityAt` | string | |
 | `createdAt` | string | |
@@ -182,7 +182,7 @@ Mined sentences, one row per (sentence, target word) pair — a sentence with tw
 | `targetWord` | string | The lemma this row studies |
 | `inputForm` | string | The surface form as it appears in the sentence; `''` if the lemma-form was typed directly |
 | `cardFront` | string | `targetWord + '\n' + sentence` |
-| `cardBack` | string | The lemma's `def2`. A row whose lemma has no `def2` yet keeps an empty back and gets no card; the card is created once the lemma gets a `def2`, wherever it is written |
+| `cardBack` | string | The lemma's `def2`, the same as the word card's back. A row whose lemma has no `def2` yet keeps an empty back and gets no card; the card is created once the lemma gets a `def2`, wherever it is written. Every `def2` change goes through one writer (`applyDef2Write` in `def2Cascade.js`), which updates the Lemma Master entries, the word and 동의어 rows, every sentence back and every card back together; clearing a `def2` keeps the existing backs until a new one is saved. A back may be the word's `def1` only while the word has no `def2` |
 | `source`, `section` | string | Title/content strings, as on word rows |
 | `uploaded`, `skipUpload`, `lastUncheckReason`, `lastUncheckDate` | | As on word rows |
 | `skippedWithWord` | boolean | `true` on a sentence row skipped because its word was skipped in that source; un-skipping the word un-skips only these, and asks about the word's other skipped sentence rows (`wordSkip.js`). Absent otherwise |

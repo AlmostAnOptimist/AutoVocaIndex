@@ -24,7 +24,8 @@ src/
                      QuizzesPage, ContentLibraryPage, GrammarIndexPage, ...)
   components/        shared UI — modals, pickers, nav, DatePicker, Icons,
                      AVILogo, Gazette components, Ornaments (the Art Deco
-                     page ornaments, drawn from theme tokens)
+                     page ornaments, drawn from theme tokens),
+                     settings/SettingsKit (the tabbed Settings page's parts)
   hooks/             useFirestore, useAVIData, useLemmaSearch, useSearchAssist,
                      useAppTheme, useDragSort, useLogicalDay,
                      keyboard/pagination helpers
@@ -34,7 +35,7 @@ src/
                      lemmaSuggest, wordStaging, wordRowUpdater, wordSkip,
                      aviRowMerge, nuanceCleanup, echoEngine, quizStateEngine,
                      contentUtils, ttsUtils, taskEdit, apptPromotion,
-                     seriesDecks,
+                     seriesDecks, strayCards, settingsLayout,
                      queuedWrite, keyUtils, scrollUtils, dateUtils, ...
   theme/             buildColors, buildStyles, decoAssets, ThemeContext
   assets/            decorative art and gazette-plates/library/ — globbed,
@@ -99,7 +100,9 @@ All Firestore access is direct — there is no data-access layer, a known coupli
 
 **Navigation.** Each page has a hash (`#today`, `#flashcards`, ...). Navigating pushes it, Back and Forward follow it (a `hashchange` listener), and a reload reopens the page it names (`pageFromHash`, built from `NAV_SECTIONS` plus Settings). Page-internal state (the AVI tab, open panels) isn't part of history.
 
-**The Dev Dashboard** (`#dev`, reload to open; not linked from the navigation) holds maintenance tools that run straight against Firestore, grouped with a description each and the date each last ran (`settings/devActionRuns`): AVI Vocabulary (scan, NFC repair, Def2 resync, 동의어 cleanup, source and section re-tag), Flashcards and Reviews (recompute review stats, update card audio), Grammar Index (check, remove dead links) and Gazette (plate aliases). Read-only actions are tagged as such. Its Planning tab is a personal to-do list (`dev/{uid}/todos`).
+**Settings** has one tab per page, grouped like the sidebar (General; Agenda: Agenda and Appointments; Language: Content Library, Flashcards, Quizzes, AutoVocaIndex), plus a search box over every setting. Which setting appears on which tab, and each setting's label and description, live in `settingsLayout.js` (pure, no React); `SettingsPage.jsx` defines each setting's control once, by id, and renders it wherever the layout lists it. A setting more than one page uses (playback speed, the review cap, exchange rates, audio after imports) is listed on each of those tabs, every copy edits the same value, and an "Also on" line jumps to the others. The last tab opened is remembered per device (`avi_settings_tab`). Adding a setting means a `SETTING_META` entry, a place in `SETTINGS_TABS`, and a control in the page's `controls` map.
+
+**The Dev Dashboard** (`#dev`, reload to open; not linked from the navigation) holds maintenance tools that run straight against Firestore, grouped with a description each and the date each last ran (`settings/devActionRuns`): AVI Vocabulary (scan, NFC repair, Def2 resync, 동의어 cleanup, cards left behind for skipped or deleted words, source and section re-tag), Flashcards and Reviews (recompute review stats, update card audio), Grammar Index (check, remove dead links) and Gazette (plate aliases). Read-only actions are tagged as such. Its Planning tab is a personal to-do list (`dev/{uid}/todos`).
 
 **Failed boot loads.** `firestoreLoad` returns `null` for a brand-new account and the string `'error'` when the read fails, and every caller must tell the two apart. The boot load retries silently (after 2, 6, and 15 seconds); if every attempt fails, the app stays in local read-only mode with a banner ("Couldn't reach the server — showing local data. Changes are not being saved.") and a Retry button, and the task sync never starts because `dataLoaded` stays false. The hourly and return-to-tab refreshes simply skip a failed read. A render-time crash during boot is caught by `BootErrorBoundary` in `main.jsx`, which offers a one-tap local reset instead of a blank screen. The reasoning behind both is in the gotchas guide.
 
