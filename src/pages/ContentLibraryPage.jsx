@@ -1,5 +1,5 @@
 // src/pages/ContentLibraryPage.jsx
-import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
+import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { collection, getDocs, getDoc, setDoc, doc, updateDoc, addDoc, deleteDoc, writeBatch, arrayRemove, query, where } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
@@ -7,18 +7,22 @@ import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
 import { DatePicker } from '../components/DatePicker.jsx';
 import { playSound } from '../utils/soundEngine.js';
-import { toDateStr, getLogicalToday, getLogicalDateStr } from '../utils/dateUtils.js';
+import { toDateStr, getLogicalToday, getLogicalDateStr, logicalDateOf } from '../utils/dateUtils.js';
 import { NotesPage } from './NotesPage.jsx';
 import { ContentLibraryGazette } from '../components/ContentLibraryGazette.jsx';
 import { useGlobalKey } from '../hooks/useGlobalKey.js';
-import { TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded } from '../utils/contentUtils.js';
+import {
+  TYPES, TYPE_FAMILY_MAP, typeColor, getSourceStatus, isPassiveMediaExcluded,
+  isYouTubeReference, isKnownSourceType, watchSummary, watchedLastOrder, watchLine, parseVideoLines,
+} from '../utils/contentUtils.js';
 import { DEMO } from '../demo/demoConfig.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
 import { TabRail, PendantFill } from '../components/Ornaments.jsx';
 
 // ── Family grouping (D1) ──────────────────────────────────────
-const FAMILY_ORDER    = ['grammar', 'reading', 'listening', 'reference'];
-const FAMILY_LABELS   = { grammar: 'Grammar', reading: 'Reading', listening: 'Listening', reference: 'Reference' };
+// YouTube references are their own group, below the other references (YT-D4).
+const FAMILY_ORDER    = ['grammar', 'reading', 'listening', 'reference', 'reference-youtube'];
+const FAMILY_LABELS   = { grammar: 'Grammar', reading: 'Reading', listening: 'Listening', reference: 'Reference', 'reference-youtube': 'Reference · YouTube' };
 // Per-type tags shown inside grouped reading/listening families
 const TYPE_SHORT_LABELS = {
   'Reading: Bilingual':   'Bilingual',
@@ -33,22 +37,27 @@ const FILTER_CHIPS = [
   { id: 'family:grammar',    label: 'Grammar' },
   { id: 'family:reading',    label: 'Reading' },
   { id: 'family:listening',  label: 'Listening' },
-  { id: 'Reference',         label: 'Reference' },
+  { id: 'family:reference',  label: 'Reference' },
 ];
-const FAMILY_CHIP_COLORS = { grammar: '#F5C842', reading: '#D96B6B', listening: '#2ABFBF' };
+const FAMILY_CHIP_COLORS = { grammar: '#F5C842', reading: '#D96B6B', listening: '#2ABFBF', reference: '#888' };
 function chipColor(id, C) {
   if (id === 'all') return C.accent;
   if (id.startsWith('family:')) return FAMILY_CHIP_COLORS[id.slice(7)] || '#888';
   return typeColor(id);
 }
+// The chips and the grouped list read the family the same way, so a source
+// with an unrecognized type (grouped under Reference) is also under the
+// Reference chip, not only under All (YT-D3).
 function matchesTypeFilter(source, filter) {
   if (filter === 'all') return true;
-  if (filter.startsWith('family:')) return TYPE_FAMILY_MAP[source.type] === filter.slice(7);
+  if (filter.startsWith('family:')) return familyOf(source) === filter.slice(7);
   return source.type === filter;
 }
 function familyOf(source) { return TYPE_FAMILY_MAP[source.type] || 'reference'; }
+// The list group: the family, with YouTube references split off.
+function groupOf(source) { return isYouTubeReference(source) ? 'reference-youtube' : familyOf(source); }
 function familySortIndex(source) {
-  const i = FAMILY_ORDER.indexOf(familyOf(source));
+  const i = FAMILY_ORDER.indexOf(groupOf(source));
   return i === -1 ? FAMILY_ORDER.length : i;
 }
 
@@ -60,7 +69,7 @@ export const CONTENT_SUBTYPES = {
   'Dubbed':               ['Drama', 'Movie', 'YouTube', 'Variety Show', 'Documentary', 'Animation', 'Other'],
   'Subbed':               ['Drama', 'Movie', 'YouTube', 'Variety Show', 'Documentary', 'Animation', 'Other'],
   'Native':               ['Drama', 'Movie', 'YouTube', 'Variety Show', 'Documentary', 'Animation', 'Podcast', 'Lecture', 'Other'],
-  'Reference':            ['Word List', 'Website', 'Other'],
+  'Reference':            ['Word List', 'Website', 'YouTube', 'Other'],
 };
 const LEVELS = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2', 'Unsure', 'Native'];
 const STUDY_INTENTS = [
@@ -407,7 +416,7 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
   onSectionToggle, onSectionTitleSave, onSchedule, onCycleStatus,
   onSectionFieldSave, onSectionOrderSave, onDeleteSection, onToggleNoteLink,
   onAddNoteFromSection, onAddCorrectionFromSection,
-  highlightSectionId, onHighlightClear }) {
+  highlightSectionId, onHighlightClear, videoMode = false }) {
 
   const { C, S } = useAppTheme();
   const [expandedSec,      setExpandedSec]      = useState(null);
@@ -428,9 +437,12 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
     }
   }, [highlightSectionId]);
 
+  // A YouTube reference lists watched videos below the rest (YT-D6).
+  const baseSections    = videoMode ? watchedLastOrder(sections) : sections;
   const orderedSections = localOrder
     ? localOrder.map(id => sections.find(s => s.id === id)).filter(Boolean)
-    : sections;
+    : baseSections;
+  const watchedCount    = videoMode ? sections.filter(s => s.status === 'Done').length : 0;
 
   const handleDragStart = (e, idx) => { wasDraggingRef.current = false; setDragIdx(idx); e.dataTransfer.effectAllowed = 'move'; };
   const handleDragOver  = (e, idx) => {
@@ -444,7 +456,7 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
   const handleDrop    = e => { e.preventDefault(); if (localOrder) onSectionOrderSave(sourceId, localOrder); setDragIdx(null); setOverIdx(null); };
   const handleDragEnd = ()  => { wasDraggingRef.current = true; setDragIdx(null); setOverIdx(null); setTimeout(() => { wasDraggingRef.current = false; }, 80); };
 
-  if (!sections.length) return <div style={{ padding: '16px', fontSize: '12px', color: C.textM, fontStyle: 'italic', textAlign: 'center' }}>No sections.</div>;
+  if (!sections.length) return <div style={{ padding: '16px', fontSize: '12px', color: C.textM, fontStyle: 'italic', textAlign: 'center' }}>{videoMode ? 'No videos yet.' : 'No sections.'}</div>;
 
   return (
     <div>
@@ -459,9 +471,17 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
         const secW        = aviWordSectionCounts?.[secAviKey] || 0;
         const secS        = aviSentSectionCounts?.[secAviKey] || 0;
         const secAviTotal = secW + secS;
+        const statusLabel = videoMode && isDone ? 'Watched' : sec.status;
+        const watchedHead = videoMode && isDone && (idx === 0 || orderedSections[idx - 1].status !== 'Done');
 
         return (
-          <div key={sec.id} draggable
+          <Fragment key={sec.id}>
+          {watchedHead && (
+            <div style={{ padding: '10px 18px 5px', fontSize: '10px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM, borderBottom: `1px solid ${C.border}` }}>
+              Watched ({watchedCount})
+            </div>
+          )}
+          <div draggable
             ref={sec.id === highlightSectionId ? highlightRef : null}
             onDragStart={e => handleDragStart(e, idx)} onDragOver={e => handleDragOver(e, idx)}
             onDrop={handleDrop} onDragEnd={handleDragEnd}
@@ -481,7 +501,7 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
               <div onClick={e => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
                 <button onClick={() => onCycleStatus(sec.id, 'backward')} title="Previous status"
                   style={{ width: '16px', height: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent', border: 'none', cursor: 'pointer', color: C.textM, padding: 0, opacity: 0.55 }}>{Icons.chevronLeft}</button>
-                <div onClick={() => onSectionToggle(sec)} title={isDone ? 'Undo done' : 'Mark done'}
+                <div onClick={() => onSectionToggle(sec)} title={videoMode ? (isDone ? 'Undo watched' : 'Mark watched') : (isDone ? 'Undo done' : 'Mark done')}
                   style={{ width: '17px', height: '17px', borderRadius: '50%', flexShrink: 0, cursor: 'pointer',
                     border: isDone ? 'none' : `1.5px solid ${sCol}`,
                     background: isDone ? C.accent : 'transparent',
@@ -511,7 +531,7 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
               )}
               {/* Status text */}
               {sec.status && sec.status !== 'Not started' && (
-                <span style={{ fontSize: '10px', color: sCol, flexShrink: 0, opacity: 0.85 }}>{sec.status}</span>
+                <span style={{ fontSize: '10px', color: sCol, flexShrink: 0, opacity: 0.85 }}>{statusLabel}</span>
               )}
 
               {/* Right-side buttons */}
@@ -567,6 +587,7 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
               />
             )}
           </div>
+          </Fragment>
         );
       })}
     </div>
@@ -655,9 +676,14 @@ function EditableOrderNum({ value, onSave, C }) {
 }
 
 // ── Source row (compact, selectable) ──────────────────────────
-function SourceRow({ source, sections, isSelected, onSelect, wordCount = 0, sentCount = 0 }) {
+function SourceRow({ source, sections, isSelected, onSelect, wordCount = 0, sentCount = 0, dsh = 3 }) {
   const { C } = useAppTheme();
   const col            = typeColor(source.type);
+  // YouTube reference: a watch line instead of a progress bar (YT-D5).
+  const ytRef          = isYouTubeReference(source);
+  const watch          = ytRef ? watchSummary(sections) : null;
+  const watchText      = ytRef ? watchLine(watch, logicalDateOf(watch.lastWatchedAt, dsh), getLogicalDateStr(dsh)) : '';
+  const typeUnset      = !isKnownSourceType(source.type);
   const activeSections = sections.filter(s => s.status !== 'Skip');
   const doneSections   = activeSections.filter(s => s.status === 'Done').length;
   const skipped        = sections.filter(s => s.status === 'Skip').length;
@@ -711,15 +737,26 @@ function SourceRow({ source, sections, isSelected, onSelect, wordCount = 0, sent
         )}
       </div>
 
-      {/* Line 2: level + subtype tag + progress bar (type dot merged into bar at 0%) */}
+      {/* Line 2: level + subtype tag + progress bar (type dot merged into bar at 0%),
+          or the watch line for a YouTube reference */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
         {levelLabel && <span style={{ fontSize: '10px', color: C.textM, flexShrink: 0 }}>{levelLabel}</span>}
         {TYPE_SHORT_LABELS[source.type] && (
           <span style={{ fontSize: '10px', color: col, flexShrink: 0, opacity: 0.85 }}>{TYPE_SHORT_LABELS[source.type]}</span>
         )}
+        {typeUnset && (
+          <span title="This source's type isn't one the Library knows. Choose a type in its detail panel."
+            style={{ fontSize: '10px', color: C.warning, flexShrink: 0 }}>type not set</span>
+        )}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <ProgressBar done={effDone} total={effTotal} skipped={effSkipped}
-            realTotal={effRealTotal} color={col} soundProfile={null} />
+          {ytRef ? (
+            <div style={{ fontSize: '11px', fontFamily: SH.fm, color: C.textM, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {watchText}
+            </div>
+          ) : (
+            <ProgressBar done={effDone} total={effTotal} skipped={effSkipped}
+              realTotal={effRealTotal} color={col} soundProfile={null} />
+          )}
         </div>
       </div>
     </div>
@@ -743,7 +780,7 @@ function SourceDetailPanel({
   onNavigateToGrammar, onNavigateToNote, onNavigateToCorrection,
   onSectionToggle, onSectionTitleSave, onSourceTitleSave, onSourceFieldSave,
   onScheduleSection, onCycleStatus, onSectionFieldSave, onSectionOrderSave,
-  onDeleteSection, onDeleteSource, onAddSections, onAddNote, onAddCorrection,
+  onDeleteSection, onDeleteSource, onAddSections, onAddVideos, onAddNote, onAddCorrection,
   onAddNoteFromSection, onAddCorrectionFromSection,  onCycleSourceStatus, onSourceToggleDone,
   onLinkSources, onUnlinkSources, onToggleNoteLink,
   onArchiveSource, onRestoreSource, isPendingArchive,
@@ -755,6 +792,7 @@ function SourceDetailPanel({
   const [addSecCount,       setAddSecCount]       = useState('');
   const [addSecSaving,      setAddSecSaving]      = useState(false);
   const [addingToSeries,    setAddingToSeries]    = useState(false);
+  const [addVideoText,      setAddVideoText]      = useState('');
   // Source linking
   const [linkSearchOpen,    setLinkSearchOpen]    = useState(false);
   const [linkSearch,        setLinkSearch]        = useState('');
@@ -790,6 +828,8 @@ function SourceDetailPanel({
 
   const col        = typeColor(source.type);
   const noSections = sections.length === 0;
+  const ytRef      = isYouTubeReference(source);
+  const typeUnset  = !isKnownSourceType(source.type);
   const wordCount  = aviWordSectionCounts
     ? Object.entries(aviWordSectionCounts).filter(([k]) => k.startsWith(source.title + '|')).reduce((s, [, v]) => s + v, 0)
     : 0;
@@ -862,6 +902,19 @@ function SourceDetailPanel({
     setAddSecCount(''); setAddSecOpen(false); setAddSecSaving(false);
   };
 
+  // YouTube reference: paste one video link or title per line (YT-D7).
+  // New videos join the end of the queue: the source's order is saved with
+  // them appended (without a saved order, sections sort by title, and a
+  // link's title is its URL). The box stays open for the next paste.
+  const handleAddVideos = async () => {
+    const videos = parseVideoLines(addVideoText);
+    if (!videos.length || addSecSaving) return;
+    setAddSecSaving(true);
+    const newIds = (await onAddVideos?.(source.id, videos)) || [];
+    if (newIds.length) onSectionOrderSave?.(source.id, [...sections.map(s => s.id), ...newIds]);
+    setAddVideoText(''); setAddSecSaving(false);
+  };
+
   const pillStyle = (color) => ({
     display: 'inline-flex', alignItems: 'center', gap: '4px',
     padding: '2px 8px', borderRadius: '10px', fontSize: '11px',
@@ -901,8 +954,11 @@ function SourceDetailPanel({
 
         {/* Chips */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center', marginBottom: '9px' }}>
-          <select value={source.type || ''} onChange={e => onSourceTitleSave(source, source.title, source.url || '', e.target.value)}
-            style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '12px', cursor: 'pointer', border: `1px solid ${col}88`, background: `${col}18`, color: col, outline: 'none', appearance: 'none', WebkitAppearance: 'none' }}>
+          {/* An unrecognized type shows "Choose type…" rather than the first
+              option, which made it look like Grammar (YT-D3). */}
+          <select value={typeUnset ? '' : source.type} onChange={e => e.target.value && onSourceTitleSave(source, source.title, source.url || '', e.target.value)}
+            style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '12px', cursor: 'pointer', border: `1px solid ${typeUnset ? C.warning : col}88`, background: `${typeUnset ? C.warning : col}18`, color: typeUnset ? C.warning : col, outline: 'none', appearance: 'none', WebkitAppearance: 'none' }}>
+            {typeUnset && <option value="" disabled>Choose type…</option>}
             {TYPES.map(t => <option key={t.id} value={t.id}>{t.id}</option>)}
           </select>
           {(CONTENT_SUBTYPES[source.type] || []).length > 0 && (
@@ -934,8 +990,9 @@ function SourceDetailPanel({
           </button>
         </div>
 
-        {/* Source status (section-less only) */}
-        {noSections && (
+        {/* Source status (section-less only; a YouTube reference has no
+            finish line, so it has none) */}
+        {noSections && !ytRef && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '9px' }}>
             <span style={{ fontSize: '11px', color: C.textM, marginRight: '2px' }}>Status</span>
             <button onClick={() => onCycleSourceStatus?.(source.id, 'backward')} title="Previous status"
@@ -1181,6 +1238,7 @@ function SourceDetailPanel({
             onAddCorrectionFromSection={onAddCorrectionFromSection}
             highlightSectionId={highlightSectionId}
             onHighlightClear={onHighlightClear}
+            videoMode={ytRef}
           />
         ) : (
           <SectionDetailPanel
@@ -1211,12 +1269,34 @@ function SourceDetailPanel({
           />
         )}
 
-        {/* Add sections */}
+        {/* Add sections — or videos, for a YouTube reference (YT-D7) */}
         <div style={{ padding: '10px 16px', borderTop: `1px solid ${C.border}` }}>
           {!addSecOpen ? (
             <button onClick={() => setAddSecOpen(true)} style={{ fontSize: '11px', padding: '3px 12px', borderRadius: '6px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, cursor: 'pointer' }}>
-              + Add sections
+              {ytRef ? '+ Add videos' : '+ Add sections'}
             </button>
+          ) : ytRef ? (
+            <div onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <label style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.06em', color: C.textM, textTransform: 'uppercase' }}>Videos (one link or title per line)</label>
+              <textarea autoFocus rows={3}
+                style={{ ...S.formInput, fontSize: '16px', margin: 0, padding: '6px 8px', resize: 'vertical', fontFamily: 'inherit' }}
+                placeholder="https://www.youtube.com/watch?v=…"
+                value={addVideoText} onChange={e => setAddVideoText(e.target.value)}
+                onKeyDown={e => {
+                  if (isSubmitEnter(e) && !e.shiftKey) { e.preventDefault(); handleAddVideos(); }
+                  if (e.key === 'Escape') { setAddVideoText(''); setAddSecOpen(false); }
+                }} />
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={handleAddVideos} disabled={!addVideoText.trim() || addSecSaving}
+                  style={{ ...S.btnPrimary, fontSize: '12px', padding: '4px 14px', height: '30px', opacity: (!addVideoText.trim() || addSecSaving) ? 0.5 : 1 }}>
+                  {addSecSaving ? 'Adding…' : 'Add'}
+                </button>
+                <button onClick={() => { setAddVideoText(''); setAddSecOpen(false); }}
+                  style={{ fontSize: '12px', padding: '4px 10px', height: '30px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textM, borderRadius: '8px', cursor: 'pointer' }}>
+                  Done
+                </button>
+              </div>
+            </div>
           ) : (
             <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '80px' }}>
@@ -2125,6 +2205,9 @@ export function ContentLibraryPage({
     if (!uid) return;
     const updates = { title: newTitle, url: newUrl };
     if (newType !== undefined) updates.type = newType;
+    // A new type drops a subtype it doesn't offer (YT-D9).
+    if (newType !== undefined && newType !== source.type && source.subtype
+        && !(CONTENT_SUBTYPES[newType] || []).includes(source.subtype)) updates.subtype = null;
     if (newTitle !== source.title) onSourceRename?.(source.title, newTitle);
     setSources(prev => prev.map(s => s.id === source.id ? { ...s, ...updates } : s));
     try { await updateDoc(doc(db, 'users', uid, 'content_sources', source.id), updates); }
@@ -2439,6 +2522,23 @@ export function ContentLibraryPage({
     }
     setSections(prev => [...prev, ...newSecs.filter(n => !prev.some(p => p.id === n.id))]);
   }, [sections]);
+
+  // YouTube reference: one section per pasted video, titled by the pasted
+  // line; a link line is also the section's link (YT-D7).
+  const handleAddVideos = useCallback(async (sourceId, videos) => {
+    const uid = auth.currentUser?.uid;
+    if (!uid || !videos?.length) return;
+    const newSecs = [];
+    for (const v of videos) {
+      const secPayload = { content: v.content, resourceId: sourceId, status: 'Not started', createdAt: new Date().toISOString(), ...(v.url ? { url: v.url } : {}) };
+      try {
+        const secRef = await addDoc(collection(db, 'users', uid, 'content_sections'), secPayload);
+        newSecs.push({ id: secRef.id, ...secPayload });
+      } catch (e) { console.error('Add video failed:', e); }
+    }
+    setSections(prev => [...prev, ...newSecs.filter(n => !prev.some(p => p.id === n.id))]);
+    return newSecs.map(n => n.id);
+  }, []);
 
   // Toggle note link on a section or section-less source.
   // Also writes/clears linkedSourceId on the note document.
@@ -2782,8 +2882,8 @@ export function ContentLibraryPage({
                 {visible.length === 0 ? (
                   <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '12px', fontStyle: 'italic' }}>No sources found</div>
                 ) : visible.map((source, idx) => {
-                  const fam       = familyOf(source);
-                  const newFamily = idx === 0 || familyOf(visible[idx - 1]) !== fam;
+                  const fam       = groupOf(source);
+                  const newFamily = idx === 0 || groupOf(visible[idx - 1]) !== fam;
                   return (
                   <div key={source.id} data-source-id={source.id}>
                   {newFamily && <FamilyHeader family={fam} />}
@@ -2791,7 +2891,7 @@ export function ContentLibraryPage({
                     sections={sectionsBySource[source.id] || []}
                     isSelected={selectedSourceId === source.id}
                     wordCount={wordCountBySource[source.title] || 0}
-                    sentCount={sentCountBySource[source.title] || 0}
+                    sentCount={sentCountBySource[source.title] || 0} dsh={dsh}
                     onSelect={() => setSelectedSourceId(source.id === selectedSourceId ? null : source.id)} />
                   </div>
                   );
@@ -2841,6 +2941,7 @@ export function ContentLibraryPage({
                 onDeleteSection={handleDeleteSection}
                 onDeleteSource={handleDeleteSource}
                 onAddSections={handleAddSections}
+                onAddVideos={handleAddVideos}
                 onAddNote={handleAddNoteFromSource}
                 onAddCorrection={handleAddCorrectionFromSource}
                 onAddNoteFromSection={handleAddNoteFromSection}
@@ -2953,8 +3054,8 @@ export function ContentLibraryPage({
                 {visibleArchived.length === 0 ? (
                   <div style={{ padding: '24px', textAlign: 'center', color: C.textM, fontSize: '12px', fontStyle: 'italic' }}>No archived sources</div>
                 ) : visibleArchived.map((source, idx) => {
-                  const fam       = familyOf(source);
-                  const newFamily = idx === 0 || familyOf(visibleArchived[idx - 1]) !== fam;
+                  const fam       = groupOf(source);
+                  const newFamily = idx === 0 || groupOf(visibleArchived[idx - 1]) !== fam;
                   return (
                   <div key={source.id}>
                   {newFamily && <FamilyHeader family={fam} />}
@@ -2962,7 +3063,7 @@ export function ContentLibraryPage({
                     sections={sectionsBySource[source.id] || []}
                     isSelected={selectedSourceId === source.id}
                     wordCount={wordCountBySource[source.title] || 0}
-                    sentCount={sentCountBySource[source.title] || 0}
+                    sentCount={sentCountBySource[source.title] || 0} dsh={dsh}
                     onSelect={() => setSelectedSourceId(source.id === selectedSourceId ? null : source.id)} />
                   </div>
                   );
@@ -3006,6 +3107,7 @@ export function ContentLibraryPage({
                 onDeleteSection={handleDeleteSection}
                 onDeleteSource={handleDeleteSource}
                 onAddSections={handleAddSections}
+                onAddVideos={handleAddVideos}
                 onAddNote={handleAddNoteFromSource}
                 onAddCorrection={handleAddCorrectionFromSource}
                 onAddNoteFromSection={handleAddNoteFromSection}

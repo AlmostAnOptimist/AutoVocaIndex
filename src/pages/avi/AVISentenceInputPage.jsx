@@ -30,7 +30,7 @@ import { useSearchAssist } from '../../hooks/useSearchAssist.js';
 import { SearchAnchorNote, DidYouMean } from '../../components/avi/SearchAssist.jsx';
 import { scrollListToTop } from '../../utils/scrollUtils.js';
 import { findLemmaEntryAny, canonicalLemma, otherReadings } from '../../utils/lemmaSuggest.js';
-import { planDef2Moves, applyDef2Moves, def2CardUpdate } from '../../utils/def2Cascade.js';
+import { planDef2Moves, applyDef2Moves, def2CardUpdate, applyDef2Write } from '../../utils/def2Cascade.js';
 
 // The Lemma Master entry a picked term lands on (exact, cleaned or variant
 // match) — the same lookup handlePopupDone uses to decide "existing".
@@ -165,7 +165,7 @@ export function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, o
                     borderRadius: '4px', color: t.skipped ? C.accent : C.textM,
                     fontSize: '11px', padding: '3px 7px', cursor: 'pointer',
                   }}>
-                    {t.skipped ? '↩ Undo' : 'Skip'}
+                    {t.skipped ? '⟲ Undo' : 'Skip'}
                   </button>
                 )}
               </div>
@@ -228,7 +228,7 @@ export function PickWordPopup({ terms, step, fetching, onConfirmStep1, onDone, o
               onClick={() => onConfirmStep1(activeTerms)}
               disabled={fetching || activeTerms.length === 0}
             >
-              {fetching ? '⟳ Fetching definitions…' : '▶ Confirm & Fetch Definitions'}
+              {fetching ? '⟳ Fetching definitions…' : '▸ Confirm & Fetch Definitions'}
             </button>
           ) : (
             <button
@@ -864,11 +864,12 @@ export function AVISentenceInputPage({
       }, def2Moves, now, 'Definition 2 updated in Sentence Input');
       return { ...prev, ...moved };
     });
+    // LD-D1: every card of the word takes the def2 (a sentence card whose
+    // back was a def1 too).
     for (const { entry, def2 } of def2Moves.values()) {
-      if (!entry.def2) continue; // no cards carry a def2 back for it yet
       updateLinkedCards({
         lemmaID: entry.lemmaID, lemmaText: entry.lemma,
-        buildUpdates: (c) => def2CardUpdate(c, entry.def2, def2),
+        buildUpdates: (c) => def2CardUpdate(c, def2),
         cards, uid, updateCards,
       }).catch(e => console.error('Sentence Input: card back update failed', e));
     }
@@ -936,10 +937,47 @@ export function AVISentenceInputPage({
     const row = data.sentenceInputs.find(s => s.uid === rowUid);
     if (!row) return;
     const targetChanged = edits.targetWord !== undefined && edits.targetWord !== row.targetWord;
-    const backChanged   = edits.cardBack   !== undefined && edits.cardBack   !== row.cardBack;
     const skipChanged   = edits.skipUpload !== undefined && edits.skipUpload !== !!row.skipUpload;
-    if (!targetChanged && !backChanged && !skipChanged) return;
     const now = new Date().toISOString();
+
+    // LD-D1: a sentence card's back is its word's back, so a back typed here
+    // is the word's Definition 2. It goes through the def2 writer for the
+    // (new) target word after a confirmation that shows everything it
+    // changes; Cancel keeps the current def2. An emptied back changes
+    // nothing (LD-D2: backs are kept until a new def2 is saved). A word with
+    // no Lemma Master entry keeps the old behavior: this row's back only.
+    const typedBack = edits.cardBack !== undefined && edits.cardBack !== row.cardBack && edits.cardBack.trim()
+      ? edits.cardBack : null;
+    const backTarget = edits.targetWord !== undefined ? edits.targetWord : row.targetWord;
+    const defEntry = typedBack
+      ? data.lemmaMaster.find(l => normalizeLemma(l.lemma) === normalizeLemma(backTarget)) || null
+      : null;
+    let def2Write = null;
+    let backChanged = false;
+    if (typedBack && !defEntry) {
+      backChanged = true;
+    } else if (typedBack && defEntry) {
+      if (typedBack === (defEntry.def2 || '')) {
+        def2Write = { entry: defEntry, def2: typedBack }; // already the def2: just align this word's copies
+      } else {
+        const scope = applyDef2Write(data, { lemma: defEntry.lemma, def2: typedBack, now, reason: '' }).counts;
+        const normT = normalizeLemma(defEntry.lemma);
+        const cardCount = (cards || []).filter(c =>
+          (c.linkedAVILemmaId === defEntry.lemmaID || (c.lemma && normalizeLemma(c.lemma) === normT)) &&
+          def2CardUpdate(c, typedBack)).length;
+        const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+        const ok = window.confirm(
+          `Change Definition 2 for "${defEntry.lemma}"?\n\n` +
+          `A sentence card shows its word's Definition 2, so this changes it everywhere: ` +
+          `Lemma Master, ${plural(scope.wordRows, 'word row')}, ${plural(scope.sentenceRows, 'sentence row')} ` +
+          `and ${plural(cardCount, 'card')}.\n\nCancel keeps the current Definition 2.`
+        );
+        if (ok) def2Write = { entry: defEntry, def2: typedBack };
+      }
+    }
+    const rowEdits = { ...edits };
+    if (!backChanged) delete rowEdits.cardBack;
+    if (!targetChanged && !backChanged && !skipChanged && !def2Write) return;
 
     // Retarget without a manual back edit: the current back belonged to
     // the old target, so recompute it from the new target's defs. Blank
@@ -956,22 +994,30 @@ export function AVISentenceInputPage({
       ? (newTargetEntry?.def2 || '')
       : null;
 
-    updateData(prev => ({
-      ...prev,
-      sentenceInputs: prev.sentenceInputs.map(s => {
-        if (s.uid !== rowUid) return s;
-        // A10: a Skip change here is this row's own (drops the word's marker).
-        const next = skipChanged ? { ...withOwnSentenceSkip(s, edits.skipUpload), ...edits } : { ...s, ...edits };
-        if (targetChanged) next.cardFront = (edits.targetWord || s.targetWord) + '\n' + (s.sentence || '');
-        if (autoBack !== null) next.cardBack = autoBack;
-        if ((targetChanged || backChanged) && s.uploaded) {
-          next.uploaded          = false;
-          next.lastUncheckReason = 'fields edited';
-          next.lastUncheckDate   = now;
-        }
-        return next;
-      }),
-    }));
+    updateData(prev => {
+      const out = {
+        ...prev,
+        sentenceInputs: prev.sentenceInputs.map(s => {
+          if (s.uid !== rowUid) return s;
+          // A10: a Skip change here is this row's own (drops the word's marker).
+          const next = skipChanged ? { ...withOwnSentenceSkip(s, rowEdits.skipUpload), ...rowEdits } : { ...s, ...rowEdits };
+          if (targetChanged) next.cardFront = (rowEdits.targetWord || s.targetWord) + '\n' + (s.sentence || '');
+          if (autoBack !== null) next.cardBack = autoBack;
+          if ((targetChanged || backChanged) && s.uploaded) {
+            next.uploaded          = false;
+            next.lastUncheckReason = 'fields edited';
+            next.lastUncheckDate   = now;
+          }
+          return next;
+        }),
+      };
+      if (!def2Write) return out;
+      // eslint-disable-next-line no-unused-vars
+      const { counts, ...written } = applyDef2Write(out, {
+        lemma: def2Write.entry.lemma, def2: def2Write.def2, now, reason: 'Definition 2 edited in Sentence Input',
+      });
+      return { ...out, ...written };
+    });
 
     // Cascade to this row's card precisely: only sentence cards carrying
     // this exact sentence under the old target are touched.
@@ -989,11 +1035,20 @@ export function AVISentenceInputPage({
               linkedAVILemmaId: newTargetEntry?.lemmaID || null,
             } : {}),
             ...(backChanged ? { back: edits.cardBack } : {}),
-            ...(autoBack !== null ? { back: autoBack } : {}),
+            ...(autoBack !== null && autoBack ? { back: autoBack } : {}),
+            ...(def2Write && targetChanged ? { back: def2Write.def2 } : {}),
           };
         },
         cards, uid, updateCards,
       }).catch(e => console.error('Sentence edit: card update failed', e));
+    }
+    // LD-D1: the word's cards take the new def2.
+    if (def2Write) {
+      updateLinkedCards({
+        lemmaID: def2Write.entry.lemmaID, lemmaText: def2Write.entry.lemma,
+        buildUpdates: (c) => def2CardUpdate(c, def2Write.def2),
+        cards, uid, updateCards,
+      }).catch(e => console.error('Sentence edit: def2 card update failed', e));
     }
   }, [data, updateData, cards, uid, updateCards]);
 

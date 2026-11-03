@@ -87,6 +87,78 @@ export function isPassiveMediaExcluded(src) {
   return PASSIVE_MEDIA_ORIGINS.some(kw => origin.includes(kw));
 }
 
+// ── YouTube references (Oct 2026; decisions YT-D1–YT-D10) ──
+// A YouTube channel kept for passive listening or grammar reinforcement is a
+// Reference source with the YouTube subtype (YT-D1). Its sections are videos:
+// watched or still to watch, never a set to finish, so the Library shows a
+// watch line instead of a progress bar (YT-D5) and lists watched videos
+// below the rest (YT-D6). All pure.
+
+export function isYouTubeReference(src) {
+  return !!src && src.type === 'Reference' && src.subtype === 'YouTube';
+}
+
+// Whether a source's type is one the Library knows (YT-D3).
+export function isKnownSourceType(type) {
+  return !!TYPE_FAMILY_MAP[type];
+}
+
+// Counts for the watch line. Skipped videos count as neither. lastWatchedAt
+// is the latest activity stamp among watched videos; videos marked watched
+// before stamps existed have none, so it can be null with watched > 0.
+export function watchSummary(sections) {
+  let watched = 0, toWatch = 0, lastWatchedAt = null;
+  for (const s of sections || []) {
+    if (s.status === 'Skip') continue;
+    if (s.status === 'Done') {
+      watched++;
+      if (s.lastActivityAt && (!lastWatchedAt || s.lastActivityAt > lastWatchedAt)) lastWatchedAt = s.lastActivityAt;
+    } else {
+      toWatch++;
+    }
+  }
+  return { watched, toWatch, lastWatchedAt };
+}
+
+// Unwatched videos first, then watched ones; each group keeps its order.
+export function watchedLastOrder(sections) {
+  const list = sections || [];
+  return [...list.filter(s => s.status !== 'Done'), ...list.filter(s => s.status === 'Done')];
+}
+
+// "today", "yesterday", "Oct 12", or "Oct 12, 2025" in another year. Both
+// arguments are logical days (YYYY-MM-DD).
+export function fmtWatchDay(dayStr, todayStr) {
+  if (!dayStr) return '';
+  if (dayStr === todayStr) return 'today';
+  const d = new Date(dayStr + 'T00:00:00');
+  if (isNaN(d.getTime())) return '';
+  const t = new Date(todayStr + 'T00:00:00');
+  const y = new Date(t); y.setDate(y.getDate() - 1);
+  if (!isNaN(t.getTime()) && d.getTime() === y.getTime()) return 'yesterday';
+  const sameYear = !isNaN(t.getTime()) && d.getFullYear() === t.getFullYear();
+  return d.toLocaleDateString('en-US', sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// The watch line text: "3 watched · 2 to watch · last watched Oct 12".
+export function watchLine(summary, lastWatchedDay, todayStr) {
+  const { watched = 0, toWatch = 0 } = summary || {};
+  if (watched === 0 && toWatch === 0) return 'No videos yet';
+  const parts = [];
+  if (watched > 0) parts.push(`${watched} watched`);
+  if (toWatch > 0) parts.push(`${toWatch} to watch`);
+  const when = fmtWatchDay(lastWatchedDay, todayStr);
+  if (watched > 0 && when) parts.push(`last watched ${when}`);
+  return parts.join(' · ');
+}
+
+// Video lines pasted into "+ Add videos": one per line, trimmed, blanks
+// dropped. A line that is a web link also becomes the video's link.
+export function parseVideoLines(text) {
+  return String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    .map(content => (/^https?:\/\/\S+$/i.test(content) ? { content, url: content } : { content }));
+}
+
 // ── Finishing a section outside the Library (bug sweep K6) ────
 // What finishing a section from Today or an appointment must write so it
 // matches the Library's own Done path: the section keeps its previous status

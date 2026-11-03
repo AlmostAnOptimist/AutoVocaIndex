@@ -206,6 +206,19 @@ export function getWindowEnd(task) {
 
 const OVERDUE_AUTO_UNSCHEDULE_DAYS = 14;
 
+// SRS spike-forecast tasks (srsEngine) only mean something on their own day.
+// One that was never checked off is "missed" once that day has passed, and
+// so is one the 14-day rule below already left with no date. Missed ones are
+// dropped by runRecurrenceEngine instead of piling up in Overdue (and then
+// Unscheduled). Completed spike tasks are kept like any other task.
+export function isMissedSpikeTask(task, logicalToday) {
+  if (!task || task.source !== 'srs_forecast' || task.completed || task.persistent) return false;
+  const last = taskLastDate(task);
+  if (!last) return true;
+  const d = parseDate(last);
+  return !!d && d < logicalToday;
+}
+
 // T8: enough steps for a daily task missed for almost three years.
 const MAX_CATCH_UP_STEPS = 1000;
 
@@ -279,7 +292,14 @@ export function runRecurrenceEngine(tasks, dsh) {
 
   let changed = false;
 
-  const updated = tasks.map(task => {
+  // Missed SRS spike tasks are deleted outright (isMissedSpikeTask).
+  const kept = tasks.filter(task => {
+    if (!isMissedSpikeTask(task, logicalToday)) return true;
+    changed = true;
+    return false;
+  });
+
+  const updated = kept.map(task => {
     // ── Persistent tasks: skip all recurrence/overdue logic ──
     if (task.persistent) return task;
 

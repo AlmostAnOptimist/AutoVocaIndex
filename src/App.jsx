@@ -697,6 +697,7 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                 user={user}
                 syncStatus={syncStatus}
                 onSignOut={onSignOut}
+                onOpenTheme={() => setThemeOpen(true)}
               />
             )}
 {page === 'grammar'    && <GrammarIndexPage defaultOpenEntryId={grammarTarget} onNavigateToFlashcard={(cardIdOrIds) => { setFlashcardStudyTarget(Array.isArray(cardIdOrIds) ? cardIdOrIds : [cardIdOrIds]); setPage('flashcards'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} onNavigateToContent={(sourceId) => { setContentSourceTarget(sourceId); setPage('content'); }} onMasteryCounts={onMasteryCounts} onEntriesChange={onEntriesChange} getCardNextDueDate={getCardNextDueDate} onCardNextDueDateChanged={onCardNextDueDateChanged} updateCards={updateCards} cards={cards} dsh={dsh} />}

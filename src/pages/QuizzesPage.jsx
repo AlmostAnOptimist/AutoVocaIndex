@@ -1,5 +1,5 @@
 // src/pages/QuizzesPage.jsx
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   collection, getDocs, updateDoc, setDoc, query, orderBy, getDoc, doc as fsDoc,
@@ -60,6 +60,7 @@ import {
   GazetteStandfirst, DropCapLead, GazetteFig, GazetteBox, BoxRow, GazetteSplitFig,
 } from '../components/GazetteComponents.jsx';
 import { SessionIntro, ScorePlate, Rail } from '../components/Ornaments.jsx';
+import { resetPageScroll } from '../utils/scrollUtils.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
 import {
   buildSeriesGroups, wordSeries, sentenceSeries, expandDeckSelection,
@@ -5995,19 +5996,11 @@ export function QuizzesPage({ soundProfile, quizSoundsEnabled = true, cards: pro
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [echoDeckTarget]);
 
-  // Reset scroll position when returning to the home/report views on mobile.
-  // The topbar is height-collapsed for quizzes on mobile, so the content area
-  // extends to the top of the viewport. Without this, the content-pad's
-  // scrollTop from a quiz session persists when returning home. Uses rAF so
-  // it fires after the browser paints, reliably after iOS scroll restoration.
-  useEffect(() => {
-    if (!isMobile) return;
-    if (view !== 'home' && view !== 'report') return;
-    requestAnimationFrame(() => {
-      const el = document.querySelector('.content-pad');
-      if (el) el.scrollTop = 0;
-    });
-  }, [view]);
+  // Every view opens at the top, on every device: all views share one
+  // scroller (.content-pad), so without this a view opens at the scroll
+  // position of the one before it (home -> session intro, session -> results,
+  // results -> home). Also when the intro hands over to the session.
+  useLayoutEffect(() => resetPageScroll(), [view, introDoneFor]);
 
   const deckNameMap = useMemo(() => {
     const m = {}; decks.forEach(d => { m[d.id] = d.name; }); return m;

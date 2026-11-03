@@ -16,9 +16,11 @@ import {
 import { playSound } from '../utils/soundEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
 import { planCardDedupe, mergeSameNameDecks, planSeriesShare, applySeriesShare } from '../utils/cardDedupe.js';
+import { pickEntriesByNorm, def2CardUpdate } from '../utils/def2Cascade.js';
 import { buildSeriesGroups, wordSeries, sentenceSeries, isSeriesToken, SENTENCE_DECK_SUFFIX } from '../utils/seriesDecks.js';
 import { getLogicalDateStr } from '../utils/dateUtils.js';
 import { queueWrite, isNotFound } from '../utils/queuedWrite.js';
+import { resetPageScroll } from '../utils/scrollUtils.js';
 import { runSpikeForecast, DAILY_CAP } from '../utils/srsEngine.js';
 import { ActivityHeatmap, shiftMonth } from '../components/ActivityHeatmap.jsx';
 import { applyReviewToStats, getEffectiveCurrentStreak, EMPTY_REVIEW_STATS } from '../utils/reviewStatsEngine.js';
@@ -132,9 +134,14 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 
   const initialPhase = manualCards.length > 0 ? 'manual' : dueCards.length > 0 ? 'due' : 'opening_boundary';
   const [phase,            setPhase]            = useState(initialPhase);
-  // O1: opening bookend. Shown once when a session starts straight into
-  // cards; 'Nothing due today' has its own screen, so it skips this.
-  const [introOpen,        setIntroOpen]        = useState(initialPhase === 'manual' || initialPhase === 'due');
+  // O1: opening bookend. Shown when a session starts straight into cards
+  // ('Nothing due today' has its own screen, so it skips this). O3: also
+  // shown at the start of every round begun from a choice screen (new
+  // cards, full deck, due after selected), and skipped for a single-card
+  // View Card jump, which should open the card at once.
+  const [introOpen,        setIntroOpen]        = useState(
+    (initialPhase === 'manual' && manualCards.length > 1) || initialPhase === 'due'
+  );
   const [queue,           setQueue]            = useState(() => manualCards.length > 0 ? [...manualCards] : dueCards.length > 0 ? [...dueCards] : []);
   const [againCounts,      setAgainCounts]      = useState({}); // cardId -> Again count this phase
   const [revealed,         setRevealed]         = useState(false);
@@ -197,6 +204,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 
   const startPhase = useCallback((newPhase) => {
     setPhase(newPhase);
+    setIntroOpen(true); // O3: each round opens with its bookend
     setPhaseBase(successCount + carriedOver);
     setAgainCounts({});
     setRevealed(false);
@@ -429,6 +437,12 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     };
   }, [phase, introOpen]); // O1: the first card mounts when the intro closes
 
+  // Each screen of the session (intro, cards, round end, finished) starts at
+  // the top: they replace one another in the page's shared scroller, so the
+  // 새 카드 intro otherwise opened as far down as the round-end screen had
+  // been scrolled to reach its button.
+  useLayoutEffect(() => resetPageScroll(), [phase, introOpen]);
+
   // Clear any fling transform once the next card mounts, so it appears centred
   // (paired with the swipe fling in onEnd above). No-op for non-swipe advances,
   // where the transform is already empty. Runs before paint to avoid a flash.
@@ -442,15 +456,19 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 
   // ── Opening bookend (O1) ─────────────────────────────────
   if (introOpen) {
-    const detail = phase === 'manual'
-      ? `${manualCards.length} selected`
-      : `${dueCards.length} due${newCards.length > 0 ? ` · ${newCards.length} new` : ''}`;
+    const count = (n, w) => `${n} ${w}${n !== 1 ? 's' : ''}`;
+    // O3: the round decides the heading.
+    const intro =
+      phase === 'new'   ? { korean: '새 카드',   title: 'New Cards', detail: count(newCards.length, 'new card') }
+      : phase === 'extra' ? { korean: '전체 카드', title: 'Full Deck', detail: count(extraCards.length, 'card') }
+      : phase === 'manual' ? { korean: '복습', title: 'Review Session', detail: `${manualCards.length} selected` }
+      : { korean: '복습', title: 'Review Session', detail: `${dueCards.length} due${newCards.length > 0 ? ` · ${newCards.length} new` : ''}` };
     return (
       <SessionIntro
         kind="medallion"
-        korean="복습"
-        title="Review Session"
-        detail={detail}
+        korean={intro.korean}
+        title={intro.title}
+        detail={intro.detail}
         sub={reversed ? 'Reversed' : null}
         onBegin={() => setIntroOpen(false)}
         onExit={onEnd}
@@ -525,77 +543,75 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     );
   }
 
+  // ── Round ends (O2) ───────────────────────────────────────
+  // A finished round (selected, due or new cards) gets the closing bookend:
+  // the 완료 medallion with a short pendant, then the ways on. The session
+  // end itself is the 'finished' screen above.
+  const roundEnd = (title, count, buttons) => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', maxWidth: '480px', margin: '0 auto' }} className="fade-up">
+      <Medallion>
+        <div style={{ fontFamily: SH.fk, fontSize: '34px', fontWeight: 700, color: C.accent, lineHeight: 1 }}>완료</div>
+        <div style={{ fontFamily: SH.fd, fontSize: '18px', color: C.text }}>{title}</div>
+        <MiniRule />
+        {count != null && (
+          <div style={{ fontFamily: SH.fm, fontSize: '13px', color: C.text }}>
+            {count} card{count !== 1 ? 's' : ''} reviewed
+          </div>
+        )}
+      </Medallion>
+      <Pendant variant="close" height={110} style={{ marginTop: '-1px' }} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '280px', marginTop: '24px' }}>
+        {buttons}
+        <button style={{ ...S.btnGhost, opacity: 0.7, justifyContent: 'center' }} onClick={onEnd}>End session</button>
+      </div>
+    </div>
+  );
+
   // ── Boundary: after manually-selected cards ───────────────
   if (phase === 'boundary_manual') {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', gap: '16px', maxWidth: '480px', margin: '0 auto' }} className="fade-up">
-        <div style={{ fontFamily: SH.fd, fontSize: '22px', fontWeight: 300, fontStyle: 'italic', color: C.text, textAlign: 'center' }}>
-          Selected cards complete
-        </div>
-        <div style={{ fontSize: '13px', color: C.textM, textAlign: 'center' }}>
-          {manualCards.length} card{manualCards.length !== 1 ? 's' : ''} reviewed
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '280px', marginTop: '8px' }}>
-          {dueCards.length > 0 && (
-            <button style={S.btnPrimary} onClick={() => startPhase('due')}>
-              Continue to {dueCards.length} due card{dueCards.length !== 1 ? 's' : ''}
-            </button>
-          )}
-          {extraCards.length > 0 && (
-            <button style={S.btnGhost} onClick={() => startPhase('extra')}>
-              {dueCards.length > 0 ? 'Skip to full deck' : 'Continue to full deck'}
-            </button>
-          )}
-          <button style={{ ...S.btnGhost, opacity: 0.7 }} onClick={onEnd}>End session</button>
-        </div>
-      </div>
-    );
+    return roundEnd('Selected cards complete', manualCards.length, (
+      <>
+        {dueCards.length > 0 && (
+          <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => startPhase('due')}>
+            Continue to {dueCards.length} due card{dueCards.length !== 1 ? 's' : ''}
+          </button>
+        )}
+        {extraCards.length > 0 && (
+          <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
+            {dueCards.length > 0 ? 'Skip to full deck' : 'Continue to full deck'}
+          </button>
+        )}
+      </>
+    ));
   }
 
   // ── Boundary: after due phase ─────────────────────────────
   if (phase === 'boundary_1_2') {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', gap: '16px', maxWidth: '480px', margin: '0 auto' }} className="fade-up">
-        <div style={{ fontFamily: SH.fd, fontSize: '22px', fontWeight: 300, fontStyle: 'italic', color: C.text, textAlign: 'center' }}>
-          Due cards complete
-        </div>
-        <div style={{ fontSize: '13px', color: C.textM, textAlign: 'center' }}>
-          {dueCards.length} card{dueCards.length !== 1 ? 's' : ''} reviewed
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '280px', marginTop: '8px' }}>
-          {newCards.length > 0 && (
-            <button style={S.btnPrimary} onClick={() => startPhase('new')}>
-              Study {newCards.length} new card{newCards.length !== 1 ? 's' : ''}
-            </button>
-          )}
-          {extraCards.length > 0 && (
-            <button style={S.btnGhost} onClick={() => startPhase('extra')}>
-              {newCards.length > 0 ? 'Skip to full deck' : 'Continue to full deck'}
-            </button>
-          )}
-          <button style={{ ...S.btnGhost, opacity: 0.7 }} onClick={onEnd}>End session</button>
-        </div>
-      </div>
-    );
+    return roundEnd('Due cards complete', dueCards.length, (
+      <>
+        {newCards.length > 0 && (
+          <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => startPhase('new')}>
+            Study {newCards.length} new card{newCards.length !== 1 ? 's' : ''}
+          </button>
+        )}
+        {extraCards.length > 0 && (
+          <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
+            {newCards.length > 0 ? 'Skip to full deck' : 'Continue to full deck'}
+          </button>
+        )}
+      </>
+    ));
   }
 
   // ── Boundary: after new cards phase ──────────────────────
   if (phase === 'boundary_2_3') {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', gap: '16px', maxWidth: '480px', margin: '0 auto' }} className="fade-up">
-        <div style={{ fontFamily: SH.fd, fontSize: '22px', fontWeight: 300, fontStyle: 'italic', color: C.text, textAlign: 'center' }}>
-          New cards complete
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '280px', marginTop: '8px' }}>
-          {extraCards.length > 0 && (
-            <button style={S.btnPrimary} onClick={() => startPhase('extra')}>
-              Continue to full deck
-            </button>
-          )}
-          <button style={{ ...S.btnGhost, opacity: 0.7 }} onClick={onEnd}>End session</button>
-        </div>
-      </div>
-    );
+    return roundEnd('New cards complete', newCards.length, (
+      extraCards.length > 0 && (
+        <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
+          Continue to full deck
+        </button>
+      )
+    ));
   }
 
   // ── Active card review ────────────────────────────────────
@@ -1576,23 +1592,17 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     // without a def2 are skipped (never blank a back — the backless filter
     // above deletes those), grammar cards are untouched, and the matching
     // entry also repairs linkedAVILemmaId so future ID lookups converge.
+    // LD-D5: the entry picker and the back rule are the ones the Dev
+    // Dashboard's Def2 resync uses (def2Cascade), so the two tools agree.
     const resyncPairs = [];
     try {
       const lmSnap = await getDocs(collection(db, 'users', uid, 'lemmaMaster'));
-      const bestByNorm = new Map();
-      lmSnap.docs.forEach(d => {
-        const l = d.data();
-        if (!l.def2 || !l.lemma) return;
-        const key = normalizeLemma(l.lemma);
-        if (!key) return;
-        const cur = bestByNorm.get(key);
-        if (!cur || (l.lastUpdated || '') > (cur.lastUpdated || '')) bestByNorm.set(key, l);
-      });
+      const bestByNorm = pickEntriesByNorm(lmSnap.docs.map(d => d.data()));
       for (const c of allCardsForCleanup) {
         if (c.type === 'grammar' || !c.lemma || deletingIds.has(c.id)) continue;
         const entry = bestByNorm.get(normalizeLemma(c.lemma));
-        if (!entry || c.back === entry.def2) continue;
-        const u = { back: entry.def2 };
+        const u = entry ? def2CardUpdate(c, entry.def2) : null;
+        if (!u) continue;
         if (entry.lemmaID && c.linkedAVILemmaId !== entry.lemmaID) u.linkedAVILemmaId = entry.lemmaID;
         resyncPairs.push([c.id, u]);
       }

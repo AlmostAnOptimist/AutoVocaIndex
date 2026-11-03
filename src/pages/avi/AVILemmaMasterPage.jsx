@@ -26,6 +26,7 @@ import { SUGGESTION_KIND_LABEL } from '../../hooks/useLemmaSearch.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { LemmaAutocompleteInput, LemmaMergeModal } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { planCardDedupe, applyCardDedupe, dedupeLemmaRows } from '../../utils/cardDedupe.js';
+import { applyDef2Write, def2CardUpdate, applyDef1BackFollow, def1CardUpdate } from '../../utils/def2Cascade.js';
 import { Icons, MagnifyIcon } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
 import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
@@ -614,7 +615,8 @@ export function AVILemmaMasterPage({
         // holds now, not the snapshot from before the await.
         const liveEntry = liveRef.current.data.lemmaMaster.find(l => l.lemmaID === lemmaID);
         if (def1 !== oldDef1 && liveEntry && (liveEntry.def1 || '') === oldDef1) {
-          const follows = isRealDefinition(def1) && !!oldDef1;
+          // LD-D3: def1 backs follow only while the word has no def2.
+          const follows = isRealDefinition(def1) && !!oldDef1 && !liveEntry.def2;
           updateData(prev => {
             const entry = prev.lemmaMaster.find(l => l.lemmaID === lemmaID);
             if (!entry || (entry.def1 || '') !== oldDef1) return prev;
@@ -633,11 +635,7 @@ export function AVILemmaMasterPage({
               ),
               // Sentence backs derived from def1 follow a real hit only.
               sentenceInputs: follows
-                ? prev.sentenceInputs.map(s =>
-                    normalizeLemma(s.targetWord) === entryNorm && s.cardBack === oldDef1
-                      ? { ...s, cardBack: def1 }
-                      : s
-                  )
+                ? applyDef1BackFollow(prev.sentenceInputs, { lemma: entry.lemma, oldDef1, def1, hasDef2: !!entry.def2 })
                 : prev.sentenceInputs,
             };
           });
@@ -645,7 +643,7 @@ export function AVILemmaMasterPage({
             // Cards whose back was the old def1 (no def2 on the lemma) follow.
             updateLinkedCards({
               lemmaID, lemmaText: value,
-              buildUpdates: (c) => c.back === oldDef1 ? { back: def1 } : null,
+              buildUpdates: (c) => def1CardUpdate(c, { oldDef1, def1, hasDef2: false }),
               cards: liveRef.current.cards, uid, updateCards,
             }).catch(e => console.error('LM rename def1: card update failed', e));
           }
@@ -658,54 +656,38 @@ export function AVILemmaMasterPage({
         ...prev,
         lemmaMaster: prev.lemmaMaster.map(l => l.lemmaID !== lemmaID ? l : { ...l, def1: value, lastUpdated: now, autoAddedBy: 'manual' }),
         wordInputs:  prev.wordInputs.map(w => normalizeLemma(w.lemma) === oldNorm ? { ...w, def1: value } : w),
-        // Sentence rows whose cardBack was derived from def1 (no def2 on the
-        // lemma) follow it; the exact-match guard protects hand-edited backs.
-        sentenceInputs: prev.sentenceInputs.map(s =>
-          normalizeLemma(s.targetWord) === oldNorm && oldDef1 && s.cardBack === oldDef1
-            ? { ...s, cardBack: value }
-            : s
-        ),
+        // LD-D3: sentence backs that are the def1 follow it while the word
+        // has no def2 (once it has one, every back is the def2).
+        sentenceInputs: applyDef1BackFollow(prev.sentenceInputs, { lemma: oldLemma, oldDef1, def1: value, hasDef2: !!lmatch.def2 }),
       }));
-      // Cards whose back equals the old def1 follow too.
-      if (oldDef1 && value !== oldDef1) {
+      // Cards whose back is the old def1 follow too, on the same rule.
+      if (oldDef1 && value !== oldDef1 && !lmatch.def2) {
         updateLinkedCards({
           lemmaID, lemmaText: lmatch.lemma,
-          buildUpdates: (c) => c.back === oldDef1 ? { back: value } : null,
+          buildUpdates: (c) => def1CardUpdate(c, { oldDef1, def1: value, hasDef2: false }),
           cards, uid, updateCards,
         }).catch(e => console.error('LM def1: card update failed', e));
       }
 
     } else if (field === 'def2') {
       const def2Changed = value !== (lmatch.def2 || '');
-      updateData(prev => ({
-        ...prev,
-        lemmaMaster: prev.lemmaMaster.map(l => l.lemmaID !== lemmaID ? l : { ...l, def2: value, lastUpdated: now, autoAddedBy: 'manual' }),
-        wordInputs: prev.wordInputs.map(w => {
-          if (normalizeLemma(w.lemma) !== oldNorm) return w;
-          const wasUploaded = w.uploaded;
-          return {
-            ...w, def2: value,
-            ...(def2Changed && wasUploaded ? { uploaded: false, lastUncheckReason: 'Definition 2 edited in Lemma Master', lastUncheckDate: now } : {}),
-          };
-        }),
-        sentenceInputs: prev.sentenceInputs.map(s => {
-          if (normalizeLemma(s.targetWord) !== oldNorm) return s;
-          // L6: rows with no back are waiting for a def2 — AVIPage's cascade
-          // fills them and creates their cards.
-          if (!s.cardBack) return s;
-          const cardBack = value || lmatch.def1 || s.cardBack;
-          const changed  = cardBack !== s.cardBack;
-          return {
-            ...s, cardBack,
-            ...(changed && s.uploaded ? { uploaded: false, lastUncheckReason: 'Definition 2 changed in Lemma Master', lastUncheckDate: now } : {}),
-          };
-        }),
-      }));
+      // LD-D1: the one def2 writer — the entry, word and 동의어 rows, and every
+      // sentence back with a value. LD-D2: clearing keeps sentence and card
+      // backs until a new def2 is saved.
+      updateData(prev => {
+        // eslint-disable-next-line no-unused-vars
+        const { counts, ...next } = applyDef2Write(prev, { lemma: oldLemma, def2: value, now, reason: 'Definition 2 edited in Lemma Master' });
+        return { ...prev, ...next };
+      });
 
-      // Update linked flashcard backs
-      if (def2Changed) {
-        updateLinkedCards({ lemmaID, lemmaText: lmatch.lemma, updates: { back: value }, cards, uid, updateCards })
-          .catch(e => console.error('LM def2: card update failed', e));
+      // Card backs: every vocab and sentence card of the word takes the def2
+      // (never blanked).
+      if (def2Changed && value) {
+        updateLinkedCards({
+          lemmaID, lemmaText: lmatch.lemma,
+          buildUpdates: (c) => def2CardUpdate(c, value),
+          cards, uid, updateCards,
+        }).catch(e => console.error('LM def2: card update failed', e));
 
         // Count reset entries for toast
         const resetCount = data.wordInputs.filter(w => normalizeLemma(w.lemma) === oldNorm && w.uploaded).length +
@@ -930,16 +912,12 @@ export function AVILemmaMasterPage({
         ...prev,
         lemmaMaster: prev.lemmaMaster.map(x => x.lemmaID === lemmaID ? { ...x, def1, lastUpdated: new Date().toISOString() } : x),
         wordInputs:  prev.wordInputs.map(w => normalizeLemma(w.lemma) === normalizeLemma(l.lemma) ? { ...w, def1 } : w),
-        sentenceInputs: prev.sentenceInputs.map(s =>
-          normalizeLemma(s.targetWord) === normalizeLemma(l.lemma) && oldDef1 && s.cardBack === oldDef1
-            ? { ...s, cardBack: def1 }
-            : s
-        ),
+        sentenceInputs: applyDef1BackFollow(prev.sentenceInputs, { lemma: l.lemma, oldDef1, def1, hasDef2: !!l.def2 }),
       }));
-      if (oldDef1 && def1 !== oldDef1) {
+      if (oldDef1 && def1 !== oldDef1 && !l.def2) {
         updateLinkedCards({
           lemmaID, lemmaText: l.lemma,
-          buildUpdates: (c) => c.back === oldDef1 ? { back: def1 } : null,
+          buildUpdates: (c) => def1CardUpdate(c, { oldDef1, def1, hasDef2: false }),
           cards, uid, updateCards,
         }).catch(() => {});
       }

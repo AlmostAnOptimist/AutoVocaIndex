@@ -13,6 +13,7 @@ import {
   isRealDefinition, resolveCorrectedDef1,
 } from './aviUtils.js';
 import { planCardDedupe, applyCardDedupe, dedupeLemmaRows, planDeckLeave, planIsEmpty } from './cardDedupe.js';
+import { applyDef2Write, def2CardUpdate, applyDef1BackFollow, def1CardUpdate } from './def2Cascade.js';
 
 // ── Lemma correction: which definitions win (bug sweep A2/A3) ─────────
 // A corrected row takes the corrected lemma's definitions, not the wrong
@@ -167,52 +168,24 @@ export function makeUpdateRow({
         let updatedLemmaMaster = [...prev.lemmaMaster];
         let updatedSentenceInputs = prev.sentenceInputs;
 
-        // def2 changed → propagate to lemmaMaster and all other rows sharing this lemma
-        // (a lemma correction handles its own definitions below)
+        // def2 changed → the one def2 writer (LD-D1): Lemma Master, the other
+        // word and 동의어 rows, and every sentence back with a value (an empty
+        // back waits for AVIPage's cascade, L6). Clearing keeps sentence
+        // backs (LD-D2). A lemma correction handles its own definitions below.
         if (def2Changed && !correction) {
-          const normLemma = normalizeLemma(next.lemma);
-          updatedLemmaMaster = updatedLemmaMaster.map(l =>
-            normalizeLemma(l.lemma) === normLemma
-              ? { ...l, def2: allEdits.def2, lastUpdated: now, autoAddedBy: 'manual' }
-              : l
+          const written = applyDef2Write(
+            { lemmaMaster: updatedLemmaMaster, wordInputs: updatedWordInputs, sentenceInputs: updatedSentenceInputs },
+            { lemma: next.lemma, def2: allEdits.def2, now, reason: 'Definition 2 updated for this lemma' },
           );
-          updatedWordInputs = updatedWordInputs.map(w => {
-            if (w.uid === uid) return w;
-            if (normalizeLemma(w.lemma) !== normalizeLemma(next.lemma)) return w;
-            return {
-              ...w,
-              def2: allEdits.def2,
-              ...(w.uploaded ? {
-                uploaded:          false,
-                lastUncheckReason: 'Definition 2 updated for this lemma',
-                lastUncheckDate:   now,
-              } : {}),
-            };
-          });
-          // Sentence rows sharing this lemma follow too (mirror of the Lemma
-          // Master def2 cascade): cardBack = def2, falling back to def1.
-          updatedSentenceInputs = updatedSentenceInputs.map(s => {
-            if (normalizeLemma(s.targetWord) !== normLemma) return s;
-            // L6: a row with no back is waiting for a def2 — leave it empty so
-            // AVIPage's cascade fills it AND creates the card (it only acts on
-            // rows with an empty back).
-            if (!s.cardBack) return s;
-            const cardBack = allEdits.def2 || next.def1 || s.cardBack;
-            const changed  = cardBack !== s.cardBack;
-            return {
-              ...s, cardBack,
-              ...(changed && s.uploaded ? {
-                uploaded:          false,
-                lastUncheckReason: 'Definition 2 updated for this lemma',
-                lastUncheckDate:   now,
-              } : {}),
-            };
-          });
+          updatedLemmaMaster    = written.lemmaMaster;
+          updatedWordInputs     = written.wordInputs;
+          updatedSentenceInputs = written.sentenceInputs;
         }
 
         // def1 changed (lemma unchanged) → sync to lemmaMaster + sibling rows
         if (def1Changed && !lemmaChanged) {
           const normLemma = normalizeLemma(next.lemma);
+          const entryPre  = updatedLemmaMaster.find(l => normalizeLemma(l.lemma) === normLemma) || null;
           updatedLemmaMaster = updatedLemmaMaster.map(l =>
             normalizeLemma(l.lemma) === normLemma
               ? { ...l, def1: allEdits.def1, lastUpdated: now, autoAddedBy: 'manual' }
@@ -223,6 +196,12 @@ export function makeUpdateRow({
               ? { ...w, def1: allEdits.def1 }
               : w
           );
+          // LD-D3: sentence backs that are the def1 follow it while the word
+          // has no def2 (same rule as a def1 edit in Lemma Master).
+          updatedSentenceInputs = applyDef1BackFollow(updatedSentenceInputs, {
+            lemma: next.lemma, oldDef1: entryPre?.def1 || originalRow.def1 || '',
+            def1: allEdits.def1, hasDef2: !!(entryPre?.def2 || next.def2),
+          });
         }
 
         // Lemma changed — create/rename/attach in lemmaMaster
@@ -348,7 +327,7 @@ export function makeUpdateRow({
         // rows that belong to the corrected rows move (makeCorrectionScope).
         if (lemmaChanged && newLemmaText) {
           const normOldSent = normalizeLemma(originalRow.lemma);
-          const { oldDef1, oldDef2, def1: newDef1, def2: newDef2 } = correction;
+          const { def1: newDef1, def2: newDef2 } = correction;
           const newBack = newDef2 || (isRealDefinition(newDef1) ? newDef1 : '');
           const scope = makeCorrectionScope({
             movedRows:     prev.wordInputs.filter(w => w.uid === uid || (migrateOthers && normalizeLemma(w.lemma) === normOldSent)),
@@ -356,8 +335,10 @@ export function makeUpdateRow({
           });
           updatedSentenceInputs = updatedSentenceInputs.map(s => {
             if (normalizeLemma(s.targetWord) !== normOldSent || !scope.sentenceFollows(s)) return s;
-            const derived  = !!s.cardBack && (s.cardBack === oldDef2 || s.cardBack === oldDef1);
-            const cardBack = derived && newBack ? newBack : s.cardBack;
+            // LD-D1: a sentence back is the word's back — any back follows the
+            // corrected lemma's (its def2, or its def1 while it has none).
+            // An empty back stays empty for AVIPage's cascade (L6).
+            const cardBack = s.cardBack && newBack ? newBack : s.cardBack;
             return {
               ...s,
               targetWord: newLemmaText,
@@ -389,18 +370,39 @@ export function makeUpdateRow({
       // sharing this lemma may hold uploaded cards even when this row doesn't,
       // and the helper no-ops when nothing matches. (A lemma correction
       // updates its cards below.)
-      if (!correctionPre && allEdits.def2 !== undefined && allEdits.def2 !== originalRow.def2) {
+      // LD-D2: a cleared def2 leaves the cards' backs as they are.
+      if (!correctionPre && allEdits.def2 && allEdits.def2 !== originalRow.def2) {
         const lemmaEntry = data.lemmaMaster.find(
           l => normalizeLemma(l.lemma) === normalizeLemma(originalRow.lemma)
         );
         updateLinkedCards({
           lemmaID:   lemmaEntry?.lemmaID || null,
           lemmaText: originalRow.lemma,
-          updates:   { back: allEdits.def2 },
+          buildUpdates: (c) => def2CardUpdate(c, allEdits.def2),
           cards,
           uid:       auth.currentUser?.uid,
           updateCards,
         }).catch(e => console.error('Word Input: card back update failed', e));
+      }
+
+      // LD-D3: a def1 edit reaches cards whose back is the def1, while the
+      // word has no def2.
+      if (!correctionPre && allEdits.def1 !== undefined && allEdits.def1 !== originalRow.def1) {
+        const lemmaEntry = data.lemmaMaster.find(
+          l => normalizeLemma(l.lemma) === normalizeLemma(originalRow.lemma)
+        );
+        const oldDef1 = lemmaEntry?.def1 || originalRow.def1 || '';
+        const hasDef2 = !!(lemmaEntry?.def2 || allEdits.def2 || originalRow.def2);
+        if (oldDef1 && !hasDef2) {
+          updateLinkedCards({
+            lemmaID:   lemmaEntry?.lemmaID || null,
+            lemmaText: originalRow.lemma,
+            buildUpdates: (c) => def1CardUpdate(c, { oldDef1, def1: allEdits.def1, hasDef2: false }),
+            cards,
+            uid:       auth.currentUser?.uid,
+            updateCards,
+          }).catch(e => console.error('Word Input: card def1 back update failed', e));
+        }
       }
 
       // Async: cascade a lemma rename to linked flashcards. When the old
@@ -447,9 +449,10 @@ export function makeUpdateRow({
       if (lemmaChanged && newLemmaText) {
         const oldEntry = oldEntryPre;
         const targetId = targetIdPre;
-        // A3: a back that came from the old lemma's definitions follows
-        // the corrected ones (never blanked; hand-edited backs are kept).
-        const { oldDef1, oldDef2, def1: newDef1, def2: newDef2 } = correctionPre;
+        // A3 / LD-D1: a moved card's back follows the corrected lemma's
+        // definitions (its def2, or a sentence card's def1 while it has none);
+        // never blanked.
+        const { def1: newDef1, def2: newDef2 } = correctionPre;
         if ((cards || []).some(cardMoves)) {
           // A14: a moved card that lands in a deck already holding a card for
           // the corrected lemma collapses with it once the rename is in:
@@ -468,8 +471,7 @@ export function makeUpdateRow({
               const back = c.type === 'sentence'
                 ? newDef2 || (isRealDefinition(newDef1) ? newDef1 : '')
                 : newDef2;
-              const follow = !!back && !!c.back && c.back !== back &&
-                (c.back === oldDef2 || c.back === oldDef1);
+              const follow = !!back && c.back !== back;
               return {
                 lemma: newLemmaText,
                 front: c.type === 'sentence'

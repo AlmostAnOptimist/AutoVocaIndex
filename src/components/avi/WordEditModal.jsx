@@ -294,13 +294,13 @@ export function WordEditModal({
 
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button style={pagerBtn(!prevTarget || saving)} disabled={!prevTarget || saving} onClick={() => goTo(prevTarget)}>
-              ◀ Prev
+              ‹ Prev
             </button>
             <span style={{ fontSize: '11px', color: C.textM, fontFamily: SH.fm, whiteSpace: 'nowrap' }}>
               {remaining} other def2-less
             </span>
             <button style={pagerBtn(!nextTarget || saving)} disabled={!nextTarget || saving} onClick={() => goTo(nextTarget)}>
-              Next ▶
+              Next ›
             </button>
           </div>
 

@@ -34,3 +34,20 @@ export function scrollListToTop(el, behavior = 'smooth') {
     if (target < window.scrollY) window.scrollTo({ top: Math.max(0, target), behavior });
   }
 }
+
+// Puts the shared page scroller (.content-pad) and the window back at the top.
+// Every page view shares that one scroller, so a screen that replaces another
+// in place otherwise opens at the old screen's scroll position. Runs now (call
+// it from a layout effect, so before paint) and once more after the next
+// paint, so iOS scroll restoration can't win the race. Returns a cancel for
+// the effect's cleanup.
+export function resetPageScroll() {
+  const go = () => {
+    const pad = document.querySelector('.content-pad');
+    if (pad) pad.scrollTop = 0;
+    if (window.scrollY) window.scrollTo(0, 0);
+  };
+  go();
+  const raf = requestAnimationFrame(go);
+  return () => cancelAnimationFrame(raf);
+}

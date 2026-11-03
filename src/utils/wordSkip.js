@@ -105,6 +105,43 @@ export async function removeCardsForWord({ uid, found, updateCards, updateDecks 
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+// O2: deleting a Word Input row takes the word's flashcard with it (after
+// confirming) once no studied row of that word is left in the source.
+// Remaining rows that are skipped don't keep the card. Sentence cards stay:
+// their sentence rows still exist. `data` is the state from before the
+// delete; the deleted row is excluded by uid.
+export async function removeCardsForDeletedRow({
+  row, data, cards, decks, uid, updateCards, updateDecks, showAVIToast,
+  confirmFn = (msg) => window.confirm(msg),
+}) {
+  const norm = normOf(row?.lemma);
+  if (!norm || !uid) return 0;
+  const src = row.source || '';
+  const stillStudied = (data.wordInputs || []).some(w =>
+    w.uid !== row.uid && (w.source || '') === src && normOf(w.lemma) === norm && !w.skipUpload
+  );
+  if (stillStudied) return 0;
+  const found = findCardsForWord({ cards, decks, source: row.source, lemma: row.lemma });
+  if (!found.vocab.length) return 0;
+  const them = found.vocab.length === 1 ? 'it' : 'them';
+  const msg =
+    `"${row.lemma}" has ${plural(found.vocab.length, 'flashcard')} in "${found.wordDeck.name}" and no other Word Input row in this source.\n\n` +
+    `Remove ${them} too? Review progress will be lost. A card that is also filed in another deck is only taken out of this source's deck.\n\n` +
+    `OK removes ${them}. Cancel keeps ${them}.`;
+  if (!confirmFn(msg)) return 0;
+  try {
+    const n = await removeCardsForWord({
+      uid, found: { ...found, sentDeck: null, sentence: [] }, updateCards, updateDecks,
+    });
+    if (showAVIToast) showAVIToast(`Removed ${plural(n, 'card')} for ${row.lemma}`);
+    return n;
+  } catch (e) {
+    console.error('Delete row: card removal failed', e);
+    if (showAVIToast) showAVIToast('Could not remove the card. It is still in the deck.');
+    return 0;
+  }
+}
+
 // A10: the Skip fields of a sentence row that starts skipped because its
 // word is skipped in the source (Sentence Input, Import).
 export function inheritedSentenceSkip(skipped) {

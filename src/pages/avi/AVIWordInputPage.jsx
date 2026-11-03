@@ -13,7 +13,7 @@ import {
 } from '../../utils/aviUtils.js';
 import { AVIMiniSearchPopup } from '../../components/avi/AVIMiniSearchPopup.jsx';
 import { autoCreateWordCard } from '../../utils/cardFactory.js';
-import { setWordSkip } from '../../utils/wordSkip.js';
+import { setWordSkip, removeCardsForDeletedRow } from '../../utils/wordSkip.js';
 import { stageWordInput } from '../../utils/wordStaging.js';
 import { DEMO } from '../../demo/demoConfig.js';
 import { WordEditModal } from '../../components/avi/WordEditModal.jsx';
@@ -276,12 +276,20 @@ export function AVIWordInputPage({
   }, []);
 
   // ── Delete row ──────────────────────────────────────────────
-  const deleteRow = useCallback((uid) => {
+  // O2: when this was the word's last studied row in the source, its
+  // flashcard is offered for removal too (utils/wordSkip.js).
+  const deleteRow = useCallback((rowUid) => {
     if (!window.confirm('Delete this Word Input row? The Lemma Master entry will not be affected.')) return;
+    const ctx = skipCtx.current;
+    const row = ctx.data.wordInputs.find(w => w.uid === rowUid);
     updateData(prev => ({
       ...prev,
-      wordInputs: prev.wordInputs.filter(w => w.uid !== uid),
+      wordInputs: prev.wordInputs.filter(w => w.uid !== rowUid),
     }));
+    if (row) {
+      removeCardsForDeletedRow({ ...ctx, row })
+        .catch(e => console.error('Word Input: card removal after delete failed', e));
+    }
   }, [updateData]);
 
   // ── Update row (edit save) ──────────────────────────────────

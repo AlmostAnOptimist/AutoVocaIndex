@@ -124,12 +124,15 @@ export function SentenceEditModal({ row, lemmaMaster, onSave, onClose }) {
             />
           </div>
           <div>
-            <div style={label}>Card back</div>
+            <div style={label}>Card back · the word's Definition 2</div>
             <textarea
               style={{ ...inputStyle, resize: 'vertical', minHeight: isMobile ? '84px' : '100px', lineHeight: 1.5 }}
               value={editVal.cardBack}
               onChange={e => setEditVal(v => ({ ...v, cardBack: e.target.value }))}
             />
+            <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px', lineHeight: 1.4 }}>
+              Shared with the word: a change here updates its Definition 2 everywhere (you'll be asked first).
+            </div>
           </div>
         </div>
 

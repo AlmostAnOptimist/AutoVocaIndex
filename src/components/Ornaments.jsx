@@ -287,11 +287,12 @@ export function PendantFill({ variant = 'close', min = 180, max = 320, top = 14,
 
 // ── SessionIntro ─────────────────────────────────────────────
 // Opening bookend for a flashcard or quiz session. Starts the session on
-// its own after `delay` ms, or at once on a tap, Enter or Space, so it never
-// costs an extra tap. Escape calls onExit when one is given.
+// its own after `delay` ms (O2: 3 s, up from 1.6), or at once on a tap,
+// Enter or Space, so it never costs an extra tap; a hint under the button
+// says so. Escape calls onExit when one is given.
 //   kind 'medallion' — open pendant into a medallion (flashcards)
 //   kind 'frame'     — corner frame with a 시작 rail (quizzes)
-export function SessionIntro({ kind = 'medallion', korean, title, detail, sub, onBegin, onExit, delay = 1600 }) {
+export function SessionIntro({ kind = 'medallion', korean, title, detail, sub, onBegin, onExit, delay = 3000 }) {
   const { C, S } = useAppTheme();
   const o = useOrnament();
   const doneRef  = useRef(false);
@@ -348,6 +349,9 @@ export function SessionIntro({ kind = 'medallion', korean, title, detail, sub, o
       >
         Begin
       </button>
+      <div style={{ marginTop: '10px', fontFamily: SH.fm, fontSize: '11px', color: C.textS }}>
+        {isMobile ? 'Tap to start now.' : 'Click or press Enter to start now.'}
+      </div>
     </div>
   );
 }

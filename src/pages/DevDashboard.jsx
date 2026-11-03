@@ -2,7 +2,7 @@
 // Accessed via window.location.hash === '#dev'
 // Not linked from main app's navigation UI
 
-import { useState, useEffect, useMemo, useRef, Children } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, Children } from 'react';
 import {
   collection, getDocs, getDoc, addDoc, updateDoc, deleteDoc, setDoc,
   doc, serverTimestamp, writeBatch,
@@ -13,7 +13,9 @@ import { SH } from '../theme/buildStyles.js';
 import { recomputeReviewStats } from '../utils/reviewStatsEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
 import { planIsEmpty, applyCardDedupe } from '../utils/cardDedupe.js';
+import { planDef2Align } from '../utils/def2Cascade.js';
 import { planNuanceCleanup } from '../utils/nuanceCleanup.js';
+import { planStrayCards, planStrayRemoval } from '../utils/strayCards.js';
 import { regenerateLemmaAudio, wordAudioMatches } from '../utils/ttsUtils.js';
 import { spokenLemma, needsSpokenRefresh } from '../utils/spokenText.js';
 
@@ -106,6 +108,7 @@ function Badge({ label, color }) {
 const ACTION_NAMES = {
   aviScan: 'Scan AVI data', aviNfc: 'NFC repair', aviDef2: 'Def2 resync',
   aviNuance: '동의어 cleanup', aviRetag: 'Source and section re-tag',
+  aviStrays: 'Cards for skipped or deleted words',
   reviewStats: 'Recompute review stats', cardAudio: 'Update card audio',
   grammarCheck: 'Grammar Index check', grammarDeadLinks: 'Remove dead links',
 };
@@ -823,11 +826,13 @@ function GazetteAdsPanel({ adAliases, onSaveAlias, savedFlash, C }) {
 //      wordInputs, sentenceInputs, and flashcards; recomputes cleanedLemma
 //      with the current normalizeLemma. Duplicate Lemma Master entries that
 //      normalization reveals are listed for manual merge, never auto-merged.
-//   2. Def2 resync — word rows and non-grammar card backs adopt their
-//      Lemma Master entry's def2 where they differ.
+//   2. Def2 resync — every copy of a word's def2 (word rows, sentence backs,
+//      vocab and sentence card backs) adopts its Lemma Master entry's def2
+//      where they differ (planDef2Align, the rule shared with Flashcards
+//      Cleanup, LD-D5). Words with no def2 keep their backs; their def1
+//      backs and other backs are listed.
 //   3. Section / source audit — informational: rows whose stored source or
-//      section no longer exists in Content Library, and sentence rows whose
-//      cardBack matches neither def2 nor def1 (possibly hand-edited).
+//      section no longer exists in Content Library.
 //   4. 동의어 cleanup (bug sweep R1, R2) — relation ids pointing at deleted
 //      Lemma Master entries are removed; a word left with no synonym loses
 //      its 동의어 row, and its card leaves the 동의어 deck (deleted when
@@ -841,6 +846,7 @@ function AVIMaintenancePanel({ uid, C, runs, markRun }) {
   const [report,   setReport]   = useState(null);
   const [applyMsg, setApplyMsg] = useState('');
   const [msgKey,   setMsgKey]   = useState('');   // which row the message belongs to
+  const [strayKeep, setStrayKeep] = useState(() => new Set()); // O2: unticked `${cardId}|${deckId}`
 
   const btnSt = (disabled) => ({
     padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
@@ -907,53 +913,30 @@ function AVIMaintenancePanel({ uid, C, runs, markRun }) {
         .filter(([, arr]) => arr.length > 1)
         .map(([norm, arr]) => `${norm} (${arr.length} entries)`);
 
-      // 2. Def2 resync plan — Lemma Master is canonical
-      // D1: with duplicate entries, use the one Flashcards Cleanup's resync
-      // uses — an entry with a def2 over one without, then the most recently
-      // updated — so the two tools never push different definitions.
-      const lmEntryByNorm = {};
-      for (const { data } of lm) {
-        const k = normalizeLemma(data.lemma || '');
-        if (!k) continue;
-        const cur = lmEntryByNorm[k];
-        const better = !cur ||
-          (!!data.def2 && !cur.def2) ||
-          (!!data.def2 === !!cur.def2 && (data.lastUpdated || '') > (cur.lastUpdated || ''));
-        if (better) lmEntryByNorm[k] = data;
-      }
-      const def2Updates = [];
-      const def2NoCanon = []; // row has a def2 but its LM entry has none — never auto-erased
-      for (const { ref, data } of words) {
-        const entry = lmEntryByNorm[normalizeLemma(data.lemma || '')];
-        if (!entry) continue;
-        if ((data.def2 || '') !== (entry.def2 || '')) {
-          const label = `${data.lemma}${data.source ? ` (${data.source}${data.section ? ' §' + data.section : ''})` : ''}`;
-          if (entry.def2) def2Updates.push({ ref, fields: { def2: entry.def2 }, label });
-          else def2NoCanon.push(label);
-        }
-      }
-      const cardBackUpdates = [];
-      for (const { ref, data } of cards) {
-        if (data.type === 'grammar') continue;
-        const entry = data.linkedAVILemmaId
-          ? lm.find(x => x.data.lemmaID === data.linkedAVILemmaId)?.data
-          : lmEntryByNorm[normalizeLemma(data.lemma || '')];
-        if (!entry || !entry.def2) continue;
-        if ((data.back || '') !== entry.def2) {
-          cardBackUpdates.push({ ref, fields: { back: entry.def2 }, label: data.lemma || '(no lemma)' });
-        }
-      }
-
-      // 3. Informational: sentence cardBacks matching neither def2 nor def1
-      const sentBackReview = [];
-      for (const { data } of sents) {
-        const entry = lmEntryByNorm[normalizeLemma(data.targetWord || '')];
-        if (!entry) continue;
-        const cb = data.cardBack || '';
-        if (cb && cb !== (entry.def2 || '') && cb !== (entry.def1 || '')) {
-          sentBackReview.push(data.targetWord || '');
-        }
-      }
+      // 2. Def2 resync plan — Lemma Master is canonical (LD-D5). The rule
+      // lives in def2Cascade.planDef2Align, shared with Flashcards Cleanup:
+      // with duplicate entries, one with a def2 beats one without, then the
+      // most recently updated (D1).
+      const refOf = new Map([...words, ...sents, ...cards].map(x => [x.data, x.ref]));
+      const align = planDef2Align({
+        entries: lm.map(x => x.data),
+        wordRows: words.map(x => x.data),
+        sentenceRows: sents.map(x => x.data),
+        cards: cards.map(x => x.data),
+      });
+      const rowLabel = (d) => `${d.lemma || d.targetWord || ''}${d.source ? ` (${d.source}${d.section ? ' §' + d.section : ''})` : ''}`;
+      const def2Updates = align.wordUpdates.map(u => ({ ref: refOf.get(u.item), fields: { def2: u.def2 }, label: rowLabel(u.item) }));
+      const def2NoCanon = align.wordNoCanon.map(rowLabel); // never auto-erased
+      const sentBackUpdates = align.sentenceUpdates.map(u => ({ ref: refOf.get(u.item), fields: { cardBack: u.cardBack }, label: u.item.targetWord || '' }));
+      const cardBackUpdates = align.cardUpdates.map(u => ({
+        ref: refOf.get(u.item),
+        fields: { back: u.back, ...(u.lemmaID && u.item.linkedAVILemmaId !== u.lemmaID ? { linkedAVILemmaId: u.lemmaID } : {}) },
+        label: u.item.lemma || '(no lemma)',
+      }));
+      // Informational (LD-D3): words with no def2 keep their sentence backs.
+      const sentDef1Backs  = align.def1Backs.map(s => s.targetWord || '');
+      const sentBackReview = align.otherBacks.map(s => s.targetWord || '');
+      const emptyBackCards = align.emptyBackCards.filter(c => !align.cardUpdates.some(u => u.item === c)).map(c => c.lemma || '(no lemma)');
 
       // 3b. Orphaned source / section values on rows — grouped with doc refs
       // so the re-tag controls in the report can batch-fix each group.
@@ -994,11 +977,24 @@ function AVIMaintenancePanel({ uid, C, runs, markRun }) {
         decks: deckSnap.docs.map(d => ({ id: d.id, ...d.data() })),
       });
 
+      // 5. O2: cards left behind for words no longer studied in their source
+      const cardList = cards.map(({ ref, data }) => ({ id: ref.id, ...data }));
+      const strays = planStrayCards({
+        words: words.map(w => w.data),
+        cards: cardList,
+        decks: deckSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+        sourceTitles: sources.map(x => x.title),
+      });
+      const strayIds = new Set(strays.map(x => x.cardId));
+      const strayCardDocs = cardList.filter(c => strayIds.has(c.id)).map(c => ({ id: c.id, deckIds: c.deckIds || [] }));
+
+      setStrayKeep(new Set());
       setReport({
         counts: { lm: lm.length, words: words.length, sents: sents.length, cards: cards.length },
         nfcUpdates, lmDuplicates, def2Updates, def2NoCanon, cardBackUpdates, sentBackReview,
+        sentBackUpdates, sentDef1Backs, emptyBackCards,
         sectionGroups: Object.values(sectionGroups),
-        sectionsBySrc, nuance,
+        sectionsBySrc, nuance, strays, strayCardDocs,
       });
       setStatus('ready');
       markRun('aviScan');
@@ -1037,13 +1033,14 @@ function AVIMaintenancePanel({ uid, C, runs, markRun }) {
 
   const applyDef2 = async () => {
     if (!report || status === 'applying') return;
-    const updates = [...report.def2Updates, ...report.cardBackUpdates];
+    const updates = [...report.def2Updates, ...report.sentBackUpdates, ...report.cardBackUpdates];
     if (updates.length === 0) return;
     setStatus('applying'); setMsgKey('def2');
+    const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     try {
       await applyBatch(updates);
-      setApplyMsg(`Def2 resync: ${report.def2Updates.length} row${report.def2Updates.length === 1 ? '' : 's'}, ${report.cardBackUpdates.length} card back${report.cardBackUpdates.length === 1 ? '' : 's'} updated. Reload the main app before further AVI edits.`);
-      setReport(r => ({ ...r, def2Updates: [], cardBackUpdates: [] }));
+      setApplyMsg(`Def2 resync: ${pl(report.def2Updates.length, 'word row')}, ${pl(report.sentBackUpdates.length, 'sentence back')}, ${pl(report.cardBackUpdates.length, 'card back')} updated. Reload the main app before further AVI edits.`);
+      setReport(r => ({ ...r, def2Updates: [], sentBackUpdates: [], cardBackUpdates: [] }));
       markRun('aviDef2');
     } catch (e) {
       console.error('Def2 resync failed', e);
@@ -1077,6 +1074,32 @@ function AVIMaintenancePanel({ uid, C, runs, markRun }) {
     setStatus('ready');
   };
 
+  const strayKey = (x) => `${x.cardId}|${x.deckId}`;
+  const applyStrays = async () => {
+    if (!report || status === 'applying') return;
+    const chosen = report.strays.filter(x => !strayKeep.has(strayKey(x)));
+    if (!chosen.length) return;
+    setStatus('applying'); setMsgKey('strays');
+    try {
+      const plan = planStrayRemoval(report.strayCardDocs, chosen);
+      await applyCardDedupe({ uid, plan });
+      setApplyMsg(`Removed ${chosen.length} card${chosen.length === 1 ? '' : 's'} from their source decks (${plan.deletes.length} deleted, ${plan.deckUpdates.length} kept in another deck). Reload the main app to see it.`);
+      const done = new Set(chosen.map(strayKey));
+      setReport(r => ({ ...r, strays: r.strays.filter(x => !done.has(strayKey(x))) }));
+      markRun('aviStrays');
+    } catch (e) {
+      console.error('Stray card removal failed', e);
+      setApplyMsg('Removing the cards failed — check console.');
+    }
+    setStatus('ready');
+  };
+  const toggleStray = (x) => setStrayKeep(prev => {
+    const next = new Set(prev);
+    const k = strayKey(x);
+    next.has(k) ? next.delete(k) : next.add(k);
+    return next;
+  });
+
 const applyRetag = async (group, choice) => {
     if (!report || status === 'applying') return;
     setStatus('applying'); setMsgKey('retag');
@@ -1108,13 +1131,15 @@ const applyRetag = async (group, choice) => {
     ? <div style={{ fontSize: '11.5px', color: C.textM }}>{applyMsg}</div>
     : null;
   const nNfc    = report ? report.nfcUpdates.length : 0;
-  const nDef2   = report ? report.def2Updates.length + report.cardBackUpdates.length : 0;
+  const nDef2   = report ? report.def2Updates.length + report.sentBackUpdates.length + report.cardBackUpdates.length : 0;
   const nNuance = report ? nuanceCount(report.nuance) : 0;
+  const nStrays = report ? report.strays.filter(x => !strayKeep.has(strayKey(x))).length : 0;
   const allClean = report &&
     report.nfcUpdates.length === 0 && report.lmDuplicates.length === 0 &&
     report.def2Updates.length === 0 && report.def2NoCanon.length === 0 &&
-    report.cardBackUpdates.length === 0 && nuanceCount(report.nuance) === 0 &&
-    report.sentBackReview.length === 0 && report.sectionGroups.length === 0;
+    report.cardBackUpdates.length === 0 && report.sentBackUpdates.length === 0 && nuanceCount(report.nuance) === 0 &&
+    report.sentBackReview.length === 0 && report.sectionGroups.length === 0 &&
+    report.strays.length === 0;
 
   return (
     <>
@@ -1164,7 +1189,7 @@ const applyRetag = async (group, choice) => {
 
       <ActionRow
         name="Def2 resync" kind="write" lastRun={runs.aviDef2 ?? null} C={C}
-        desc="Word rows and card backs adopt their Lemma Master entry's def2 where they differ. Rows whose entry has no def2, and sentence card backs that look hand-edited, are listed but left alone."
+        desc="Every copy of a word's Definition 2 (word rows, sentence backs, card backs) adopts its Lemma Master entry's def2 where they differ. Words with no def2 keep their backs and are listed."
         controls={
           <button onClick={applyDef2} disabled={busy || nDef2 === 0} style={btnSt(busy || nDef2 === 0)}>
             Apply{report ? ` (${nDef2})` : ''}
@@ -1176,6 +1201,8 @@ const applyRetag = async (group, choice) => {
             <div style={lineSt}>
               Def2 out of sync: <span style={numSt}>{report.def2Updates.length}</span> word row{report.def2Updates.length === 1 ? '' : 's'}
               {report.def2Updates.length > 0 && <> — {listPreview(report.def2Updates.map(u => u.label))}</>}
+              ; <span style={numSt}>{report.sentBackUpdates.length}</span> sentence back{report.sentBackUpdates.length === 1 ? '' : 's'}
+              {report.sentBackUpdates.length > 0 && <> — {listPreview(report.sentBackUpdates.map(u => u.label))}</>}
               ; <span style={numSt}>{report.cardBackUpdates.length}</span> card back{report.cardBackUpdates.length === 1 ? '' : 's'}
               {report.cardBackUpdates.length > 0 && <> — {listPreview(report.cardBackUpdates.map(u => u.label))}</>}.
             </div>
@@ -1184,9 +1211,19 @@ const applyRetag = async (group, choice) => {
                 Rows with a def2 whose Lemma Master entry has none (not auto-erased — re-enter the def2 on the row to restore the cascade): {listPreview(report.def2NoCanon)}
               </div>
             )}
+            {report.sentDef1Backs.length > 0 && (
+              <div style={lineSt}>
+                Sentence backs using the def1 of a word with no def2 (kept until a def2 is saved): <span style={numSt}>{report.sentDef1Backs.length}</span> — {listPreview(report.sentDef1Backs)}
+              </div>
+            )}
             {report.sentBackReview.length > 0 && (
               <div style={lineSt}>
-                Sentence card backs matching neither def2 nor def1 (possibly hand-edited, not auto-fixed): {listPreview(report.sentBackReview)}
+                Other sentence backs of a word with no def2, not its def1 (kept until a def2 is saved): {listPreview(report.sentBackReview)}
+              </div>
+            )}
+            {report.emptyBackCards.length > 0 && (
+              <div style={lineSt}>
+                Cards with an empty back whose word has no def2 (Flashcards Cleanup deletes these): {listPreview(report.emptyBackCards)}
               </div>
             )}
           </ResultBox>
@@ -1243,6 +1280,36 @@ const applyRetag = async (group, choice) => {
           </ResultBox>
         )}
         {msgFor('retag')}
+      </ActionRow>
+
+      <ActionRow
+        name="Cards for skipped or deleted words" kind="write" lastRun={runs.aviStrays ?? null} C={C}
+        desc="Word cards whose word has no Word Input row left in its source, or only skipped rows, and sentence cards of skipped words. Untick any you want to keep. A card that is also filed in another deck only leaves the source's deck."
+        controls={
+          <button onClick={applyStrays} disabled={busy || nStrays === 0} style={btnSt(busy || nStrays === 0)}>
+            Remove{report ? ` (${nStrays})` : ''}
+          </button>
+        }
+      >
+        {report && (
+          <ResultBox C={C}>
+            {report.strays.length === 0 ? (
+              <div style={lineSt}>No stray cards.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', maxHeight: '280px', overflowY: 'auto' }}>
+                {report.strays.map(x => (
+                  <label key={strayKey(x)} style={{ ...lineSt, display: 'flex', alignItems: 'center', gap: '8px', padding: '3px 0', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={!strayKeep.has(strayKey(x))} onChange={() => toggleStray(x)} disabled={busy} />
+                    <span style={{ fontFamily: SH.fk, color: C.text }}>{x.lemma}</span>
+                    <span>{x.kind === 'sentence' ? 'sentence card' : 'word card'} in {x.deckName}</span>
+                    <Badge label={x.reason === 'skipped' ? 'Skipped' : 'Row deleted'} color={x.reason === 'skipped' ? C.textM : C.warning} />
+                  </label>
+                ))}
+              </div>
+            )}
+          </ResultBox>
+        )}
+        {msgFor('strays')}
       </ActionRow>
     </>
   );
@@ -1759,6 +1826,21 @@ export function DevDashboard({ user }) {
   const toggleFilter = (key, val) => setFilters(prev => ({ ...prev, [key]: prev[key] === val ? '' : val }));
   const hasActiveFilters = filters.category || filters.type || filters.effort || filters.docNeeded;
 
+  // The tab strip sticks, so a tab switch while scrolled used to open the new
+  // tab partway down. Scrolled past the header, the new tab starts right under
+  // the strip; above it, nothing moves. Declared before the loading return
+  // below so the hook order is the same on every render.
+  const scrollerRef = useRef(null);
+  const tabsRef     = useRef(null);
+  useLayoutEffect(() => {
+    const sc = scrollerRef.current, nav = tabsRef.current;
+    const header = nav?.previousElementSibling;
+    if (!sc || !header) return;
+    const top = sc.scrollTop + (header.getBoundingClientRect().bottom - sc.getBoundingClientRect().top)
+      + (parseFloat(window.getComputedStyle(nav).marginTop) || 0);
+    if (sc.scrollTop > top) sc.scrollTop = top;
+  }, [mode]);
+
   // ── Loading ──────────────────────────────────────────────────
   if (loading) {
     return (
@@ -1806,7 +1888,7 @@ export function DevDashboard({ user }) {
   return (
     <>
       <style>{G}</style>
-      <div style={{ height: '100vh', overflowY: 'auto', background: C.bg }}>
+      <div ref={scrollerRef} style={{ height: '100vh', overflowY: 'auto', background: C.bg }}>
 
         {/* ── Header ── */}
         <header style={{ ...colSt, paddingTop: '28px' }}>
@@ -1823,7 +1905,7 @@ export function DevDashboard({ user }) {
         </header>
 
         {/* ── Tabs ── */}
-        <nav role="tablist" style={{ position: 'sticky', top: 0, zIndex: 5, background: C.bg, marginTop: '18px' }}>
+        <nav ref={tabsRef} role="tablist" style={{ position: 'sticky', top: 0, zIndex: 5, background: C.bg, marginTop: '18px' }}>
           <div style={{ ...colSt, display: 'flex', gap: '4px', borderBottom: `1px solid ${C.border}`, paddingTop: '6px', overflowX: 'auto' }}>
             {[['actions', 'Actions'], ['planning', 'Planning']].map(([m, label]) => (
               <button key={m} role="tab" aria-selected={mode === m} onClick={() => setMode(m)} style={{
