@@ -4,6 +4,7 @@ import {
   collection, getDocs, doc, setDoc, updateDoc, deleteDoc,
 } from 'firebase/firestore';
 import { queueWrite } from '../utils/queuedWrite.js';
+import { loadGrammarEntries } from '../utils/grammarEntriesStore.js';
 import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
@@ -11,6 +12,9 @@ import { Icons } from '../components/Icons.jsx';
 import { DEMO } from '../demo/demoConfig.js';
 import { stripHtml, sanitizePastedHtml } from '../utils/contentUtils.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
+import { loadAnalyser } from '../utils/koreanAnalyser.js';
+import { compileEntries } from '../utils/grammarSightings.js';
+import { correctionSuggestions } from '../utils/grammarCorrections.js';
 import { TabRail, PendantFill } from '../components/Ornaments.jsx';
 
 const PRESET_TAGS = ['vocabulary', 'grammar', 'reading', 'listening', 'speaking', 'writing', 'culture', 'review', 'question'];
@@ -934,7 +938,7 @@ function NoteCard({ note, active, onClick, C, grammarEntries = [], onNavigateToG
 }
 
 // ── Corrections editor ────────────────────────────────────────
-function CorrectionsEditor({ session, sources, sections, appointments, defaultSourceId, defaultSectionId, defaultApptId, onSave, onDelete, onClose, onNavigateToContent, isOverlay = false, wide, C, S }) {
+function CorrectionsEditor({ session, sources, sections, appointments, grammarEntries = [], defaultSourceId, defaultSectionId, defaultApptId, onSave, onPatch, onDelete, onClose, onNavigateToContent, onNavigateToGrammar, isOverlay = false, wide, C, S }) {
   const isNew = !session?.id;
   const uid   = auth.currentUser?.uid;
 
@@ -952,6 +956,37 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
   const [saving,         setSaving]         = useState(false);
   const [showLinkPicker, setShowLinkPicker] = useState(false);
   const [hasActiveFocus, setHasActiveFocus] = useState(false);
+  // G2 (GS-D9): Grammar Index entries this session is linked to, and the
+  // entries its rows suggest. A record only: it changes nothing about
+  // mastery, scheduling or the quiz.
+  const [linkedGrammar,  setLinkedGrammar]  = useState(session?.linkedGrammarIds || []);
+  const [suggest,        setSuggest]        = useState({ status: 'idle', list: [] });   // idle | looking | ready | failed
+  const [linksFor,       setLinksFor]       = useState(session?.id || null);
+  if ((session?.id || null) !== linksFor) {
+    setLinksFor(session?.id || null);
+    setLinkedGrammar(session?.linkedGrammarIds || []);
+    setSuggest({ status: 'idle', list: [] });
+  }
+  // An existing session's links are saved at once (as the lock is); a new
+  // session's are saved with it.
+  const setLinks = (next) => {
+    setLinkedGrammar(next);
+    if (!isNew && session?.id) onPatch?.(session, { linkedGrammarIds: next });
+  };
+  // Looked for only when asked: it loads the analyser and reads every
+  // entry's pattern, which takes a moment.
+  const findSuggestions = async () => {
+    setSuggest({ status: 'looking', list: [] });
+    try {
+      const analyse = await loadAnalyser();
+      await new Promise(r => setTimeout(r, 0));
+      const compiled = compileEntries(grammarEntries, analyse);
+      setSuggest({ status: 'ready', list: correctionSuggestions({ rows, entries: grammarEntries, compiled, analyse }) });
+    } catch (e) {
+      console.error('Corrections: grammar suggestions failed', e);
+      setSuggest({ status: 'failed', list: [] });
+    }
+  };
 
   // Shared toolbar refs
   const activeEditorRef = useRef(null); // DOM element of last-focused field
@@ -1044,6 +1079,7 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
       linkedApptId: linkedApptId || null,
       locked,
       rows: cleanRows,
+      linkedGrammarIds: linkedGrammar,
     });
     setSaving(false);
   };
@@ -1176,6 +1212,48 @@ function CorrectionsEditor({ session, sources, sections, appointments, defaultSo
               )
             )}
           </div>
+        </div>
+
+        {/* G2 (GS-D9): Grammar Index entries this session is about. Linked
+            entries list the session among their notes. */}
+        <div style={{ marginBottom: '16px' }} data-grammar-links>
+          <label style={S.formLabel}>Grammar</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
+            {linkedGrammar.map(id => {
+              const entry = grammarEntries.find(e => e.id === id);
+              if (!entry) return null;
+              return (
+                <span key={id} data-linked-entry={id} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '3px 10px', borderRadius: '20px', fontSize: '12px', border: `1px solid ${C.accent}55`, color: C.accent, background: C.accentSoft, fontFamily: SH.fk }}>
+                  <span onClick={() => onNavigateToGrammar?.(id)} style={{ cursor: onNavigateToGrammar ? 'pointer' : 'default' }}>{entry.glossaryTerm}</span>
+                  <button onClick={() => setLinks(linkedGrammar.filter(x => x !== id))} title="Remove this link" style={{ color: C.accent, fontSize: '11px', lineHeight: 1, padding: 0, background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+                </span>
+              );
+            })}
+            <button onClick={findSuggestions} disabled={suggest.status === 'looking'} data-suggest-grammar
+              style={{ fontSize: '11px', padding: '3px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textS, cursor: suggest.status === 'looking' ? 'default' : 'pointer' }}>
+              {suggest.status === 'looking' ? 'Looking…' : suggest.status === 'ready' ? 'Suggest again' : 'Suggest from these rows'}
+            </button>
+          </div>
+          {suggest.status === 'ready' && (() => {
+            const open = suggest.list.filter(x => !linkedGrammar.includes(x.entryId));
+            if (!open.length) {
+              return <div style={{ fontSize: '12px', color: C.textM, marginTop: '6px' }}>{suggest.list.length ? 'Every suggestion is linked.' : 'No grammar difference found between the originals and their corrections.'}</div>;
+            }
+            return (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center', marginTop: '8px' }}>
+                <span style={{ fontSize: '11px', color: C.textM }}>In the corrections, not the originals:</span>
+                {open.slice(0, 12).map(x => (
+                  <button key={x.entryId} data-suggested-entry={x.entryId} onClick={() => setLinks([...linkedGrammar, x.entryId])}
+                    title={`${x.rows} row${x.rows === 1 ? '' : 's'}. Tap to link.`}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '3px 10px', borderRadius: '20px', fontSize: '12px', border: `1px dashed ${C.borderB || C.border}`, color: C.textS, background: 'transparent', cursor: 'pointer', fontFamily: SH.fk }}>
+                    + {x.term}{x.rows > 1 && <span style={{ fontFamily: SH.fm, fontSize: '10px', color: C.textM }}>{x.rows}</span>}
+                  </button>
+                ))}
+                {open.length > 12 && <span style={{ fontSize: '11px', color: C.textM }}>and {open.length - 12} more</span>}
+              </div>
+            );
+          })()}
+          {suggest.status === 'failed' && <div style={{ fontSize: '12px', color: C.danger, marginTop: '6px' }}>The recogniser could not be loaded. Check the connection and try again.</div>}
         </div>
 
         {/* Shared sticky toolbar — hidden when locked or unfocused */}
@@ -1387,9 +1465,9 @@ export function NotesPage({
     }
     (async () => {
       try {
-        const [notesSnap, grammarSnap, srcSnap, secSnap] = await Promise.all([
+        const [notesSnap, grammarRows, srcSnap, secSnap] = await Promise.all([
           getDocs(collection(db, 'users', uid, 'notes')),
-          getDocs(collection(db, 'users', uid, 'grammar_entries')),
+          loadGrammarEntries(uid), // one marker read unless they changed
           getDocs(collection(db, 'users', uid, 'content_sources')),
           getDocs(collection(db, 'users', uid, 'content_sections')),
         ]);
@@ -1397,8 +1475,7 @@ export function NotesPage({
           .sort((a, b) => (b.updatedAt || b.createdAt || '') > (a.updatedAt || a.createdAt || '') ? 1 : -1);
         setNotes(allNotes.filter(n => n.type !== 'correction'));
         setCorrections(allNotes.filter(n => n.type === 'correction'));
-        setGrammarEntries(grammarSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-          .sort((a, b) => (a.entryNumber || 0) - (b.entryNumber || 0)));
+        setGrammarEntries(grammarRows); // sorted by entry number
         setSources(srcSnap.docs.map(d => ({ id: d.id, ...d.data() }))
           .sort((a, b) => (a.title || '').localeCompare(b.title || '')));
         setSections(secSnap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -1413,8 +1490,12 @@ export function NotesPage({
   useEffect(() => {
     if (!defaultOpenNoteId || loading) return;
     const found = notes.find(n => n.id === defaultOpenNoteId);
-    if (found) { setTab((found.tags || []).includes('question') ? 'questions' : 'notes'); setSelected(found); }
-  }, [defaultOpenNoteId, notes, loading]);
+    if (found) { setTab((found.tags || []).includes('question') ? 'questions' : 'notes'); setSelected(found); return; }
+    // G2: a corrections session can now be one of an entry's linked notes,
+    // so a jump from the Grammar Index may name one.
+    const session = corrections.find(c => c.id === defaultOpenNoteId);
+    if (session) { setTab('corrections'); setSelected(session); setShowNew(false); }
+  }, [defaultOpenNoteId, notes, corrections, loading]);
 
 // Open a new corrections session pre-filled with a source when arriving from Content Library
   useEffect(() => {
@@ -1451,6 +1532,22 @@ useEffect(() => {
     }
     onPreLinkConsumed?.();
   }, [preLinkedData]);
+
+  // A change to one or two fields of an existing note or session, saved at
+  // once without touching the rest (G2: a corrections session's grammar
+  // links). The lists here and the Library's copy get the whole note with
+  // the change laid over it; the Library replaces its copy with what it is
+  // given.
+  const handlePatch = useCallback((note, fields) => {
+    if (!uid || !note?.id) return;
+    if (DEMO) return; // demo: Notes are read-only (7C addendum)
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'notes', note.id), fields), 'Note link save failed:');
+    const lay = (n) => (n.id === note.id ? { ...n, ...fields } : n);
+    setCorrections(prev => prev.map(lay));
+    setNotes(prev => prev.map(lay));
+    setSelected(prev => (prev?.id === note.id ? { ...prev, ...fields } : prev));
+    onNoteUpdated?.({ ...note, ...fields });
+  }, [uid, onNoteUpdated]);
 
   const handleSave = useCallback(async (data) => {
     if (DEMO) return; // demo: Notes are read-only (7C addendum)
@@ -1512,11 +1609,8 @@ useEffect(() => {
     if (!uid) return;
     setCorrections(prev => prev.map(n => n.id === id ? { ...n, title: newTitle } : n));
     if (selected?.id === id) setSelected(prev => ({ ...prev, title: newTitle }));
-    try {
-      await updateDoc(doc(db, 'users', uid, 'notes', id), { title: newTitle });
-    } catch (e) {
-      console.error('Rename failed:', e);
-    }
+    // OF2: queued, like the other note writes.
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'notes', id), { title: newTitle }), 'Rename failed:');
   }, [uid, selected]);
 
 const closeEditor = () => { setSelected(null); setShowNew(false); };
@@ -1532,11 +1626,7 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
       ? (current.includes(noteId) ? current : [...current, noteId])
       : current.filter(id => id !== noteId);
     setSections(prev => prev.map(s => s.id === sectionId ? { ...s, linkedNoteIds: next } : s));
-    try {
-      await updateDoc(doc(db, 'users', uid, 'content_sections', sectionId), { linkedNoteIds: next });
-    } catch (e) {
-      console.error('Note-section link failed:', e);
-    }
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sections', sectionId), { linkedNoteIds: next }), 'Note-section link failed:');
   }, [uid, sections]);
 
   const visibleNotes = useMemo(() => {
@@ -1777,7 +1867,10 @@ const closeEditor = () => { setSelected(null); setShowNew(false); };
             sources={sources}
             sections={sections}
             appointments={appointments}
+            grammarEntries={grammarEntries}
+            onNavigateToGrammar={onNavigateToGrammar}
             onSave={handleSave}
+            onPatch={handlePatch}
             onDelete={handleDelete}
             onClose={() => { setPendingCorrectionSourceId(null); setPendingCorrectionSectionId(null); setPendingCorrectionApptId(null); closeEditor(); }}
             onNavigateToContent={onNavigateToContent}

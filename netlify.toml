@@ -1,5 +1,7 @@
 [build]
-  command = "npm run build"
+  # The gate runs first: an error stops the deploy and the last good version
+  # stays live (eslint.gate.config.js).
+  command = "npm run lint:gate && npm run build"
   publish = "dist"
   functions = "netlify/functions"
 

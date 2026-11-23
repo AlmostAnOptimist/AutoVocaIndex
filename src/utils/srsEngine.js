@@ -4,19 +4,17 @@
 
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
-import { getLogicalDateStr, toDateStr } from './dateUtils.js';
-import {
-  isNewCard, isDueToday, triageBucket, compressInterval, getDueDateStr,
-} from './fsrs.js';
+import { getLogicalDateStr } from './dateUtils.js';
+import { isNewCard, isDueToday, planTriage, buildDueLoad } from './fsrs.js';
+import { queueWrite } from './queuedWrite.js';
+import { withCardStamp } from './cardStamp.js';
 
-export const DAILY_CAP        = 80;
-const FORECAST_DAYS    = 7;
-const MAX_DISPLAY_SPIKES = 3;
+export const DAILY_CAP = 80;
 
 // A card is "paused" (Phase D2) only when every deck it belongs to is paused;
 // a card still live in any active deck keeps surfacing. Deck-less cards are
 // never paused. Returns the input array unchanged when nothing is paused.
-function filterActiveCards(cards, pausedDeckIds) {
+export function filterActiveCards(cards, pausedDeckIds) {
   if (!pausedDeckIds || pausedDeckIds.length === 0) return cards;
   const paused = new Set(pausedDeckIds);
   return cards.filter(c => !(c.deckIds?.length && c.deckIds.every(id => paused.has(id))));
@@ -24,176 +22,81 @@ function filterActiveCards(cards, pausedDeckIds) {
 
 // ── Full daily pipeline (once per logical day, cached in Firestore) ────────────
 //
-// Pass 1 — reactive triage: moves overdue cards into their triage buckets.
-// Pass 2 — spike forecast: looks 7 days ahead, records up to 3 spikes for display
-//           and adds a task for the first uncovered one.
+// Triage: only on a day with more due than the cap (dailyCap, the "Daily
+// review cap" setting, settings.srsSpikeCap). Defers just enough of the cards
+// most likely to be remembered to bring the day down to the cap (planTriage
+// in fsrs.js). On any other day nothing is moved.
+//
+// The 7-day look ahead is no longer part of the plan: the deferral notices
+// are worked out live from the cards in memory (deferralOutlook.js, DF-D6),
+// and no spike task is created any more (DF-D7). Plans saved by older code
+// may still carry spikes / spikeDetected / tomorrowCount; nothing reads them.
 //
 // Returns pipelineOutput:
-//   { date, triaged, dueAtDayStart, spikes, spikeDetected, generatedAt }
+//   { date, triaged, dueAtDayStart, dueCardIds, generatedAt }
+// `triaged` is the number of cards deferred.
 // When the pipeline ran here (not read back from today's saved plan), the
 // result also carries cardUpdates — the triage fields written to each card —
 // so the caller can apply them in memory instead of re-reading every card
 // (bug sweep P2). cardUpdates is not saved with the plan.
 //
 // dueAtDayStart is a snapshot of how many non-grammar, non-new cards are due
-// at the moment the pipeline runs — used as the fixed daily total in TodayPage.
-export async function runDailyPipeline(uid, cards, dsh, addTask, existingTasks = [], pausedDeckIds = [], dailyCap = DAILY_CAP) {
+// once the pipeline has run (deferred cards are no longer due, so they are not
+// in it) — used as the fixed daily total in TodayPage.
+export async function runDailyPipeline(uid, cards, dsh, pausedDeckIds = [], dailyCap = DAILY_CAP) {
   const today   = getLogicalDateStr(dsh);
   const planRef = doc(db, 'users', uid, 'dailyplan', today);
 
-  const cached = await getDoc(planRef);
-  if (cached.exists()) return cached.data().pipelineOutput;
+  // Offline on a new day there is no saved plan to read and the read fails.
+  // Build the plan from the cards in memory instead of giving up for the day
+  // (deferrals are the same whichever device works them out).
+  let cached = null;
+  try {
+    cached = await getDoc(planRef);
+  } catch (e) {
+    console.warn("SRS pipeline: couldn't read today's plan; building it here", e);
+  }
+  if (cached?.exists()) return cached.data().pipelineOutput;
 
-  // Cards in a fully-paused set are held out of triage, the due snapshot, and
-  // the spike forecast (Phase D2).
+  // Cards in a fully-paused set are held out of triage and the due snapshot
+  // (Phase D2).
   const activeCards = filterActiveCards(cards, pausedDeckIds);
 
-  // Snapshot of cards due right now (fixed total shown in TodayPage all day).
-  // IDs are kept so TodayPage can count how many of *these* cards remain due —
-  // new-card reviews and paused-deck overdue cards can never leak into that count.
-  const dueCardIds = activeCards.filter(c => {
+  // The day's pile: every reviewed card due today or earlier.
+  const pile = activeCards.filter(c => {
     if (c.type === 'grammar' || isNewCard(c)) return false;
     return isDueToday(c, dsh);
-  }).map(c => c.id);
-  const dueAtDayStart = dueCardIds.length;
-
-  // Pass 1 — triage
-  const overdue = activeCards.filter(c => {
-    if (c.type === 'grammar' || isNewCard(c)) return false;
-    const dueDateStr = getDueDateStr(c);
-    return dueDateStr && dueDateStr < today;
   });
 
-  const updates = [];
-  for (const card of overdue) {
-    const bucket = triageBucket(card);
-    if (bucket === 'defer') {
-      updates.push({ id: card.id, ...compressInterval(card, dsh), triageBucket: 'defer', lastTriageDate: today });
-    } else {
-      updates.push({ id: card.id, triageBucket: bucket, lastTriageDate: today });
-    }
-  }
-  for (const u of updates) {
-    const { id, ...fields } = u;
-    await updateDoc(doc(db, 'users', uid, 'flashcards', id), fields);
+  // Queued, not awaited (the S6 pattern): the day's totals never wait on the
+  // network, and offline the writes sit in Firestore's local queue. One write
+  // per card, so a card deleted on another device can't sink the others.
+  const updates = planTriage(pile, { cap: dailyCap, dsh, dueLoad: buildDueLoad(activeCards) });
+  for (const { id, ...fields } of updates) {
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', id), withCardStamp(fields)),
+      'SRS pipeline: triage write failed');
   }
 
-  // Pass 2 — spike forecast
-  const { spikes, spikeDetected, tomorrowCount } = _computeSpikes(activeCards, today, addTask, existingTasks, dailyCap);
+  // Snapshot of the cards left due (fixed total shown in TodayPage all day).
+  // IDs are kept so TodayPage can count how many of *these* cards remain due —
+  // new-card reviews and paused-deck overdue cards can never leak into that count.
+  const moved      = new Map(updates.map(({ id, ...fields }) => [id, fields]));
+  const dueCardIds = pile.filter(c => !moved.has(c.id)).map(c => c.id);
+  const dueAtDayStart = dueCardIds.length;
 
   const output = {
     date: today,
     triaged: updates.length,
     dueAtDayStart,
     dueCardIds,
-    spikes,
-    spikeDetected,
-    tomorrowCount,
     generatedAt: new Date().toISOString(),
   };
 
-  await setDoc(planRef, {
+  queueWrite(() => setDoc(planRef, {
     logicalDate: today,
     pipelineOutput: output,
     generatedAt: new Date().toISOString(),
-  });
+  }), 'SRS pipeline: plan write failed');
 
   return { ...output, cardUpdates: updates };
-}
-
-// ── Spike-only re-run (called after each review session) ──────────────────────
-//
-// Re-runs Pass 2 only with the current (post-session) card state so that cards
-// added today are factored into the forecast immediately.
-// Uses updateDoc with dot-notation to patch only the spike fields.
-// Returns the full pipelineOutput (existing fields preserved).
-export async function runSpikeForecast(uid, cards, dsh, addTask, existingTasks = [], pausedDeckIds = [], dailyCap = DAILY_CAP) {
-  const today   = getLogicalDateStr(dsh);
-  const planRef = doc(db, 'users', uid, 'dailyplan', today);
-
-  const activeCards = filterActiveCards(cards, pausedDeckIds);
-  const { spikes, spikeDetected, tomorrowCount } = _computeSpikes(activeCards, today, addTask, existingTasks, dailyCap);
-
-  // Read existing output so we can return a full merged object to the caller.
-  let existingOutput = {};
-  try {
-    const snap = await getDoc(planRef);
-    if (snap.exists()) existingOutput = snap.data().pipelineOutput || {};
-  } catch {}
-
-  try {
-    // Dot-notation update touches only the spike fields, preserving triaged / dueAtDayStart.
-    await updateDoc(planRef, {
-      'pipelineOutput.spikes':         spikes,
-      'pipelineOutput.spikeDetected':  spikeDetected,
-      'pipelineOutput.tomorrowCount':  tomorrowCount,
-    });
-  } catch {
-    // Doc not yet written (edge case on first open of a new day) — write it fully.
-    await setDoc(planRef, {
-      logicalDate: today,
-      pipelineOutput: { ...existingOutput, spikes, spikeDetected, tomorrowCount },
-      generatedAt: new Date().toISOString(),
-    });
-  }
-
-  return { ...existingOutput, spikes, spikeDetected, tomorrowCount };
-}
-
-// ── Internal: spike computation and task creation ─────────────────────────────
-function _computeSpikes(cards, today, addTask, existingTasks, dailyCap = DAILY_CAP) {
-  const detectedSpikes = [];
-  let tomorrowCount = 0;
-
-  // Base the forecast on the logical today date, not the raw clock.
-  // Using noon local avoids any DST edge case when doing setDate arithmetic.
-  const baseDate = new Date(today + 'T12:00:00');
-
-  for (let d = 1; d <= FORECAST_DAYS; d++) {
-    const target = new Date(baseDate);
-    target.setDate(baseDate.getDate() + d);
-
-    // Snap to local midnight.
-    target.setHours(0, 0, 0, 0);
-
-    // Local date string — matches getDueDateStr() which now returns local dates.
-    const targetStr = toDateStr(target);
-
-    // taskDateStr and dayName use local date components for display and tasks.
-    const taskDateStr = toDateStr(target);
-    const dayName     = target.toLocaleDateString('en-US', { weekday: 'long' });
-
-    const dueCount = cards.filter(c => {
-      if (c.type === 'grammar' || isNewCard(c)) return false;
-      return getDueDateStr(c) === targetStr;
-    }).length;
-
-    if (d === 1) tomorrowCount = dueCount;
-
-    if (dueCount > dailyCap) {
-      detectedSpikes.push({ dueCount, taskDateStr, dayName });
-    }
-  }
-
-  // Add a task for the first uncovered spike only (avoid duplicate tasks).
-  let spikeDetected = false;
-  for (const spike of detectedSpikes) {
-    const covered = existingTasks.some(
-      t => t.source === 'srs_forecast' && t.date === spike.taskDateStr
-    );
-    if (!covered) {
-      spikeDetected = true;
-      if (addTask) addTask({
-        title:     `SRS review — spike incoming (${spike.dueCount} cards due)`,
-        category:  'lang', priority: 'high',
-        date:       spike.taskDateStr,
-        time:       null, recurrence: { type: 'none' },
-        completed:  false, notes: '', goalIds: [], source: 'srs_forecast',
-      });
-      break;
-    }
-  }
-
-  // Return up to MAX_DISPLAY_SPIKES for TodayPage flag display.
-  return { spikes: detectedSpikes.slice(0, MAX_DISPLAY_SPIKES), spikeDetected, tomorrowCount };
 }

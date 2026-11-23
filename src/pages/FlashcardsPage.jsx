@@ -6,12 +6,14 @@ import {
   query, where, documentId,
 } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
+import { withCardStamp } from '../utils/cardStamp.js';
+import { setReviewInProgress } from '../utils/cardsMarker.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { useKeyShortcuts } from '../hooks/useKeyShortcuts.js';
 import { SH } from '../theme/buildStyles.js';
 import {
-  fsrsGrade, isDueToday, isNewCard,
-  getDueDateStr, AGAIN, FSRS_DEFAULTS,
+  fsrsGrade, isDueToday, isNewCard, isDeferred, predictedRecall,
+  getDueDateStr, buildDueLoad, AGAIN, FSRS_DEFAULTS,
 } from '../utils/fsrs.js';
 import { playSound } from '../utils/soundEngine.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
@@ -21,9 +23,10 @@ import { buildSeriesGroups, wordSeries, sentenceSeries, isSeriesToken, SENTENCE_
 import { getLogicalDateStr } from '../utils/dateUtils.js';
 import { queueWrite, isNotFound } from '../utils/queuedWrite.js';
 import { resetPageScroll } from '../utils/scrollUtils.js';
-import { runSpikeForecast, DAILY_CAP } from '../utils/srsEngine.js';
+import { DeferralNotices } from '../components/DeferralNotices.jsx';
 import { ActivityHeatmap, shiftMonth } from '../components/ActivityHeatmap.jsx';
 import { applyReviewToStats, getEffectiveCurrentStreak, EMPTY_REVIEW_STATS } from '../utils/reviewStatsEngine.js';
+import { createStatsGuard } from '../utils/reviewStatsGuard.js';
 import { GazetteBox, BoxRow, GazetteMasthead, GoldRule, BylineRule, RecordsStrip, fmtRecordDate, fmtMonthLabel, fmtWeekRange } from '../components/GazetteComponents.jsx';
 import { Icons } from '../components/Icons.jsx';
 import { playCardAudio, playAudioUrl, generateGrammarCardAudio } from '../utils/ttsUtils.js';
@@ -34,6 +37,8 @@ import { DEMO } from '../demo/demoConfig.js';
 
 // Adjust in Settings once that field is wired up.
 const NEW_CARDS_PER_SESSION = 10;
+// Deferred cards offered per 연기된 카드 round (DF-D10); the round can be repeated.
+const DEFERRED_PER_ROUND = 20;
 
 // Grade-confirmation pulse: how long the chosen grade button animates before
 // the card advances. Overlapped with the Firestore write, so it only adds
@@ -94,6 +99,53 @@ function renderSentenceHighlight(sentence, inputForm, C) {
   );
 }
 
+// ── Context sentences (vocab cards) ──────────────────────────
+// CX: the sentences mined for a word, from every source, shown below its
+// vocab card. Skipped rows are left out (a skipped sentence is usually a bad
+// one), the same sentence in two sources shows once, and a sentence that has
+// a sentence card lends that card's sentence clip (no new audio is generated).
+// A sentence card keeps two clips: audioUrl is the word on its own,
+// sentenceAudioUrl is the whole sentence; only the sentence clip is used here.
+const CONTEXT_SHOWN = 2;
+
+function buildContextIndex(sentenceInputs, cards) {
+  const audio = new Map();
+  for (const c of cards || []) {
+    if (c.type !== 'sentence' || !c.sentenceAudioUrl || !c.sentence) continue;
+    audio.set(`${normalizeLemma(c.lemma || '')}|${c.sentence.normalize('NFC')}`, c.sentenceAudioUrl);
+  }
+  const index = new Map();
+  for (const r of sentenceInputs || []) {
+    if (!r || r.skipUpload || !r.sentence || !r.targetWord) continue;
+    const norm = normalizeLemma(r.targetWord);
+    if (!norm) continue;
+    const sentence = r.sentence.normalize('NFC');
+    if (!index.has(norm)) index.set(norm, []);
+    index.get(norm).push({
+      sentence,
+      inputForm: r.inputForm || '',
+      source:    r.source || '',
+      ts:        r.ts || '',
+      audioUrl:  audio.get(`${norm}|${sentence}`) || null,
+    });
+  }
+  return index;
+}
+
+// The card's own sources first, then newest; one entry per sentence.
+function contextFor(card, index) {
+  if (!card || card.type !== 'vocab' || !index) return [];
+  const rows = index.get(normalizeLemma(card.lemma || card.front || '')) || [];
+  const own = new Set(card.deckNames || []);
+  const sorted = [...rows].sort((a, b) => {
+    const ao = own.has(a.source), bo = own.has(b.source);
+    if (ao !== bo) return ao ? -1 : 1;
+    return (b.ts || '').localeCompare(a.ts || '');
+  });
+  const seen = new Set();
+  return sorted.filter(r => (seen.has(r.sentence) ? false : (seen.add(r.sentence), true)));
+}
+
 // SD-D2: of two cards for one word, a series deck shows the more overdue
 // one: a reviewed card before a new one, then the earlier due date.
 function moreOverdue(a, b) {
@@ -118,6 +170,10 @@ function deckAccent(type, C) {
 // ── Review session ────────────────────────────────────────────
 //
 // Session phases: opening_boundary → due → boundary_1_2 → new → boundary_2_3 → extra → finished
+// DF2: an optional 연기된 카드 round (cards the daily cap deferred) may run after
+// due cards or from "Nothing due today", 20 at a time: … → deferred →
+// boundary_deferred → (deferred again | new | extra). Cards seen in a deferred
+// round are left out of the full deck round.
 //
 // Again-queue logic:
 //   - Pressing Again re-queues the card at the back of the current phase queue.
@@ -127,12 +183,16 @@ function deckAccent(type, C) {
 //   - When the session is ended manually, any Again'd cards still in the queue are already
 //     written to Firestore with due=past, so they surface at the next session start.
 
-function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextDueDate,
-  onGrade, onEnd, soundProfile, onNavigateToGrammar, fsrsSettings, settings, reversed = false, C, S }) {
+function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, deferredCards = [], deferredOnly = false, nextDueDate,
+  onGrade, onEnd, soundProfile, onNavigateToGrammar, fsrsSettings, settings, reversed = false, contextIndex = null, C, S }) {
 
   const AGAIN_CAP = DEMO ? 1 : (fsrsSettings?.againCap ?? FSRS_DEFAULTS.againCap);
 
-  const initialPhase = manualCards.length > 0 ? 'manual' : dueCards.length > 0 ? 'due' : 'opening_boundary';
+  // DF3: the masthead's Deferred corner opens a session that is only the
+  // 연기된 카드 round (deferredOnly), starting straight into its first 20.
+  const startDeferred = deferredOnly && deferredCards.length > 0;
+  const firstDeferred = startDeferred ? deferredCards.slice(0, DEFERRED_PER_ROUND) : [];
+  const initialPhase = manualCards.length > 0 ? 'manual' : startDeferred ? 'deferred' : dueCards.length > 0 ? 'due' : 'opening_boundary';
   const [phase,            setPhase]            = useState(initialPhase);
   // O1: opening bookend. Shown when a session starts straight into cards
   // ('Nothing due today' has its own screen, so it skips this). O3: also
@@ -140,12 +200,17 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   // cards, full deck, due after selected), and skipped for a single-card
   // View Card jump, which should open the card at once.
   const [introOpen,        setIntroOpen]        = useState(
-    (initialPhase === 'manual' && manualCards.length > 1) || initialPhase === 'due'
+    (initialPhase === 'manual' && manualCards.length > 1) || initialPhase === 'due' || initialPhase === 'deferred'
   );
-  const [queue,           setQueue]            = useState(() => manualCards.length > 0 ? [...manualCards] : dueCards.length > 0 ? [...dueCards] : []);
+  const [queue,           setQueue]            = useState(() => manualCards.length > 0 ? [...manualCards] : startDeferred ? [...firstDeferred] : dueCards.length > 0 ? [...dueCards] : []);
   const [againCounts,      setAgainCounts]      = useState({}); // cardId -> Again count this phase
   const [revealed,         setRevealed]         = useState(false);
   const [revealedSections, setRevealedSections] = useState({});
+  // CX: which card turn has its Context opened / all sentences shown. Keyed
+  // by card id + turn so every card (an Again'd card coming back included)
+  // starts closed without a reset effect.
+  const [ctxOpenKey,       setCtxOpenKey]       = useState(null);
+  const [ctxAllKey,        setCtxAllKey]        = useState(null);
   const [gradedRating,     setGradedRating]     = useState(null); // rating whose button is pulsing
 
   // Session stats
@@ -155,6 +220,19 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   // U7: cards resolved before the current phase began, so the counter counts
   // this phase only (a skipped phase resolved nothing).
   const [phaseBase,    setPhaseBase]    = useState(0);
+
+  // DF2: the 연기된 카드 round. deferredStart is how many deferred cards have
+  // been put into rounds so far; deferredRound is the current round's cards.
+  const [deferredStart, setDeferredStart] = useState(() => firstDeferred.length);
+  const [deferredRound, setDeferredRound] = useState(() => firstDeferred);
+  const deferredLeft = Math.max(0, deferredCards.length - deferredStart);
+  const nextDeferred = Math.min(DEFERRED_PER_ROUND, deferredLeft);
+  // The full deck round leaves out cards already seen in a deferred round.
+  const extraLeft = useMemo(() => {
+    if (!deferredStart) return extraCards;
+    const seen = new Set(deferredCards.slice(0, deferredStart).map(c => c.id));
+    return extraCards.filter(c => !seen.has(c.id));
+  }, [extraCards, deferredCards, deferredStart]);
 
   const card = queue[0];
 
@@ -211,25 +289,34 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     setRevealedSections({});
     if (newPhase === 'due')   setQueue([...dueCards]);
     if (newPhase === 'new')   setQueue([...newCards]);
-    if (newPhase === 'extra') setQueue([...extraCards]);
-  }, [dueCards, newCards, extraCards, successCount, carriedOver]);
+    if (newPhase === 'extra') setQueue([...extraLeft]);
+    if (newPhase === 'deferred') {
+      const round = deferredCards.slice(deferredStart, deferredStart + DEFERRED_PER_ROUND);
+      setDeferredRound(round);
+      setDeferredStart(deferredStart + round.length);
+      setQueue([...round]);
+    }
+  }, [dueCards, newCards, extraLeft, deferredCards, deferredStart, successCount, carriedOver]);
 
   const transitionPhase = useCallback((currentPhase) => {
     setRevealed(false);
     setRevealedSections({});
     if (currentPhase === 'manual') {
-      if (dueCards.length > 0 || extraCards.length > 0) setPhase('boundary_manual');
+      if (dueCards.length > 0 || extraLeft.length > 0) setPhase('boundary_manual');
       else setPhase('finished');
     } else if (currentPhase === 'due') {
-      if (newCards.length > 0 || extraCards.length > 0) setPhase('boundary_1_2');
+      if (newCards.length > 0 || deferredLeft > 0 || extraLeft.length > 0) setPhase('boundary_1_2');
+      else setPhase('finished');
+    } else if (currentPhase === 'deferred') {
+      if (newCards.length > 0 || deferredLeft > 0 || extraLeft.length > 0) setPhase('boundary_deferred');
       else setPhase('finished');
     } else if (currentPhase === 'new') {
-      if (extraCards.length > 0) setPhase('boundary_2_3');
+      if (extraLeft.length > 0) setPhase('boundary_2_3');
       else setPhase('finished');
     } else {
       setPhase('finished');
     }
-  }, [dueCards.length, newCards.length, extraCards.length]);
+  }, [dueCards.length, newCards.length, extraLeft.length, deferredLeft]);
 
   const handleGrade = useCallback(async (rating) => {
     if (!card || gradingRef.current) return;
@@ -303,7 +390,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     setRevealed(true);
   }, [revealed]);
 
-  const inReview = !introOpen && !!card && ['manual', 'due', 'new', 'extra'].includes(phase);
+  const inReview = !introOpen && !!card && ['manual', 'due', 'deferred', 'new', 'extra'].includes(phase);
 
   useKeyShortcuts(
     {
@@ -323,24 +410,26 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   // session; Enter fires the top/primary option — the same action as the first
   // button rendered on each screen. Gated on onBoundary, which is disjoint from
   // inReview, so this never collides with the active-card keymap above.
-  const onBoundary = ['opening_boundary', 'boundary_manual', 'boundary_1_2', 'boundary_2_3', 'finished'].includes(phase);
+  const onBoundary = ['opening_boundary', 'boundary_manual', 'boundary_1_2', 'boundary_deferred', 'boundary_2_3', 'finished'].includes(phase);
 
+  // DF-D11: new cards stay the first choice; deferred cards come next.
   const advanceBoundary = useCallback(() => {
-    if (phase === 'opening_boundary' || phase === 'boundary_1_2') {
+    if (phase === 'opening_boundary' || phase === 'boundary_1_2' || phase === 'boundary_deferred') {
       if (newCards.length > 0) startPhase('new');
-      else if (extraCards.length > 0) startPhase('extra');
+      else if (deferredLeft > 0) startPhase('deferred');
+      else if (extraLeft.length > 0) startPhase('extra');
       else onEnd();
     } else if (phase === 'boundary_manual') {
       if (dueCards.length > 0) startPhase('due');
-      else if (extraCards.length > 0) startPhase('extra');
+      else if (extraLeft.length > 0) startPhase('extra');
       else onEnd();
     } else if (phase === 'boundary_2_3') {
-      if (extraCards.length > 0) startPhase('extra');
+      if (extraLeft.length > 0) startPhase('extra');
       else onEnd();
     } else {
       onEnd(); // finished → Done
     }
-  }, [phase, newCards.length, dueCards.length, extraCards.length, startPhase, onEnd]);
+  }, [phase, newCards.length, dueCards.length, extraLeft.length, deferredLeft, startPhase, onEnd]);
 
   useKeyShortcuts(
     {
@@ -460,7 +549,8 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     // O3: the round decides the heading.
     const intro =
       phase === 'new'   ? { korean: '새 카드',   title: 'New Cards', detail: count(newCards.length, 'new card') }
-      : phase === 'extra' ? { korean: '전체 카드', title: 'Full Deck', detail: count(extraCards.length, 'card') }
+      : phase === 'deferred' ? { korean: '연기된 카드', title: 'Deferred Cards', detail: `${deferredRound.length} deferred` }
+      : phase === 'extra' ? { korean: '전체 카드', title: 'Full Deck', detail: count(extraLeft.length, 'card') }
       : phase === 'manual' ? { korean: '복습', title: 'Review Session', detail: `${manualCards.length} selected` }
       : { korean: '복습', title: 'Review Session', detail: `${dueCards.length} due${newCards.length > 0 ? ` · ${newCards.length} new` : ''}` };
     return (
@@ -506,6 +596,23 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     );
   }
 
+  // ── The 연기된 카드 button (DF-D11) ─────────────────────────
+  // Second after Study new cards (which stays the Enter choice); primary when
+  // there are no new cards to study. `more` after a deferred round. Aligned
+  // like the screen's other buttons: left on "Nothing due today", centred on
+  // the round-end screens.
+  const deferredButton = (more, centred = true) => {
+    if (!nextDeferred) return null;
+    const k = nextDeferred;
+    const label = more ? `Review ${k} more deferred` : `Review ${k} deferred card${k !== 1 ? 's' : ''}`;
+    const base = newCards.length > 0 ? S.btnGhost : S.btnPrimary;
+    return (
+      <button style={centred ? { ...base, justifyContent: 'center' } : base} onClick={() => startPhase('deferred')}>
+        {label}
+      </button>
+    );
+  };
+
   // ── Boundary: nothing due today (opening) ────────────────
   if (phase === 'opening_boundary') {
     let nextLabel = null;
@@ -532,7 +639,8 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
               Study {newCards.length} new card{newCards.length !== 1 ? 's' : ''}
             </button>
           )}
-          {extraCards.length > 0 && (
+          {deferredButton(false, false)}
+          {extraLeft.length > 0 && (
             <button style={S.btnGhost} onClick={() => startPhase('extra')}>
               Browse full deck
             </button>
@@ -576,7 +684,7 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
             Continue to {dueCards.length} due card{dueCards.length !== 1 ? 's' : ''}
           </button>
         )}
-        {extraCards.length > 0 && (
+        {extraLeft.length > 0 && (
           <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
             {dueCards.length > 0 ? 'Skip to full deck' : 'Continue to full deck'}
           </button>
@@ -585,28 +693,34 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
     ));
   }
 
-  // ── Boundary: after due phase ─────────────────────────────
-  if (phase === 'boundary_1_2') {
-    return roundEnd('Due cards complete', dueCards.length, (
-      <>
-        {newCards.length > 0 && (
-          <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => startPhase('new')}>
-            Study {newCards.length} new card{newCards.length !== 1 ? 's' : ''}
-          </button>
-        )}
-        {extraCards.length > 0 && (
-          <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
-            {newCards.length > 0 ? 'Skip to full deck' : 'Continue to full deck'}
-          </button>
-        )}
-      </>
-    ));
+  // ── Boundary: after due phase, and after a deferred round (DF2) ──
+  if (phase === 'boundary_1_2' || phase === 'boundary_deferred') {
+    const afterDeferred = phase === 'boundary_deferred';
+    return roundEnd(
+      afterDeferred ? 'Deferred cards complete' : 'Due cards complete',
+      afterDeferred ? deferredRound.length : dueCards.length,
+      (
+        <>
+          {newCards.length > 0 && (
+            <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => startPhase('new')}>
+              Study {newCards.length} new card{newCards.length !== 1 ? 's' : ''}
+            </button>
+          )}
+          {deferredButton(afterDeferred)}
+          {extraLeft.length > 0 && (
+            <button style={{ ...S.btnGhost, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
+              {newCards.length > 0 || nextDeferred > 0 ? 'Skip to full deck' : 'Continue to full deck'}
+            </button>
+          )}
+        </>
+      ),
+    );
   }
 
   // ── Boundary: after new cards phase ──────────────────────
   if (phase === 'boundary_2_3') {
     return roundEnd('New cards complete', newCards.length, (
-      extraCards.length > 0 && (
+      extraLeft.length > 0 && (
         <button style={{ ...S.btnPrimary, justifyContent: 'center' }} onClick={() => startPhase('extra')}>
           Continue to full deck
         </button>
@@ -625,10 +739,10 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
   const promptText   = showReversed ? card.back : card.front;
   const answerText   = showReversed ? card.front : card.back;
 
-  const phaseLabel = phase === 'manual' ? 'Selected' : phase === 'due' ? 'Due today' : phase === 'new' ? 'New' : 'Full deck';
+  const phaseLabel = phase === 'manual' ? 'Selected' : phase === 'due' ? 'Due today' : phase === 'deferred' ? 'Deferred' : phase === 'new' ? 'New' : 'Full deck';
   // Show the original phase array length as the total, not the (growing) queue length.
   // This prevents the progress indicator from jumping when Again cards are re-queued.
-  const phaseTotal    = phase === 'manual' ? manualCards.length : phase === 'due' ? dueCards.length : phase === 'new' ? newCards.length : extraCards.length;
+  const phaseTotal    = phase === 'manual' ? manualCards.length : phase === 'due' ? dueCards.length : phase === 'deferred' ? deferredRound.length : phase === 'new' ? newCards.length : extraLeft.length;
   // U7: resolved in this phase = resolved overall minus what was resolved
   // before it began. Subtracting every earlier phase's full size counted a
   // skipped phase as done, so "Skip to full deck" sat at 1/N for a while.
@@ -637,6 +751,15 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
 
   // Per-card Again indicator
   const cardAgainCount = againCounts[card.id] || 0;
+
+  // CX: context sentences below a vocab card. Hidden behind Context on the
+  // front (and not offered there in reverse, where they'd give the Korean
+  // away); shown automatically once the back is revealed.
+  const isVocab     = card.type === 'vocab';
+  const ctxKey      = `${card.id}|${turn}`;
+  const ctxRows     = isVocab ? contextFor(card, contextIndex) : [];
+  const ctxShowList = ctxRows.length > 0 && (revealed || ctxOpenKey === ctxKey);
+  const ctxVisible  = ctxAllKey === ctxKey ? ctxRows : ctxRows.slice(0, CONTEXT_SHOWN);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', maxWidth: '640px', margin: '0 auto', ...(isMobile && { paddingTop: '32px' }) }} className="fade-up quiz-session">
@@ -799,6 +922,56 @@ function ReviewSession({ manualCards = [], dueCards, newCards, extraCards, nextD
               {g.label}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* CX: context sentences (vocab cards) */}
+      {isVocab && ctxRows.length === 0 && (
+        <div style={{ display: 'flex', justifyContent: 'center' }} className="fade-up">
+          <Pendant variant="close" height={150} />
+        </div>
+      )}
+      {isVocab && ctxRows.length > 0 && !ctxShowList && !showReversed && (
+        <button
+          onClick={() => setCtxOpenKey(ctxKey)}
+          style={{ padding: '10px 20px', borderRadius: '8px', border: `1px solid ${C.border}`, background: 'transparent', color: C.textS, fontSize: '13px', cursor: 'pointer', transition: 'all 0.15s', alignSelf: 'center' }}
+          className="btn-ghost"
+        >
+          Context
+        </button>
+      )}
+      {ctxShowList && (
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: '8px', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px' }} className="fade-up">
+          <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM }}>Context</div>
+          {ctxVisible.map((r, i) => (
+            <div key={r.sentence} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+              {r.audioUrl && settings?.ttsEnabled !== false && (
+                <button
+                  onClick={() => handlePlayExample(`ctx${i}`, r.audioUrl)}
+                  style={{
+                    flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: '24px', height: '24px', borderRadius: '6px', cursor: 'pointer', marginTop: '2px',
+                    border: `1px solid ${playingKey === `ctx${i}` ? C.accent : C.border}`,
+                    background: playingKey === `ctx${i}` ? C.accentSoft : 'transparent',
+                    color: playingKey === `ctx${i}` ? C.accent : C.textM,
+                  }}
+                >
+                  {playingKey === `ctx${i}` ? Icons.speakerPlaying : Icons.speaker}
+                </button>
+              )}
+              <span style={{ fontFamily: SH.fk, fontSize: '15px', color: C.text, lineHeight: 1.7 }}>
+                {renderSentenceHighlight(r.sentence, r.inputForm, C)}
+              </span>
+            </div>
+          ))}
+          {ctxVisible.length < ctxRows.length && (
+            <button
+              onClick={() => setCtxAllKey(ctxKey)}
+              style={{ alignSelf: 'flex-start', fontSize: '12px', color: C.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+            >
+              Show {ctxRows.length - ctxVisible.length} more
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -1015,9 +1188,16 @@ function DeckManager({ decks, cards, onDelete, onClose, C, S }) {
 
 // ── Main page ─────────────────────────────────────────────────
 // onEchoDeck(deckId) (X3): opens the Echo setup on the Quizzes page with that deck chosen.
-export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, onPipelineResult, settings = {}, onEchoDeck = null, onNotice = null, aviSources = [] }) {
+export function FlashcardsPage({ soundProfile, dsh, onNavigateToGrammar, cards, decks, fcLoading, updateCards, updateDecks, grammarMasteryCounts, grammarEntries, flashcardStudyTarget, setFlashcardStudyTarget, fsrsSettings = {}, srsSnapshot = {}, deferralForecast = null, settings = {}, onEchoDeck = null, onNotice = null, aviSources = [], sentenceInputs = [] }) {
   const { C, S } = useAppTheme();
   const [session,           setSession]           = useState(null);
+  // OF-D2: while a session is open, cards changed on another device are not
+  // read in; they arrive when it ends (the card data hook in App listens).
+  const inReview = !!session;
+  useEffect(() => {
+    setReviewInProgress(inReview);
+    return () => setReviewInProgress(false);
+  }, [inReview]);
   const [managing,          setManaging]          = useState(false);
   const [cleanupResult,     setCleanupResult]     = useState(null);
   const [showGrammarPicker, setShowGrammarPicker] = useState(false);
@@ -1039,7 +1219,6 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     getLogicalDateStr(dsh ?? 3).slice(0, 7)
   );
   const [reviewStats, setReviewStats] = useState(null);
-  const reviewStatsRef = useRef(EMPTY_REVIEW_STATS);
 
   // ── Load review log (bounded to a rolling window) ───────────
   // Fetches only the months actually needed instead of the whole
@@ -1094,16 +1273,46 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   // records from full history on every load. Until the DevDashboard
   // "Recompute review stats" button has been run once to seed it, this
   // reads as EMPTY_REVIEW_STATS rather than erroring.
+  //
+  // FS4: read before any write (utils/reviewStatsGuard.js). A grade made
+  // before the records have loaded waits in the guard's backlog.
+  const statsGuard = useMemo(() => createStatsGuard({
+    load: async () => {
+      const snap = await getDoc(doc(db, 'users', uid, 'settings', 'reviewStats'));
+      return snap.exists() ? snap.data() : EMPTY_REVIEW_STATS;
+    },
+    save: (stats) => {
+      setDoc(doc(db, 'users', uid, 'settings', 'reviewStats'), stats)
+        .catch(e => console.error('reviewStats write failed', e));
+    },
+    apply: (stats, g) => applyReviewToStats(stats, g.logDate, g.newDayCount, g.dsh),
+    onChange: setReviewStats,
+  }), [uid]);
+
   useEffect(() => {
+    if (uid) statsGuard.ensureLoaded();
+  }, [uid, statsGuard]);
+
+  // SC-D7: the records and today's count are read again when a session
+  // starts. This page can sit open for hours, and reviews done on another
+  // device in that time would otherwise be written over (the records) or
+  // counted from 1 again (today's count). Neither read is waited on: grades
+  // made before the records land are held by the guard, and the count takes
+  // whichever is higher, what this device has or what was stored.
+  const refreshReviewRecords = useCallback(() => {
     if (!uid) return;
-    getDoc(doc(db, 'users', uid, 'settings', 'reviewStats'))
+    statsGuard.refresh();
+    const logDate = getLogicalDateStr(dsh ?? 3);
+    getDoc(doc(db, 'users', uid, 'reviewLog', logDate))
       .then(snap => {
-        const loaded = snap.exists() ? snap.data() : EMPTY_REVIEW_STATS;
-        reviewStatsRef.current = loaded;
-        setReviewStats(loaded);
+        const stored = snap.exists() ? (snap.data().count || 0) : 0;
+        if (stored > (reviewLogRef.current[logDate] || 0)) {
+          reviewLogRef.current = { ...reviewLogRef.current, [logDate]: stored };
+          setReviewLog(reviewLogRef.current);
+        }
       })
-      .catch(e => console.error('FlashcardsPage: reviewStats load failed', e));
-  }, [uid]);
+      .catch(e => console.warn("FlashcardsPage: couldn't re-read today's review count", e));
+  }, [uid, dsh, statsGuard]);
 
   // ── Deck total sync (runs once on mount when cards are ready) ─
   // Pipeline itself now runs at App level so it fires on any page open.
@@ -1119,6 +1328,11 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
             deckTotals[id] = (deckTotals[id] || 0) + 1;
           });
         });
+        // A deck whose last card is gone gets no entry above, so its stored
+        // totalCards would stay stale; write 0 for it instead.
+        decks.forEach(d => {
+          if (d.id !== 'deck_grammar' && !(d.id in deckTotals) && d.totalCards) deckTotals[d.id] = 0;
+        });
         const deckBatch = writeBatch(db);
         Object.entries(deckTotals).forEach(([deckId, count]) => {
           deckBatch.update(doc(db, 'users', uid, 'decks', deckId), { totalCards: count });
@@ -1132,7 +1346,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
         console.error('FlashcardsPage: deck sync failed', e);
       }
     })();
-  }, [uid, cards]);
+  }, [uid, cards]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Deck name lookup ──────────────────────────────────────
   const deckNameMap = useMemo(() => {
@@ -1150,6 +1364,9 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     }));
   }, [cards, deckNameMap]);
 
+  // CX: sentence rows by word, for the context section below vocab cards.
+  const contextIndex = useMemo(() => buildContextIndex(sentenceInputs, cards), [sentenceInputs, cards]);
+
   // ── Pause state (Phase D2) ────────────────────────────────
   // A card counts as paused only when every deck it belongs to is paused; a
   // card still live in any active deck keeps surfacing.
@@ -1158,6 +1375,15 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     (c) => !!(c.deckIds?.length && c.deckIds.every(id => pausedDeckIds.has(id))),
     [pausedDeckIds],
   );
+
+  // SC-D5: how many cards are already due on each day, so a new interval of
+  // a week or more can land on a lighter day nearby (fsrsGrade). Rebuilt when
+  // the cards change; handleGrade also adds each card it places, so two quick
+  // grades can't both pick the same "empty" day before the rebuild.
+  const dueLoadRef = useRef(null);
+  useEffect(() => {
+    dueLoadRef.current = buildDueLoad(cards, isCardPaused);
+  }, [cards, isCardPaused]);
 
   const handleTogglePause = useCallback(async (deck) => {
     if (!uid) return;
@@ -1188,7 +1414,8 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     enrichedCards.forEach(c => {
       if (c.type === 'grammar') return;
       (c.deckIds || []).forEach(id => {
-        if (!stats[id]) stats[id] = { due: 0, new: 0 };
+        if (!stats[id]) stats[id] = { due: 0, new: 0, total: 0 };
+        stats[id].total++;
         if (isDueToday(c, dsh ?? 3))    stats[id].due++;
         else if (isNewCard(c)) stats[id].new++;
       });
@@ -1244,13 +1471,30 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   // todayStr: due counts move on when the day flips with the page open.
   }, [seriesDecks, seriesPool, dsh, todayStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Empty decks stay off the page ─────────────────────────
+  // A deck with no cards is left out of Recent, Series and Decks (Manage
+  // Decks still lists it so it can be deleted). Live count once cards load;
+  // before that, the stored totalCards. The Grammar deck keeps its own rules.
+  const deckCardTotal = useCallback((d) => {
+    if (d.id === 'deck_grammar' || !enrichedCards) return d.totalCards ?? null;
+    return deckStats[d.id]?.total ?? 0;
+  }, [enrichedCards, deckStats]);
+  const shownDecks = useMemo(
+    () => decks.filter(d => d.id !== 'deck_grammar' && deckCardTotal(d) !== 0),
+    [decks, deckCardTotal]
+  );
+  const shownSeriesDecks = useMemo(
+    () => enrichedCards ? seriesDecks.filter(sd => (seriesStats[sd.id]?.total ?? 0) > 0) : seriesDecks,
+    [enrichedCards, seriesDecks, seriesStats]
+  );
+
   // ── Recently studied decks (up to 4, sorted by lastStudied desc) ─
   const recentDecks = useMemo(() => {
     return [...decks]
-      .filter(d => !!d.lastStudied)
+      .filter(d => !!d.lastStudied && deckCardTotal(d) !== 0)
       .sort((a, b) => b.lastStudied.localeCompare(a.lastStudied))
       .slice(0, 4);
-  }, [decks]);
+  }, [decks, deckCardTotal]);
 
   // ── Recent Grammar (Dispatches box — mirrors Content Library's Gazette tab) ─
   const recentGrammarReviews = useMemo(() => (cards || [])
@@ -1299,7 +1543,9 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     }
 
     let pool;
-    if (deckId === 'all')            pool = enrichedCards.filter(c => c.type !== 'grammar' && !isCardPaused(c));
+    // 'deferred' (DF3, the masthead's Deferred corner): every non-paused deck,
+    // like 'all', but the session is only the 연기된 카드 round.
+    if (deckId === 'all' || deckId === 'deferred') pool = enrichedCards.filter(c => c.type !== 'grammar' && !isCardPaused(c));
     else if (deckId === 'all_words') pool = enrichedCards.filter(c => c.type === 'vocab' && !isCardPaused(c));
     else if (deckId === 'all_sentences') pool = enrichedCards.filter(c => c.type === 'sentence' && !isCardPaused(c));
     else if (isSeriesToken(deckId))  pool = seriesPool(seriesDecks.find(sd => sd.id === deckId));
@@ -1323,6 +1569,25 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       .filter(c => !isDueToday(c, dsh ?? 3) && !isNewCard(c))
       .sort((a, b) => (getDueDateStr(a) || '').localeCompare(getDueDateStr(b) || ''));
 
+    // DF-D10: cards the daily cap deferred and not yet due again (all are in
+    // `extra` too). Most at risk of being forgotten first, then the one
+    // deferred longest ago, then id.
+    const recallNow = Date.now();
+    const deferred = pool
+      .filter(c => isDeferred(c, dsh ?? 3))
+      .map(c => ({ c, r: predictedRecall(c, recallNow) }))
+      .sort((a, b) =>
+        a.r - b.r ||
+        String(a.c.deferredFrom || '').localeCompare(String(b.c.deferredFrom || '')) ||
+        String(a.c.id).localeCompare(String(b.c.id)))
+      .map(x => x.c);
+
+    if (deckId === 'deferred') {
+      if (!deferred.length) return;
+      setSession({ deckId, dueCards: [], newCards: [], extraCards: [], deferredCards: deferred, deferredOnly: true, nextDueDate: null, reversed: false });
+      return;
+    }
+
     if (!due.length && !newCards.length && !extra.length) return;
 
     const upcomingDates = pool
@@ -1336,8 +1601,9 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     const deckObj  = decks.find(d => d.id === deckId);
     const reversed = deckObj?.reversed === true && deckType(deckObj) === 'word';
 
-    setSession({ deckId, dueCards: due, newCards, extraCards: extra, nextDueDate, reversed });
-  }, [enrichedCards, dsh, decks, isCardPaused, seriesPool, seriesDecks]);
+    refreshReviewRecords(); // SC-D7; grammar sessions don't touch the records
+    setSession({ deckId, dueCards: due, newCards, extraCards: extra, deferredCards: deferred, nextDueDate, reversed });
+  }, [enrichedCards, dsh, decks, isCardPaused, seriesPool, seriesDecks, refreshReviewRecords]);
 
   // ── Start a manual Grammar Deck session from a picked, ordered set of cardIds ─
   // Used by "View Card" (single card) and the Grammar Deck picker (multiple).
@@ -1388,15 +1654,18 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       const updates = { due: null, lastReview: now, lastGrade: rating, reps: (card.reps || 0) + 1, gapEvents: history };
       if (DEMO) return { ...card, ...updates }; // demo: inert grading — nothing persists (D5)
       updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, ...updates } : c) : prev);
-      queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates),
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), withCardStamp(updates)),
         'FlashcardsPage: grade write failed', gradeFailed(card));
       return { ...card, ...updates };
     }
 
-    const updates = fsrsGrade(card, rating, fsrsSettings, dsh ?? 3); // T1: logical-day due dates
+    // T1: logical-day due dates. SC-D5: spread over lighter days.
+    const dueLoad = dueLoadRef.current;
+    const updates = fsrsGrade(card, rating, fsrsSettings, dsh ?? 3, dueLoad);
     if (DEMO) return { ...card, ...updates }; // demo: inert grading — no card write, no reviewLog, no reviewStats (D5)
+    if (dueLoad && updates.dueDay) dueLoad.set(updates.dueDay, (dueLoad.get(updates.dueDay) || 0) + 1);
     updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, ...updates } : c) : prev);
-    queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), updates),
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), withCardStamp(updates)),
       'FlashcardsPage: grade write failed', gradeFailed(card));
 
     const logDate     = getLogicalDateStr(dsh ?? 3);
@@ -1406,22 +1675,18 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
     reviewLogRef.current = { ...reviewLogRef.current, [logDate]: newDayCount };
     setReviewLog(reviewLogRef.current);
 
-    const newStats = applyReviewToStats(reviewStatsRef.current, logDate, newDayCount, dsh ?? 3);
-    setDoc(doc(db, 'users', uid, 'settings', 'reviewStats'), newStats)
-      .catch(e => console.error('reviewStats write failed', e));
-    reviewStatsRef.current = newStats;
-    setReviewStats(newStats);
+    statsGuard.record({ logDate, newDayCount, dsh: dsh ?? 3 });
 
     return { ...card, ...updates };
-  }, [uid, updateCards, fsrsSettings, dsh, gradeFailed]);
+  }, [uid, updateCards, fsrsSettings, dsh, gradeFailed, statsGuard]);
 
   // ── End a session ─────────────────────────────────────────
   // Again cards still in the queue when the session ends are already written to
   // Firestore with due=past (from when Again was pressed), so they surface first
   // at the next session start with no additional writes needed.
-  const handleEndSession = useCallback(async () => {
+  const handleEndSession = useCallback(() => {
     // Series decks are virtual (no deck doc to stamp).
-    if (!DEMO && uid && session?.deckId && !['all', 'all_words', 'all_sentences'].includes(session.deckId) && !isSeriesToken(session.deckId)) {
+    if (!DEMO && uid && session?.deckId && !['all', 'all_words', 'all_sentences', 'deferred'].includes(session.deckId) && !isSeriesToken(session.deckId)) {
       const now = new Date().toISOString();
       // S6: queued, so ending a session never waits on the network.
       const deckId = session.deckId;
@@ -1440,17 +1705,10 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
         const el = document.querySelector('.content-pad');
         if (el) el.scrollTop = 0;
       });
-    }    // Re-run spike forecast with the post-session card state so that any large
-    // batch of new cards reviewed today is immediately factored into the 7-day forecast.
-    if (!DEMO && uid && cards && session?.deckId !== 'deck_grammar') {
-      try {
-        const result = await runSpikeForecast(uid, cards, dsh ?? 3, addTask, tasks || [], [...pausedDeckIds], settings?.srsSpikeCap ?? DAILY_CAP);
-        if (onPipelineResult) onPipelineResult(result);
-      } catch (e) {
-        console.error('FlashcardsPage: post-session spike forecast failed', e);
-      }
     }
-  }, [uid, session, updateDecks, cards, dsh, addTask, tasks, onPipelineResult, pausedDeckIds]);
+    // The deferral notices are worked out live in App from the cards in
+    // memory (DF-D6), so nothing needs re-running here.
+  }, [uid, session, updateDecks]);
 
   // ── Delete decks ──────────────────────────────────────────
   const handleDeleteDecks = useCallback(async (deckIds) => {
@@ -1484,7 +1742,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       if (ops >= 490) await flush();
     }
     for (const [cardId, remaining] of toMove) {
-      batch.update(doc(db, 'users', uid, 'flashcards', cardId), { deckIds: remaining });
+      batch.update(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({ deckIds: remaining }));
       ops++;
       if (ops >= 490) await flush();
     }
@@ -1632,12 +1890,12 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       if (ops >= 490) await flush();
     }
     for (const [cardId, u] of resyncPairs) {
-      batch.update(doc(db, 'users', uid, 'flashcards', cardId), u);
+      batch.update(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp(u));
       ops++;
       if (ops >= 490) await flush();
     }
     for (const { id, deckIds } of deckLeaves) {
-      batch.update(doc(db, 'users', uid, 'flashcards', id), { deckIds });
+      batch.update(doc(db, 'users', uid, 'flashcards', id), withCardStamp({ deckIds }));
       ops++;
       if (ops >= 490) await flush();
     }
@@ -1687,7 +1945,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       const explanation = entry.explanation || '';
       const examples    = entry.examples    || '';
       try {
-        await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { explanation, examples, notes: null });
+        await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), withCardStamp({ explanation, examples, notes: null }));
         updateCards(prev => prev ? prev.map(c => c.id === card.id ? { ...c, explanation, examples, notes: null } : c) : prev);
         await generateGrammarCardAudio({
           examples, cardId: card.id, uid,
@@ -1720,6 +1978,8 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
         dueCards={session.dueCards}
         newCards={session.newCards}
         extraCards={session.extraCards}
+        deferredCards={session.deferredCards || []}
+        deferredOnly={!!session.deferredOnly}
         nextDueDate={session.nextDueDate}
         onGrade={handleGrade}
         onEnd={handleEndSession}
@@ -1728,6 +1988,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
         fsrsSettings={fsrsSettings}
         settings={settings}
         reversed={session.reversed}
+        contextIndex={contextIndex}
         C={C} S={S}
       />
     );
@@ -1737,15 +1998,6 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
   const totalDue = enrichedCards
     ? enrichedCards.filter(c => c.type !== 'grammar' && isDueToday(c, dsh ?? 3) && !isCardPaused(c)).length
     : null;
-
-  // ── Spike forecast ────────────────────────────────────────
-  const spikeCap        = settings?.srsSpikeCap ?? DAILY_CAP;
-  const spikeRemaining  = totalDue ?? 0;
-  const fcTomorrowCount = srsSnapshot?.tomorrowCount ?? 0;
-  const showFcConditional =
-    spikeRemaining > 0 &&
-    (spikeRemaining + fcTomorrowCount) > spikeCap &&
-    fcTomorrowCount <= spikeCap;
 
   const virtualDecks = [
     { id: 'all',           name: 'All Cards' },
@@ -1770,8 +2022,14 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
           onClick: totalDue > 0 ? () => startSession('all') : undefined,
         }}
         cornerRight={{
-          value: srsSnapshot?.triaged ?? 0,
-          label: srsSnapshot?.spikeDetected ? 'Triaged · Spike Flagged' : 'Triaged',
+          // DF-D12: cards deferred right now (the backlog), and how many the
+          // cap moved this morning. Until the forecast is ready, this
+          // morning's count.
+          value: deferralForecast?.backlog ?? srsSnapshot?.triaged ?? 0,
+          label: srsSnapshot?.triaged > 0 ? `Deferred · ${srsSnapshot.triaged} today` : 'Deferred',
+          // DF3: opens the 연기된 카드 round across every deck, once the live
+          // count is in and above 0.
+          onClick: deferralForecast?.backlog > 0 ? () => startSession('deferred') : undefined,
         }}
         title="The Recaller Review"
         isMobile={isMobile}
@@ -1779,37 +2037,11 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       <GoldRule />
       <BylineRule left="autovocaindex / flashcards" right={todayStr} />
 
-      {/* Spike flags — hard spikes and conditional */}
-      {((srsSnapshot?.spikes ?? []).length > 0 || showFcConditional) && (
-        <div style={{ marginBottom: '20px', display: 'flex', flexDirection: 'column', gap: '8px', width: 'fit-content' }}>
-          {(srsSnapshot?.spikes ?? []).map(spike => (
-            <div key={spike.taskDateStr} style={{
-              padding: '10px 12px', borderRadius: '8px',
-              border: `1px solid ${C.warning}`,
-              background: `${C.warning}11`,
-              display: 'flex', alignItems: 'center', gap: '8px',
-            }}>
-              <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.shield}</span>
-              <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
-                {spike.dueCount} card spike on {spike.dayName}
-              </div>
-            </div>
-          ))}
-          {showFcConditional && (
-            <div style={{
-              padding: '10px 12px', borderRadius: '8px',
-              border: `1px dashed ${C.warning}`,
-              background: `${C.warning}09`,
-              display: 'flex', alignItems: 'center', gap: '8px',
-            }}>
-              <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.alert}</span>
-              <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
-                Tomorrow: {spikeRemaining + fcTomorrowCount} cards due if reviews incomplete
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {/* Deferral notices (DF-D3 to DF-D5), in the spike flags' old place */}
+      <DeferralNotices
+        forecast={deferralForecast}
+        wrapStyle={{ marginBottom: '20px', display: 'flex', flexDirection: 'column', gap: '8px', width: 'fit-content' }}
+      />
 
       {/* Review heatmap */}
       <div style={{ marginBottom: '28px' }}>
@@ -1846,7 +2078,7 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
               <DeckCard
                 key={deck.id}
                 deck={deck}
-                totalCount={deck.totalCards ?? null}
+                totalCount={deckCardTotal(deck)}
                 dueCount={cardsLoaded ? (deckStats[deck.id]?.due ?? null) : null}
                 newCount={cardsLoaded ? (deckStats[deck.id]?.new ?? null) : null}
                 masteryBreakdown={null}
@@ -1939,13 +2171,13 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       })()}
 
       {/* Series decks (SD-D3): above the books' own decks */}
-      {seriesDecks.length > 0 && (
+      {shownSeriesDecks.length > 0 && (
         <div style={{ marginBottom: '28px' }}>
           <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textM, marginBottom: '12px' }}>
             Series
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, 220px)', justifyContent: 'center', gap: '12px' }}>
-            {seriesDecks.map(sd => (
+            {shownSeriesDecks.map(sd => (
               <DeckCard
                 key={sd.id}
                 deck={sd}
@@ -1964,17 +2196,17 @@ export function FlashcardsPage({ soundProfile, dsh, addTask, tasks, onNavigateTo
       )}
 
       {/* Named decks */}
-      {decks.filter(d => d.id !== 'deck_grammar').length > 0 && (
+      {shownDecks.length > 0 && (
         <div>
           <div style={{ fontSize: '11px', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textM, marginBottom: '12px' }}>
             Decks
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, 220px)', justifyContent: 'center', gap: '12px' }}>
-            {decks.filter(d => d.id !== 'deck_grammar').map(deck => (
+            {shownDecks.map(deck => (
               <DeckCard
                 key={deck.id}
                 deck={deck}
-                totalCount={deck.totalCards ?? null}
+                totalCount={deckCardTotal(deck)}
                 dueCount={cardsLoaded ? (deckStats[deck.id]?.due ?? 0) : null}
                 newCount={cardsLoaded ? (deckStats[deck.id]?.new ?? 0) : null}
                 masteryBreakdown={null}

@@ -37,8 +37,13 @@ export const THEME_DEFS = [
   { id: 'feather', name: 'Feather',    desc: 'Mustard gold & pearl',             sw: ['#1a1008','#F5B800','#1a5c5a','#302010'] },
   { id: 'hanok',   name: 'Hanok Dusk', desc: 'Korean roof-tile & ginkgo gold',   sw: ['#3D3833','#EBA955','#9E978D','#564F49'] },
   { id: 'bauhaus', name: 'Bauhaus Sun', desc: 'Cream & poster orange',          sw: ['#EBE4D2','#E9810A','#C6340C','#FFFFFF'] },
-  { id: 'blossom', name: 'Blossom Mist', desc: 'Spring fog, petal rose & moss', sw: ['#EDE9E2','#ab3f4a','#738f63','#F7F4ED'] },
+  { id: 'shiner',  name: 'Shiner',     desc: 'Bruised plum, banana peel & sallow gold', sw: ['#231B1F','#CFC14A','#A8708E','#7A5E3C'] },
 ];
+
+// Retired theme ids and the theme that took their place, so a device or
+// saved setting still on an old id opens in its successor, not the default.
+export const RETIRED_THEMES = { blossom: 'shiner' };
+export const themeIdOf = (id) => RETIRED_THEMES[id] || id;
 
 export const NAV_SECTIONS = [
   { label: 'Agenda', items: [

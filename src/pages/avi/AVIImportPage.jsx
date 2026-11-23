@@ -32,6 +32,7 @@ import {
 import { openEpub } from '../../utils/epubUtils.js';
 import { ProgressBar } from '../../components/ProgressBar.jsx';
 import { updateAviIfOpen, saveDef1WhileClosed } from '../../hooks/useAVIData.js';
+import { usePillPointer } from '../../hooks/usePillPointer.js';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
 
@@ -130,12 +131,6 @@ function ImportPhrasePicker({ sentence, cleanFn, onConfirm, onCancel, C }) {
   const anchorRef = useRef(null);
   const dragRef   = useRef(false);
 
-  React.useEffect(() => {
-    const up = () => { dragRef.current = false; };
-    window.addEventListener('mouseup', up);
-    return () => window.removeEventListener('mouseup', up);
-  }, []);
-
   const down = (i) => {
     // Tap flow: a second tap on a different pill extends a single-pill
     // selection into a span; anything else re-anchors (drag flow).
@@ -153,6 +148,9 @@ function ImportPhrasePicker({ sentence, cleanFn, onConfirm, onCancel, C }) {
     if (!dragRef.current || anchorRef.current == null) return;
     setRange([Math.min(anchorRef.current, i), Math.max(anchorRef.current, i)]);
   };
+  // RC-D11: pointer events (mouse, finger or pen), so a drag works on a
+  // touchscreen too; letting go anywhere ends the drag.
+  const pillPointer = usePillPointer({ onDown: down, onEnter: enter, onUp: () => { dragRef.current = false; } });
 
   const clean = typeof cleanFn === 'function' ? cleanFn : (str) => String(str || '').trim();
   const phraseTokens = range
@@ -169,14 +167,13 @@ function ImportPhrasePicker({ sentence, cleanFn, onConfirm, onCancel, C }) {
 
   return (
     <div style={{ background: C.raised, border: `1px solid ${C.border}`, borderRadius: '6px', padding: '8px', display: 'flex', flexDirection: 'column', gap: '8px', userSelect: 'none' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+      <div {...pillPointer.containerProps} style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', ...pillPointer.containerStyle }}>
         {tokens.map((t, i) => {
           const inSel = range && i >= range[0] && i <= range[1];
           return (
             <span
               key={i}
-              onMouseDown={() => down(i)}
-              onMouseEnter={() => enter(i)}
+              {...pillPointer.pillProps(i)}
               style={{
                 padding: '3px 9px', borderRadius: '14px', fontSize: '13px',
                 cursor: 'pointer', fontFamily: SH.fk,
@@ -438,7 +435,9 @@ export function AVIImportPage({
           if (isPhraseInput(t.input)) {
             resolved = await lemmatizePhraseAsync(t.input, localHeadwords);
           } else {
-            const d = await resolveLemmaDetailed(t.input, { localHeadwords, withAlternates: true });
+            // LM4: in sentence mode the word is read in its first sentence.
+            const context = mode === 'sentence' && t.sentenceIdxs && t.sentenceIdxs.length ? String(includedItems[t.sentenceIdxs[0]] || '') : '';
+            const d = await resolveLemmaDetailed(t.input, { localHeadwords, withAlternates: true, context });
             resolved = d.lemma || t.input;
             alternates = d.alternates || [];
           }

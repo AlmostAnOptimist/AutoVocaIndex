@@ -4,6 +4,8 @@
 // allows manual selection/deselection and phrase drag-selection.
 // New tokens go through the 2-step PickWordPopup (confirm lemma → review definitions).
 // Flashcards auto-created when cardBack is present. No cloze generation.
+// RC-D10: the add pipeline lives in utils/sentenceStaging.js (shared with the
+// reading companion); this page keeps the screen and its state.
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { createPortal } from 'react-dom';
@@ -12,16 +14,18 @@ import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
 import {
-  uuid, normalizeLemma, extractLemmaFromText,
-  fetchDefinitionWithFallback,
-  getSourceSections, resolveLemmaDetailed,
-  writeGlobalLemma, updateLinkedCards,
-  filterNewSentenceRows, filterNewWordRows, filterNewLemmas,
+  normalizeLemma, cleanStagingText,
+  getSourceSections,
+  updateLinkedCards,
 } from '../../utils/aviUtils.js';
 import { SentenceEditModal } from '../../components/avi/SentenceEditModal.jsx';
-import { autoCreateWordCard, autoCreateSentenceCard } from '../../utils/cardFactory.js';
 import { DEMO, DEMO_CAPS, DEMO_LIMIT_NOTE, demoCapReached } from '../../demo/demoConfig.js';
-import { isSkippedInSource, inheritedSentenceSkip, withOwnSentenceSkip } from '../../utils/wordSkip.js';
+import { withOwnSentenceSkip } from '../../utils/wordSkip.js';
+import {
+  findPickEntry, tokenizeSentence, collectSelectedTerms,
+  stageSelectedTerms, fetchTermDefinitions, commitConfirmedTerms,
+} from '../../utils/sentenceStaging.js';
+import { usePillPointer } from '../../hooks/usePillPointer.js';
 import { LemmaAutocompleteInput } from '../../components/avi/LemmaAutocompleteInput.jsx';
 import { Icons } from '../../components/Icons.jsx';
 import { PaginationFooter } from '../../components/PaginationFooter.jsx';
@@ -29,16 +33,8 @@ import { usePaginationKeys } from '../../hooks/usePaginationKeys.js';
 import { useSearchAssist } from '../../hooks/useSearchAssist.js';
 import { SearchAnchorNote, DidYouMean } from '../../components/avi/SearchAssist.jsx';
 import { scrollListToTop } from '../../utils/scrollUtils.js';
-import { findLemmaEntryAny, canonicalLemma, otherReadings } from '../../utils/lemmaSuggest.js';
-import { planDef2Moves, applyDef2Moves, def2CardUpdate, applyDef2Write } from '../../utils/def2Cascade.js';
-
-// The Lemma Master entry a picked term lands on (exact, cleaned or variant
-// match) — the same lookup handlePopupDone uses to decide "existing".
-function findPickEntry(lemmaMaster, lemma) {
-  const norm = normalizeLemma(lemma);
-  return (lemmaMaster || []).find(l => l.cleanedLemma === norm || l.lemma === lemma)
-    || findLemmaEntryAny(lemmaMaster || [], lemma) || null;
-}
+import { otherReadings } from '../../utils/lemmaSuggest.js';
+import { def2CardUpdate, applyDef2Write } from '../../utils/def2Cascade.js';
 
 const SI_PAGE_SIZE = 50;
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
@@ -399,6 +395,7 @@ export function AVISentenceInputPage({
   const [pickSelected,    setPickSelected]    = useState(new Set()); // indices of manually selected tokens
   const [pickPhrase,      setPickPhrase]      = useState(null);     // { text, indices }
   const [autoSelected,    setAutoSelected]    = useState(new Set()); // indices auto-matched to wordInputs
+  const [skippedTokens,   setSkippedTokens]   = useState(new Set()); // LM2: matched, but the word is skipped somewhere
   const [reopenFor,       setReopenFor]       = useState(null);     // sentence uid being re-picked
 
   // ── Add Selected re-entrancy guard ───────────────────────────
@@ -424,18 +421,8 @@ export function AVISentenceInputPage({
   const effSource  = reopenRow?.source  ?? currentSource;
   const effSection = reopenRow?.section ?? currentSection;
 
-  // Duplicate-sentence guard: exact (sentence, target, source) dupes are
-  // skipped; a re-add under a corrected target is allowed and flagged for
-  // review in Recent with the original target noted.
-  const classifySentenceDup = useCallback((sentence, targetWord, source) => {
-    const normT = normalizeLemma(targetWord);
-    const sameSent = data.sentenceInputs.filter(s => s.sentence === sentence && s.source === source);
-    if (sameSent.some(s => normalizeLemma(s.targetWord) === normT)) return { skip: true };
-    if (sameSent.length > 0) {
-      return { skip: false, note: `same sentence previously added with target "${sameSent[0].targetWord}"` };
-    }
-    return { skip: false };
-  }, [data.sentenceInputs]);
+  // Everything the shared add pipeline needs from this page (RC-D10).
+  const stagingCtx = { data, updateData, showAVIToast, cards, decks, uid, updateCards, updateDecks, aviSources, dsh };
 
   // ── Tokenize and auto-select ─────────────────────────────────
   const handlePickInput = useCallback((text, existingUid = null) => {
@@ -447,25 +434,28 @@ export function AVISentenceInputPage({
     setPickPhrase(null);
     setReopenFor(existingUid);
 
-    const tokens = text.trim().split(/\s+/).filter(Boolean);
-    setPickTokens(tokens.map(t => ({ token: t })));
-
-    // Auto-select tokens that match existing wordInputs (by input or lemma)
-    const autoSet = new Set();
-    tokens.forEach((token, idx) => {
-      const normTok = normalizeLemma(token);
-      const matches = data.wordInputs.some(w =>
-        w.input === token || normalizeLemma(w.lemma) === normTok
-      );
-      if (matches) autoSet.add(idx);
-    });
-    let finalAuto = autoSet;
-    if (DEMO && autoSet.size > DEMO_CAPS.wordsPerSentence) {
-      finalAuto = new Set([...autoSet].slice(0, DEMO_CAPS.wordsPerSentence));
-    }
-    setAutoSelected(finalAuto);
+    // Auto-select tokens that match existing wordInputs (by input or lemma),
+    // except words skipped in any source (LM2), which start unselected.
+    const { tokens, autoSelected: autoSet, skipped } = tokenizeSentence(text, data.wordInputs);
+    setPickTokens(tokens);
+    setAutoSelected(autoSet);
+    setSkippedTokens(skipped);
     setPickSelected(new Set()); // clear manual selections
   }, [data.wordInputs, data.sentenceInputs, showAVIToast]);
+
+  // RC-D18: a pasted sentence goes through the same noise cleaning as Word
+  // Input (Kyobo's built-in noise plus the noise blocks in Settings). Typing
+  // is left alone, so spaces can still be typed between words.
+  const handlePickPaste = (e) => {
+    const pasted = e.clipboardData?.getData('text');
+    if (!pasted) return;
+    e.preventDefault();
+    const el = e.target;
+    const start = el.selectionStart ?? el.value.length;
+    const end   = el.selectionEnd ?? start;
+    const next  = el.value.slice(0, start) + pasted + el.value.slice(end);
+    handlePickInput(cleanStagingText(next, data.aviSettings?.noiseBlocks || []));
+  };
 
   // ── Token selection (manual toggle) ─────────────────────────
   const toggleToken = (idx) => {
@@ -487,6 +477,8 @@ export function AVISentenceInputPage({
   };
 
   // ── Phrase drag ──────────────────────────────────────────────
+  // RC-D11: pointer events (mouse, finger or pen) through usePillPointer, so a
+  // drag across pills picks a phrase on a touchscreen too.
   const dragStart = useRef(null);
   const didDrag   = useRef(false);
 
@@ -513,117 +505,13 @@ export function AVISentenceInputPage({
     }
     didDrag.current = false;
   };
+  const pillPointer = usePillPointer({
+    onDown: handlePillMouseDown, onEnter: handlePillMouseEnter, onUp: handlePillMouseUp,
+  });
 
   // All selected indices (auto + manual) minus phrase
   const allSelected = new Set([...autoSelected, ...pickSelected]);
   const hasSelection = allSelected.size > 0 || pickPhrase;
-
-  // ── Lemmatize a phrase ───────────────────────────────────────
-  const lemmatizePhrase = (tokens) => {
-    if (!tokens.length) return '';
-    const lastLemma = extractLemmaFromText(tokens[tokens.length - 1]) || tokens[tokens.length - 1];
-    return tokens.length === 1 ? lastLemma : [...tokens.slice(0, -1), lastLemma].join(' ');
-  };
-
-  // ── Build sentence rows for existing wordInput terms ─────────
-  const createSentenceRows = useCallback((inputTokens, sentence, sentUid = null) => {
-    const lemmaMap = {};
-    for (const l of data.lemmaMaster) {
-      lemmaMap[l.lemma] = l;
-      if (l.cleanedLemma) lemmaMap[l.cleanedLemma] = l;
-    }
-    const newRows = [];
-    const skippedDupes = [];
-    const batchSeen = new Set();
-    for (const input of inputTokens) {
-      const wi = data.wordInputs.find(w =>
-        w.input === input || normalizeLemma(w.lemma) === normalizeLemma(input)
-      );
-      const safeTarget = wi?.lemma || input;
-      // Intra-batch dedupe: the same token repeated in one sentence (or two
-      // surface forms resolving to one lemma) collapses to a single row —
-      // classifySentenceDup only sees rows persisted before this call.
-      if (batchSeen.has(normalizeLemma(safeTarget))) continue;
-      batchSeen.add(normalizeLemma(safeTarget));
-      const dup = classifySentenceDup(sentence, safeTarget, effSource);
-      if (dup.skip) { skippedDupes.push(safeTarget); continue; }
-      const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
-      // L6: sentence cards wait for a def2 — an empty back is filled (and the
-      // card created) by AVIPage's cascade once the lemma has one.
-      const cardBack   = lEntry.def2 || wi?.def2 || '';
-      // Find inputForm: the surface form appearing in the sentence
-      const inputForm  = sentence.includes(input) ? input : '';
-      const sid        = sentUid || uuid();
-      newRows.push({
-        uid: sid, ts: new Date().toISOString(),
-        sentence, targetWord: safeTarget,
-        cardFront: safeTarget + '\n' + sentence,
-        cardBack,
-        inputForm,
-        source: effSource, section: effSection,
-        uploaded: false, ...inheritedSentenceSkip(isSkippedInSource(data.wordInputs, effSource, safeTarget)),
-        lastUncheckReason: dup.note || '',
-        lastUncheckDate:   dup.note ? new Date().toISOString() : '',
-      });
-    }
-    if (skippedDupes.length && showAVIToast) {
-      showAVIToast(`Skipped duplicate sentence row${skippedDupes.length > 1 ? 's' : ''}: ${skippedDupes.join(', ')}`);
-    }
-    if (newRows.length) {
-      updateData(prev => ({
-        ...prev,
-        sentenceInputs: [...filterNewSentenceRows(prev.sentenceInputs, newRows), ...prev.sentenceInputs],
-      }));
-    }
-    return newRows;
-  }, [data.wordInputs, data.lemmaMaster, effSource, effSection, classifySentenceDup, showAVIToast, updateData]);
-
-  // ── Build rows for terms confirmed via popup ─────────────────
-  const createSentenceRowsWithLemma = useCallback((terms, sentence) => {
-    const lemmaMap = {};
-    for (const l of data.lemmaMaster) {
-      lemmaMap[l.lemma] = l;
-      if (l.cleanedLemma) lemmaMap[l.cleanedLemma] = l;
-    }
-    const newRows = [];
-    const skippedDupes = [];
-    const batchSeen = new Set();
-    for (const t of terms) {
-      const safeTarget = t.lemma || t.input;
-      // Intra-batch dedupe — see createSentenceRows above.
-      if (batchSeen.has(normalizeLemma(safeTarget))) continue;
-      batchSeen.add(normalizeLemma(safeTarget));
-      const dup = classifySentenceDup(sentence, safeTarget, effSource);
-      if (dup.skip) { skippedDupes.push(safeTarget); continue; }
-      const lEntry     = lemmaMap[safeTarget] || lemmaMap[normalizeLemma(safeTarget)] || {};
-      // A5: the def2 from the pop-up (prefilled with Lemma Master's, so it
-      // differs only when you changed it) — Done makes it the lemma's.
-      const cardBack   = t.def2 || lEntry.def2 || ''; // L6: waits for a def2
-      const inputForm  = t.input && sentence.includes(t.input) ? t.input : '';
-      const sid        = uuid();
-      newRows.push({
-        uid: sid, ts: new Date().toISOString(),
-        sentence, targetWord: safeTarget,
-        cardFront: safeTarget + '\n' + sentence,
-        cardBack,
-        inputForm,
-        source: effSource, section: effSection,
-        uploaded: false, ...inheritedSentenceSkip(isSkippedInSource(data.wordInputs, effSource, safeTarget)),
-        lastUncheckReason: dup.note || '',
-        lastUncheckDate:   dup.note ? new Date().toISOString() : '',
-      });
-    }
-    if (skippedDupes.length && showAVIToast) {
-      showAVIToast(`Skipped duplicate sentence row${skippedDupes.length > 1 ? 's' : ''}: ${skippedDupes.join(', ')}`);
-    }
-    if (newRows.length) {
-      updateData(prev => ({
-        ...prev,
-        sentenceInputs: [...filterNewSentenceRows(prev.sentenceInputs, newRows), ...prev.sentenceInputs],
-      }));
-    }
-    return newRows;
-  }, [data.wordInputs, data.lemmaMaster, effSource, effSection, classifySentenceDup, showAVIToast, updateData]);
 
   // ── Add Selected ─────────────────────────────────────────────
   const handleAddSelected = useCallback(async () => {
@@ -632,137 +520,13 @@ export function AVISentenceInputPage({
     setAddingSelected(true);
     try {
     const tokens = pickTokens.map(t => t.token);
-
-    const terms = [];
-    allSelected.forEach(idx => terms.push({ input: tokens[idx], isPhrase: false }));
-    if (pickPhrase) {
-      const phraseTokens = pickPhrase.indices.map(i => tokens[i]);
-      terms.push({ input: pickPhrase.text, isPhrase: true, phraseTokens });
-      for (const i of pickPhrase.indices) {
-        if (!allSelected.has(i)) terms.push({ input: tokens[i], isPhrase: false });
-      }
-    }
+    const terms = collectSelectedTerms(tokens, allSelected, pickPhrase);
     if (!terms.length) return;
 
-    const existingInputs = [];
-    const newTerms       = [];
-
-    for (const t of terms) {
-  const normTok = normalizeLemma(t.input);
-  const existingWI = data.wordInputs.find(w =>
-    w.input === t.input || normalizeLemma(w.lemma) === normTok
-  );
-  if (existingWI) {
-    existingInputs.push(t.input);
-    // If no word input exists for the current source, create one
-    const alreadyInSource = data.wordInputs.some(w =>
-      (w.input === t.input || normalizeLemma(w.lemma) === normTok) &&
-      w.source === effSource
-    );
-    if (!alreadyInSource && effSource) {
-      const lemmaEntry = data.lemmaMaster.find(
-        l => normalizeLemma(l.lemma) === normalizeLemma(existingWI.lemma)
-      );
-      const newWI = {
-        uid: uuid(), ts: new Date().toISOString(),
-        input: t.input,
-        source: effSource, section: effSection,
-        lemma: existingWI.lemma,
-        def1: lemmaEntry?.def1 || existingWI.def1 || '',
-        def2: lemmaEntry?.def2 || existingWI.def2 || '',
-        uploaded: false, skipUpload: false,
-        lastUncheckReason: '', lastUncheckDate: '',
-      };
-      updateData(prev => {
-        // Race-proof recheck: functional updaters see the latest state, so
-        // a burst of same-lemma terms (or a double-fired handler) cannot
-        // append the row twice — the closure-captured alreadyInSource check
-        // above cannot guarantee that on its own.
-        const dupRow = prev.wordInputs.some(w =>
-          (w.input === t.input || normalizeLemma(w.lemma) === normTok) &&
-          w.source === effSource
-        );
-        return dupRow ? prev : { ...prev, wordInputs: [newWI, ...prev.wordInputs] };
-      });
-      // Auto-create word card if def2 is present
-      if (newWI.def2) {
-        autoCreateWordCard({
-          entry: newWI, lemmaMaster: data.lemmaMaster,
-          cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6: cards feed the duplicate guard
-        }).then(() => {
-          updateData(prev => ({
-            ...prev,
-            wordInputs: prev.wordInputs.map(w =>
-              w.uid === newWI.uid ? { ...w, uploaded: true } : w
-            ),
-          }));
-        }).catch(() => {});
-      }
-    }
-  } else {
-        newTerms.push({
-          input: t.input, lemma: '', def1: '', def2: '',
-          isPhrase: t.isPhrase || false,
-          phraseTokens: t.phraseTokens || null,
-        });
-      }
-    }
-
-    // Resolve lemmas for new terms via the full dictionary cascade:
-    // trusted GLM mapping, then heuristic candidates (including irregular
-    // recoveries) validated as headwords, then the sync heuristic. Tier 1
-    // (prior local mapping) is the existingWI branch above. Lookups run
-    // in parallel across terms.
-    if (newTerms.length > 0) {
-      const localHeadwords = new Set();
-      for (const l of (data.lemmaMaster || [])) {
-        if (l.lemma) localHeadwords.add(l.lemma);
-        if (l.cleanedLemma) localHeadwords.add(l.cleanedLemma);
-      }
-      await Promise.all(newTerms.map(async (nt) => {
-        let resolved = nt.input;
-        let alternates = [];
-        if (nt.isPhrase) {
-          resolved = lemmatizePhrase(nt.phraseTokens || []);
-        } else {
-          // L3: the other dictionary readings ride along for Step 1's chips.
-          const d = await resolveLemmaDetailed(nt.input, { localHeadwords, withAlternates: true });
-          resolved = d.lemma || nt.input;
-          alternates = d.alternates || [];
-        }
-        // L4d: adopt an existing entry's own text when it matches a variant
-        // (입사하다 → 입사(하다)), so the term links instead of duplicating.
-        nt.lemma = canonicalLemma(data.lemmaMaster, resolved);
-        nt.resolvedLemma = nt.lemma;
-        nt.alternates = alternates.map(a => canonicalLemma(data.lemmaMaster, a));
-      }));
-      // Drop the transient helper field so popup state shape is unchanged.
-      newTerms.forEach(nt => { delete nt.phraseTokens; });
-    }
-
-    // Create rows for existing matches immediately
-    if (existingInputs.length > 0) {
-      const rows = createSentenceRows(existingInputs, pickSentence);
-      // Auto-create cards for rows with cardBack
-      if (DEMO && demoCapReached(cards, 'cards') && rows.some(r => r.cardBack && !r.skipUpload)) {
-        showAVIToast(DEMO_LIMIT_NOTE);
-      }
-      for (const row of rows) {
-        if (row.cardBack && !row.skipUpload) {
-          autoCreateSentenceCard({
-            entry: row, lemmaMaster: data.lemmaMaster,
-            cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
-          }).then(() => {
-            updateData(prev => ({
-              ...prev,
-              sentenceInputs: prev.sentenceInputs.map(s =>
-                s.uid === row.uid ? { ...s, uploaded: true } : s
-              ),
-            }));
-          }).catch(e => console.error('Sentence card creation failed', e));
-        }
-      }
-    }
+    // Known words: rows (and cards) now; new words come back resolved.
+    const { existingInputs, newTerms } = await stageSelectedTerms(stagingCtx, {
+      terms, sentence: pickSentence, source: effSource, section: effSection,
+    });
 
     if (newTerms.length > 0) {
       setPickPopup({ newTerms, existingInputs });
@@ -775,33 +539,16 @@ export function AVISentenceInputPage({
       addingSelRef.current = false;
       setAddingSelected(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickTokens, allSelected, pickPhrase, pickSentence, currentSource, currentSection,
             effSource, effSection,
             data, cards, decks, uid, updateCards, updateDecks, aviSources,
-            createSentenceRows, updateData, setSiPage]);
+            updateData, setSiPage]);
 
   // ── Popup step 1: fetch definitions ─────────────────────────
   const handlePopupStep1 = async (terms) => {
     setPopupFetching(true);
-    const updated = await Promise.all(terms.map(async t => {
-      const existing = data.lemmaMaster.find(
-        l => l.lemma === t.lemma || normalizeLemma(l.lemma) === normalizeLemma(t.lemma)
-      ) || findLemmaEntryAny(data.lemmaMaster, t.lemma); // L4d: 입사하다 → 입사(하다)
-      if (existing) return { ...t, lemma: existing.lemma, def1: existing.def1 || '', def2: existing.def2 || '' };
-      try {
-        // Tier 2: retry a dictionary miss with the surface's next candidates —
-        // only when the lemma is still the machine's own untouched guess.
-        const fb = await fetchDefinitionWithFallback(
-          (!t.isPhrase && t.lemma === t.resolvedLemma) ? t.input : '', t.lemma, data.aviSettings);
-        if (fb.lemma !== t.lemma) {
-          const adopted = data.lemmaMaster.find(
-            l => l.lemma === fb.lemma || normalizeLemma(l.lemma) === normalizeLemma(fb.lemma)
-          );
-          if (adopted) return { ...t, lemma: fb.lemma, def1: adopted.def1 || '', def2: adopted.def2 || '' };
-        }
-        return { ...t, lemma: fb.lemma, def1: fb.def1 === '__RATE_LIMITED__' ? '' : (fb.def1 || '') };
-      } catch { return t; }
-    }));
+    const updated = await fetchTermDefinitions(terms, data.lemmaMaster, data.aviSettings);
     setPickPopup(prev => ({ ...prev, newTerms: updated }));
     setPickPopupStep(2);
     setPopupFetching(false);
@@ -813,115 +560,18 @@ export function AVISentenceInputPage({
       ? (data.sentenceInputs.find(s => s.uid === reopenFor)?.sentence || pickSentence)
       : pickSentence;
 
-    const newWordInputs = [];
-    const newLemmas     = [];
-    const now           = new Date().toISOString();
-
-    // Popup-corrected lemmas feed the global lemma map — same policy as WI
-    // edits and Import review corrections (explicit corrections only).
-    for (const t of terms) {
-      if (t.input && t.resolvedLemma && t.lemma && t.lemma !== t.resolvedLemma) {
-        writeGlobalLemma(t.input, normalizeLemma(t.lemma));
-      }
-    }
-
-    for (const t of terms) {
-      const norm = normalizeLemma(t.lemma);
-      const existingLM = findPickEntry(data.lemmaMaster, t.lemma); // L4d: variant match
-      if (!existingLM) {
-        newLemmas.push({
-          lemma: t.lemma, def1: t.def1, def2: t.def2 || '',
-          relatedForm: '', relatedMeaning: '', hiddenRelated: '',
-          lastUpdated: now, autoAddedBy: 'pick',
-          cleanedLemma: norm, originUID: uuid(), lemmaID: uuid(),
-        });
-      }
-      if (!data.wordInputs.find(w => w.input === t.input)) {
-        newWordInputs.push({
-          uid: uuid(), ts: now, input: t.input,
-          source: effSource, section: effSection,
-          lemma: t.lemma, def1: t.def1, def2: t.def2 || '',
-          uploaded: false, skipUpload: isSkippedInSource(data.wordInputs, effSource, t.lemma),
-          lastUncheckReason: '', lastUncheckDate: '',
-        });
-      }
-    }
-
-    // A5: a def2 from the pop-up for a lemma Lemma Master already has
-    // becomes that lemma's def2 (before, it reached only the new word row and
-    // its card). An entry with no def2 gets it, which also releases sentence
-    // rows waiting for one; a different one replaces it — the pop-up says so
-    // and offers to keep Lemma Master's. Like a def2 edit in Lemma Master,
-    // the lemma's other rows follow, sentence backs taken from the old def2
-    // follow (hand-edited ones are kept), and so do its cards.
-    const def2Moves = planDef2Moves(terms, data.lemmaMaster, findPickEntry);
-
-    updateData(prev => {
-      const moved = applyDef2Moves({
-        lemmaMaster:    [...filterNewLemmas(prev.lemmaMaster, newLemmas), ...prev.lemmaMaster],
-        wordInputs:     [...filterNewWordRows(prev.wordInputs, newWordInputs), ...prev.wordInputs],
-        sentenceInputs: prev.sentenceInputs,
-      }, def2Moves, now, 'Definition 2 updated in Sentence Input');
-      return { ...prev, ...moved };
-    });
-    // LD-D1: every card of the word takes the def2 (a sentence card whose
-    // back was a def1 too).
-    for (const { entry, def2 } of def2Moves.values()) {
-      updateLinkedCards({
-        lemmaID: entry.lemmaID, lemmaText: entry.lemma,
-        buildUpdates: (c) => def2CardUpdate(c, def2),
-        cards, uid, updateCards,
-      }).catch(e => console.error('Sentence Input: card back update failed', e));
-    }
-
-    // Create sentence rows using confirmed lemmas
-    const rows = createSentenceRowsWithLemma(terms, sentence);
-
-    // Auto-create cards for rows with cardBack
-    if (DEMO && demoCapReached(cards, 'cards') && rows.some(r => r.cardBack && !r.skipUpload)) {
-      showAVIToast(DEMO_LIMIT_NOTE);
-    }
-    for (const row of rows) {
-      if (row.cardBack && !row.skipUpload) {
-        autoCreateSentenceCard({
-        entry: row, lemmaMaster: [...data.lemmaMaster, ...newLemmas],
-        cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
-        }).then(() => {
-          updateData(prev => ({
-            ...prev,
-            sentenceInputs: prev.sentenceInputs.map(s =>
-              s.uid === row.uid ? { ...s, uploaded: true } : s
-            ),
-          }));
-        }).catch(e => console.error('Sentence card creation failed', e));
-      }
-    }
-
-    for (const wi of newWordInputs) {
-      if (wi.def2 && !wi.skipUpload) {
-        autoCreateWordCard({
-                  entry: wi, lemmaMaster: [...data.lemmaMaster, ...newLemmas],
-                  cards, decks, uid, updateCards, updateDecks, aviSources, dsh, // A6
-                }).then(() => {
-          updateData(prev => ({
-            ...prev,
-            wordInputs: prev.wordInputs.map(w =>
-              w.uid === wi.uid ? { ...w, uploaded: true } : w
-            ),
-          }));
-        }).catch(() => {});
-      }
-    }
+    commitConfirmedTerms(stagingCtx, { terms, sentence, source: effSource, section: effSection });
 
     setPickPopup(null);
     setSiPage(0);
     if (!reopenFor) resetPick();
     else setReopenFor(null);
- }, [
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
     reopenFor, pickSentence, data, currentSource, currentSection,
     effSource, effSection,
     cards, decks, uid, updateCards, updateDecks, aviSources,
-    updateData, createSentenceRowsWithLemma, setSiPage,
+    updateData, setSiPage,
   ]);
 
   const resetPick = () => {
@@ -929,6 +579,7 @@ export function AVISentenceInputPage({
     setPickTokens([]);
     setPickSelected(new Set());
     setAutoSelected(new Set());
+    setSkippedTokens(new Set());
     setPickPhrase(null);
   };
 
@@ -1146,33 +797,35 @@ export function AVISentenceInputPage({
           placeholder="Paste sentence here…"
           value={pickSentence}
           onChange={e => handlePickInput(e.target.value)}
+          onPaste={handlePickPaste}
           rows={3}
         />
 
         {/* Token pills */}
         {pickTokens.length > 0 && (
-          <div style={{
+          <div {...pillPointer.containerProps} style={{
             display: 'flex', flexWrap: 'wrap', gap: '5px', padding: '8px',
             background: C.raised, borderRadius: '6px', border: `1px solid ${C.border}`,
-            userSelect: 'none',
+            userSelect: 'none', ...pillPointer.containerStyle,
           }}>
             {pickTokens.map((t, i) => {
               const inPhrase   = pickPhrase?.indices.includes(i);
               const isAuto     = autoSelected.has(i);
               const isManual   = pickSelected.has(i);
               const isSelected = isAuto || isManual;
+              const isSkipped  = skippedTokens.has(i) && !isSelected && !inPhrase;
               return (
                 <span
                   key={i}
-                  onMouseDown={() => handlePillMouseDown(i)}
-                  onMouseEnter={() => handlePillMouseEnter(i)}
-                  onMouseUp={() => handlePillMouseUp(i)}
+                  {...pillPointer.pillProps(i)}
+                  title={isSkipped ? 'Skipped in Word Input. Tap to pick it anyway.' : undefined}
                   style={{
                     padding: '3px 9px', borderRadius: '14px', fontSize: '13px',
                     cursor: 'pointer', fontFamily: SH.fk,
                     background: isSelected ? C.accent : inPhrase ? C.accentSoft : C.surface,
                     color: isSelected ? '#fff' : inPhrase ? C.accent : C.text,
-                    border: `1px solid ${isSelected ? C.accent : inPhrase ? C.accent : C.border}`,
+                    border: `1px ${isSkipped ? 'dashed' : 'solid'} ${isSelected ? C.accent : inPhrase ? C.accent : C.border}`,
+                    opacity: isSkipped ? 0.5 : 1,
                     transition: 'all 0.1s',
                     // Auto-selected tokens get a slightly different style
                     boxShadow: isAuto && !isManual ? `0 0 0 1px ${C.accent}` : 'none',

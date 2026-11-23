@@ -4,15 +4,20 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { TaskItem } from '../components/TaskItem.jsx';
 import { ProgressBar } from '../components/ProgressBar.jsx';
 import { CATEGORIES } from '../constants.js';
-import { DAILY_CAP } from '../utils/srsEngine.js';
+import { DeferralNotices } from '../components/DeferralNotices.jsx';
 import { playSound } from '../utils/soundEngine.js';
 import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
 import { useDragSort } from '../hooks/useDragSort.js';
 import { makeTaskSortComparator, applyDragOrder } from '../utils/dragSort.js';
 import { isDueToday } from '../utils/fsrs.js';
+import { PlateFlag } from '../components/Ornaments.jsx';
 
 const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || window.matchMedia('(hover: none) and (pointer: coarse) and (orientation: portrait)').matches);
+// Lacking Def2 (audit B5): on a laptop it is a flag hanging off the reviews
+// card, over the image column; it needs room beside the card, so narrower
+// windows and phones get the plain notice under the deferral notices instead.
+const def2FlagFits = !isMobile && typeof window !== 'undefined' && window.innerWidth >= 1000;
 
 // Projects all due dates for a recurring task within [start, end) from its recurrence rule.
 function getRecurringWeekDates(t, start, end) {
@@ -57,7 +62,8 @@ function getRecurringWeekDates(t, start, end) {
   return results;
 }
 
-export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData, flashcardDue, settings, cards, srsSnapshot = {},
+export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateData, flashcardDue, cards, srsSnapshot = {}, deferralForecast = null,
+  lackingDef2Count = 0, onOpenDef2Queue,
  }) {
   const { C, S } = useAppTheme();
   const [filter, setFilter] = useState('all');
@@ -198,16 +204,22 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
 
   const srsDone      = srsReviewed;
   const srsTotal_    = srsSnapshot.dueAtDayStart ?? 0;
-  const spikeCap     = settings?.srsSpikeCap ?? DAILY_CAP;
   const srsRemaining = srsDueLeft ?? Math.max(0, srsTotal_ - srsDone);
-  const tomorrowCount = srsSnapshot.tomorrowCount ?? 0;
-  // Show when unfinished reviews would push tomorrow over the cap,
-  // but tomorrow is not already a confirmed spike on its own.
-  const showConditionalSpike =
-    srsRemaining > 0 &&
-    (srsRemaining + tomorrowCount) > spikeCap &&
-    tomorrowCount <= spikeCap;
 
+  // ── Lacking Def2 (audit B5) ───────────────────────────────
+  // Shown from 1. The flag hangs off Today's Reviews, or off Today's
+  // Progress on a day with no reviews card. It is placed outside the card
+  // (absolute, past its right edge), so no column changes width.
+  const showReviewsCard = srsTotal_ > 0 || srsDone > 0;
+  const def2Colour = C.accent2 || C.accent;
+  const def2Flag = lackingDef2Count > 0 && def2FlagFits ? (
+    <div style={{ position: 'absolute', left: '100%', top: '24px', marginLeft: '-1px', zIndex: 2 }}>
+      <PlateFlag onClick={onOpenDef2Queue} title="Fill in Definition 2">
+        <span style={{ fontFamily: SH.fm, fontSize: '13px', fontWeight: 600, color: C.accent }}>{lackingDef2Count}</span>
+        <span style={{ fontSize: '11.5px', fontWeight: 500, letterSpacing: '0.02em' }}>lacking Def2</span>
+      </PlateFlag>
+    </div>
+  ) : null;
   return (
     <>
     <div className="fade-up">
@@ -278,75 +290,68 @@ export function TodayPage({ tasks, onToggle, onEdit, dsh, soundProfile, updateDa
                 </div>
               </div>
 
-              <div style={S.statCard}>
-                <div style={S.statCardTitle}>Today's Progress</div>
-                <ProgressBar
-                  done={done} total={total} label="Tasks"
-                  onComplete={() => { if (soundProfile !== 'none') playSound(soundProfile || 'chirp'); }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px', fontSize: '12px', color: C.textS }}>
-                  <span>Done: <span style={{ fontFamily: SH.fm, color: C.accent }}>{done}</span></span>
-                  <span>Left: <span style={{ fontFamily: SH.fm, color: C.text }}>{total - done}</span></span>
-                </div>
-              </div>
-
-              {/* Today's Reviews — visible whenever cards were due or reviewed */}
-              {(srsTotal_ > 0 || srsDone > 0) && (
+              <div style={{ position: 'relative' }}>
                 <div style={S.statCard}>
-                  <div style={S.statCardTitle}>Today's Reviews</div>
+                  <div style={S.statCardTitle}>Today's Progress</div>
                   <ProgressBar
-                    done={srsDone}
-                    total={srsTotal_}
-                    label="Cards"
-                    color={C.accent2 || C.accent}
+                    done={done} total={total} label="Tasks"
                     onComplete={() => { if (soundProfile !== 'none') playSound(soundProfile || 'chirp'); }}
                   />
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px', fontSize: '12px', color: C.textS }}>
-                    <span>Done: <span style={{ fontFamily: SH.fm, color: C.accent2 || C.accent }}>{srsDone}</span></span>
-<span>Left: <span style={{ fontFamily: SH.fm, color: C.text }}>{srsRemaining}</span></span>
+                    <span>Done: <span style={{ fontFamily: SH.fm, color: C.accent }}>{done}</span></span>
+                    <span>Left: <span style={{ fontFamily: SH.fm, color: C.text }}>{total - done}</span></span>
                   </div>
                 </div>
-              )}
+                {!showReviewsCard && def2Flag}
+              </div>
 
-              {/* SRS spike flags — up to 3, nearest first, shown under Today's Reviews */}
-              {(srsSnapshot.spikes ?? []).length > 0 && (
-                <div style={{
-                  padding: '10px 12px', borderRadius: '8px',
-                  border: `1px solid ${C.warning}`,
-                  background: `${C.warning}11`,
-                }}>
-                  {(srsSnapshot.spikes).map((spike, i) => (
-                    <div
-                      key={spike.taskDateStr}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: '8px',
-                        marginTop: i > 0 ? '6px' : 0,
-                      }}
-                    >
-                      <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.shield}</span>
-                      <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
-                        {spike.dueCount} card spike on {spike.dayName}
-                      </div>
+              {/* Today's Reviews — visible whenever cards were due or reviewed */}
+              {showReviewsCard && (
+                <div style={{ position: 'relative' }}>
+                  <div style={S.statCard}>
+                    <div style={S.statCardTitle}>Today's Reviews</div>
+                    <ProgressBar
+                      done={srsDone}
+                      total={srsTotal_}
+                      label="Cards"
+                      color={C.accent2 || C.accent}
+                      onComplete={() => { if (soundProfile !== 'none') playSound(soundProfile || 'chirp'); }}
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px', fontSize: '12px', color: C.textS }}>
+                      <span>Done: <span style={{ fontFamily: SH.fm, color: C.accent2 || C.accent }}>{srsDone}</span></span>
+  <span>Left: <span style={{ fontFamily: SH.fm, color: C.text }}>{srsRemaining}</span></span>
                     </div>
-                  ))}
+                  </div>
+                  {def2Flag}
                 </div>
               )}
 
-              {/* Conditional spike warning — incomplete reviews today would push
-                  tomorrow over the cap, but tomorrow is not already a hard spike */}
-              {showConditionalSpike && (
-                <div style={{
-                  padding: '10px 12px', borderRadius: '8px',
-                  border: `1px dashed ${C.warning}`,
-                  background: `${C.warning}09`,
-                }}>
+              {/* Deferral notices (DF-D3 to DF-D5): what the daily cap will
+                  defer in the next 7 days, and the dashed "if today's aren't
+                  finished" line. In the spike notices' old place and boxes. */}
+              <DeferralNotices forecast={deferralForecast} grouped />
+
+              {/* Lacking Def2 (audit B5): phones and narrow windows. Same
+                  layout as the deferral notices; the whole notice is the button. */}
+              {lackingDef2Count > 0 && !def2FlagFits && (
+                <button
+                  type="button"
+                  onClick={onOpenDef2Queue}
+                  title="Fill in Definition 2"
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer',
+                    padding: '10px 12px', borderRadius: '8px',
+                    border: `1px solid ${def2Colour}`,
+                    background: `${def2Colour}11`,
+                  }}
+                >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span style={{ color: C.warning, display: 'flex', flexShrink: 0 }}>{Icons.alert}</span>
-                    <div style={{ fontSize: '12px', fontWeight: 500, color: C.warning }}>
-                      Tomorrow: {srsRemaining + tomorrowCount} cards due if reviews incomplete
+                    <span style={{ color: def2Colour, display: 'flex', flexShrink: 0 }}>{Icons.bookOpen}</span>
+                    <div style={{ fontSize: '12px', fontWeight: 500, color: def2Colour }}>
+                      {lackingDef2Count} {lackingDef2Count === 1 ? 'word' : 'words'} lacking Def2
                     </div>
                   </div>
-                </div>
+                </button>
               )}
 
               {/* This Week - shows tasks done / total */}

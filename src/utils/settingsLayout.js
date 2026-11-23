@@ -13,7 +13,7 @@ import { CATEGORIES } from '../constants.js';
 const TASK_SETTINGS = CATEGORIES.length > 1 ? ['defaultCat', 'sound'] : ['sound'];
 
 export const SETTINGS_SECTIONS = [
-  { id: 'general',  label: 'General',  tabs: ['general'] },
+  { id: 'general',  label: 'General',  tabs: ['general', 'appearance'] },
   { id: 'agenda',   label: 'Agenda',   tabs: ['agenda', 'appointments'] },
   { id: 'language', label: 'Language', tabs: ['content', 'flashcards', 'quizzes', 'avi'] },
 ];
@@ -24,6 +24,11 @@ export const SETTINGS_TABS = {
     label: 'General', ko: '일반',
     lede: 'Your account, and the settings every page runs on.',
     groups: [['Account', ['account']], ['Every page', ['dayFlip', 'theme']]],
+  },
+  appearance: {
+    label: 'Appearance', ko: '테마',
+    lede: 'The theme the app wears, and how each one is put together.',
+    groups: [['Theme', ['theme']], ['Palette', ['palette']], ['Contrast', ['contrast']]],
   },
   agenda: {
     label: 'Agenda', ko: '일정',
@@ -70,9 +75,11 @@ export const SETTING_META = {
   account:        { label: 'Account', desc: 'The account the app syncs to.', kw: 'sign out email sync signed in' },
   dayFlip:        { label: 'Day-flip time', desc: 'Tasks, reviews and logs stay on the current day until this hour, for late nights.', kw: 'midnight night owl day start hour' },
   theme:          { label: 'Theme', desc: 'Colours and frames across the app.', kw: 'appearance colour color dark light' },
+  palette:        { label: 'Preview a theme', desc: 'Flip through the themes to see every colour and how much of the screen it covers. Previewing changes nothing; the Theme cards switch the theme.', kw: 'palette colour color swatch token coverage preview' },
+  contrast:       { label: 'Readability check', desc: 'How the previewed theme’s key pairs hold up. Body text needs 4.5 : 1; icons, bold labels and large text need 3 : 1.', kw: 'contrast legible readable accessibility colour color' },
   defaultCat:     { label: 'Default task category', desc: 'Preselected when you add a task.', kw: 'new task category' },
   sound:          { label: 'Completion sound', desc: 'Plays when you check off a task. Tap one to hear it.', kw: 'audio chirp warble click silent check off' },
-  reviewCap:      { label: 'Daily review cap', desc: 'Forecast days above this many flashcard reviews are flagged as spikes. Default 80.', kw: 'spike forecast reviews limit srs' },
+  reviewCap:      { label: 'Daily review cap', desc: 'The most reviews due in one day. Anything over is deferred, best-known cards first. Default 80.', kw: 'defer deferral deferred spike forecast reviews limit srs' },
   apptTypes:      { label: 'Appointment types', desc: 'Your own types, shown beside the built-in ones in the appointment form.', kw: 'custom tutoring class exchange' },
   currency:       { label: 'Exchange rates', desc: 'All amounts are stored in KRW. These rates convert costs entered in USD and EUR.', kw: 'usd eur krw won rate currency cost' },
   adrift:         { label: 'Days until Adrift', desc: 'Sources with no activity for this many days move to the Adrift column on the Overview.', kw: 'active adrift overview library' },

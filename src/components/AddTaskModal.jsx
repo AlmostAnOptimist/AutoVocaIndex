@@ -7,6 +7,7 @@ import { playSound } from '../utils/soundEngine.js';
 import { uid, toDateStr, getLogicalToday, parseDate, fmtDate } from '../utils/dateUtils.js';
 import { APPOINTMENT_TYPES } from '../constants.js';
 import { DatePicker } from './DatePicker.jsx';
+import { TimePicker } from './TimePicker.jsx';
 import { isSubmitEnter } from '../utils/keyUtils.js';
 
 export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointments = [], saveAppointment, settings = {} }) {
@@ -18,6 +19,8 @@ export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointme
   const [date, setDate]                 = useState(toDateStr(getLogicalToday(dsh)));
   const [multiDates, setMultiDates]     = useState([]);
   const [time, setTime]                 = useState('');
+  // Text in the time field that isn't a time holds Save.
+  const [timeBad, setTimeBad]           = useState(false);
   const [recur, setRecur]               = useState({ type: 'none' });
   const [notes, setNotes]               = useState('');
   const [keepRecord, setKeepRecord]     = useState(false);
@@ -64,6 +67,7 @@ export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointme
   }, [notes]);
 
   const handleSave = () => {
+    if (timeBad) return;
     if (isApptTask) {
       if (apptMode === 'existing') {
         if (!selectedApptId) return;
@@ -226,7 +230,7 @@ export function AddTaskModal({ open, onClose, onSave, defaultCategory, appointme
           </div>
           <div style={S.formGroup}>
             <label style={S.formLabel}>Time (optional)</label>
-            <input style={S.formInput} type="time" value={time} onChange={e => setTime(e.target.value)} />
+            <TimePicker value={time} onChange={setTime} onInvalidChange={setTimeBad} align="right" />
           </div>
         </div>
 

@@ -71,6 +71,16 @@ class BootErrorBoundary extends Component {
   }
 }
 
+// ── Service worker (offline decisions OF-D3) ──────────────────
+// Lets AutoVocaIndex open without a connection (public/sw.js). Production builds
+// only: in local development it would get in the way of live reloading.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .catch(e => console.warn('AVI: service worker registration failed', e));
+  });
+}
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <BootErrorBoundary>

@@ -15,6 +15,7 @@
 
 import { doc, writeBatch, increment, collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../firebase.js';
+import { withCardStamp } from './cardStamp.js';
 import { normalizeLemma } from './aviUtils.js';
 import { isNewCard } from './fsrs.js';
 import { wordSeries } from './seriesDecks.js';
@@ -119,10 +120,10 @@ export async function applyCardDedupe({ uid, plan, updateCards, updateDecks, sur
     batch.delete(doc(db, 'users', uid, 'flashcards', id)); await step();
   }
   for (const { id, deckIds } of plan.deckUpdates) {
-    batch.update(doc(db, 'users', uid, 'flashcards', id), { deckIds }); await step();
+    batch.update(doc(db, 'users', uid, 'flashcards', id), withCardStamp({ deckIds })); await step();
   }
   for (const [id, u] of keepUpdates) {
-    batch.update(doc(db, 'users', uid, 'flashcards', id), u); await step();
+    batch.update(doc(db, 'users', uid, 'flashcards', id), withCardStamp(u)); await step();
   }
   for (const [deckId, n] of plan.decrements) {
     batch.update(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(-n) }); await step();
@@ -322,7 +323,7 @@ export async function mergeSameNameDecks({ uid, names = null, updateCards, updat
     batch.delete(doc(db, 'users', uid, 'flashcards', id)); await step();
   }
   for (const { id, deckIds } of plan.cardUpdates) {
-    batch.update(doc(db, 'users', uid, 'flashcards', id), { deckIds }); await step();
+    batch.update(doc(db, 'users', uid, 'flashcards', id), withCardStamp({ deckIds })); await step();
   }
   for (const m of plan.merges) {
     const u = { totalCards: plan.totals.get(m.survivorId) || 0 };
@@ -432,7 +433,7 @@ export async function applySeriesShare({ uid, plan, updateCards, updateDecks }) 
     batch.delete(doc(db, 'users', uid, 'flashcards', id)); await step();
   }
   for (const { id, deckIds } of plan.cardUpdates) {
-    batch.update(doc(db, 'users', uid, 'flashcards', id), { deckIds }); await step();
+    batch.update(doc(db, 'users', uid, 'flashcards', id), withCardStamp({ deckIds })); await step();
   }
   for (const [deckId, n] of plan.deckDeltas) {
     batch.update(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(n) }); await step();

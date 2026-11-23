@@ -13,9 +13,10 @@
 // Pieces: Rail (horizontal divider with a hexagon label plate), ScorePlate,
 // Pendant (vertical diamond chain, 'open' or 'close'), Medallion (tall
 // hexagon), CornerFrame, MiniRule, TabRail (extends a tab menu's line to
-// the page edge), PendantFill (closing pendant that appears only when a
-// column has spare height), and SessionIntro (the opening bookend screen).
-// Everything but SessionIntro is decorative and aria-hidden.
+// the page edge), PlateFlag (a label plate hung off a card's edge),
+// PendantFill (closing pendant that appears only when a column has spare
+// height), and SessionIntro (the opening bookend screen). Everything but
+// SessionIntro and PlateFlag (a button) is decorative and aria-hidden.
 // Leaf module: imports hooks and theme helpers only, never a page.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -251,6 +252,49 @@ export function TabRail({ side = 'right', ground }) {
         <polygon points={dia(4, 4, 4)} fill={o.line} />
       </svg>
     </div>
+  );
+}
+
+// ── PlateFlag ────────────────────────────────────────────────
+// Rail's hexagon label plate, sized to its text and hung on a short rail
+// off the edge of a card (Today's "lacking Def2" flag, audit B5). Unlike
+// the other pieces it is a button, so it is not aria-hidden.
+export function PlateFlag({ children, onClick, title, ground, style }) {
+  const o = useOrnament();
+  const g = ground || o.ground;
+  const cap = (flip) => (
+    <svg aria-hidden="true" width="20" height="36" viewBox="0 0 20 36" style={{ display: 'block', flexShrink: 0, transform: flip ? 'scaleX(-1)' : undefined }}>
+      <polygon points="2,18 16,2 20,2 20,34 16,34" fill={o.plate} />
+      <polyline points="20,2 16,2 2,18 16,34 20,34" fill="none" stroke={o.line} strokeWidth="2" strokeLinejoin="miter" />
+      <polyline points="20,7.5 19,7.5 9,18 19,28.5 20,28.5" fill="none" stroke={o.thread} strokeWidth="1" />
+    </svg>
+  );
+  const rule = (top, height, colour) => (
+    <div aria-hidden="true" style={{ position: 'absolute', left: 0, right: 0, top: `${top}px`, height: `${height}px`, background: colour }} />
+  );
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      style={{ display: 'flex', alignItems: 'center', padding: 0, margin: 0, border: 'none', background: 'none', cursor: 'pointer', font: 'inherit', color: o.text, ...style }}
+    >
+      <div aria-hidden="true" style={{ width: '12px', height: '6px', flexShrink: 0, boxSizing: 'border-box', borderTop: `1px solid ${o.thread}`, borderBottom: `2px solid ${o.line}` }} />
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" style={{ display: 'block', flexShrink: 0, marginRight: '-3px' }}>
+        <polygon points={dia(8, 8, 7)} fill={g} stroke={o.line} strokeWidth="1.5" />
+        <polygon points={dia(8, 8, 3)} fill={o.jewel} />
+      </svg>
+      {cap(false)}
+      <div style={{ position: 'relative', height: '36px', display: 'flex', alignItems: 'center', padding: '0 2px', whiteSpace: 'nowrap' }}>
+        <div aria-hidden="true" style={{ position: 'absolute', left: 0, right: 0, top: '2px', bottom: '2px', background: o.plate }} />
+        {rule(1, 2, o.line)}
+        {rule(7, 1, o.thread)}
+        {rule(28, 1, o.thread)}
+        {rule(33, 2, o.line)}
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'baseline', gap: '6px', lineHeight: 1 }}>{children}</div>
+      </div>
+      {cap(true)}
+    </button>
   );
 }
 

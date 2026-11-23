@@ -23,17 +23,30 @@
 // Returns one of:
 //   { status: 'empty' }                          — nothing left after cleaning
 //   { status: 'duplicate', row }                 — row already staged here
-//   { status: 'staged', row, lemmaID, isNewLemma }
+//   { status: 'staged', row, lemmaID, isNewLemma, def2Changed }
+//
+// The reading companion (RC-D7, RC-D8) adds two optional inputs:
+//   resolved — the lemma its lookup already settled on, so steps 3–4 aren't
+//              run (and the dictionary isn't asked) a second time:
+//              { lemma, def1, entryId?, noVariant? }. entryId links that
+//              Lemma Master entry; noVariant skips the variant match (the user
+//              turned it down). An exact entry always links.
+//   def2     — a def2 typed with the word. A new entry starts with it; an
+//              existing entry with a different def2 takes it through the def2
+//              writer (Lemma Master, the word's rows, sentence backs, cards).
+// Without them, Word Input and Search stage exactly as before.
 //
 // Leaf module: imports only utilities.
 
 import {
   uuid, normalizeLemma, cleanStagingText,
   resolveLemmaWithDictionary, fetchDefinitionWithFallback,
+  updateLinkedCards,
 } from './aviUtils.js';
 import { autoCreateWordCard } from './cardFactory.js';
 import { isSkippedInSource } from './wordSkip.js';
 import { findLemmaEntryAny } from './lemmaSuggest.js';
+import { applyDef2Write, def2CardUpdate } from './def2Cascade.js';
 
 export async function stageWordInput({
   surface, source, section,
@@ -42,6 +55,9 @@ export async function stageWordInput({
   showAVIToast,
   onStaged,
   logPrefix = 'Word Input',
+  resolved = null,
+  def2: def2Input = '',
+  def2Reason = 'Definition 2 updated in the reading companion',
 }) {
   const cleaned = cleanStagingText(surface, data.aviSettings.noiseBlocks || []);
   if (!cleaned) return { status: 'empty' };
@@ -58,8 +74,9 @@ export async function stageWordInput({
   if (exactDup) return { status: 'duplicate', row: exactDup };
 
   // 1. Check local word inputs for prior mapping of same surface form
-  let lemmaText = null;
-  const localMatch = data.wordInputs.find(w => w.input === cleaned && w.lemma);
+  // (the companion's lookup already did steps 1–4: `resolved`).
+  let lemmaText = resolved ? (resolved.lemma || cleaned) : null;
+  const localMatch = resolved ? null : data.wordInputs.find(w => w.input === cleaned && w.lemma);
   if (localMatch) lemmaText = localMatch.lemma;
 
   // 2+3. Trust-gated global lemma map, then heuristic candidates
@@ -75,13 +92,15 @@ export async function stageWordInput({
   }
 
   let normLemma = normalizeLemma(lemmaText);
-  let existingLemmaEntry = data.lemmaMaster.find(
+  const chosenEntry = resolved?.entryId ? data.lemmaMaster.find(l => l.lemmaID === resolved.entryId) : null;
+  if (chosenEntry) { lemmaText = chosenEntry.lemma; normLemma = normalizeLemma(lemmaText); }
+  let existingLemmaEntry = chosenEntry || data.lemmaMaster.find(
     l => l.cleanedLemma === normLemma || l.lemma === lemmaText ||
          normalizeLemma(l.lemma) === normLemma
   );
   // L4d: variant-aware fallback (입사하다 → 입사(하다), 향상되다 →
   // 향상(하다/되다)); the row takes the entry's own text so it links.
-  if (!existingLemmaEntry) {
+  if (!existingLemmaEntry && !resolved?.noVariant) {
     const hit = findLemmaEntryAny(data.lemmaMaster, lemmaText);
     if (hit) { existingLemmaEntry = hit; lemmaText = hit.lemma; normLemma = normalizeLemma(lemmaText); }
   }
@@ -90,6 +109,8 @@ export async function stageWordInput({
   if (existingLemmaEntry) {
     def1 = existingLemmaEntry.def1 || '';
     def2 = existingLemmaEntry.def2 || '';
+  } else if (resolved) {
+    def1 = resolved.def1 === '__RATE_LIMITED__' ? '' : (resolved.def1 || '');
   } else if (lemmaText && lemmaText.length <= 120) {
     // Tier 2: a dictionary miss on a machine-resolved lemma retries the
     // surface's next candidates; a hit adopts that lemma. Skipped when a
@@ -121,6 +142,12 @@ export async function stageWordInput({
     }
   }
 
+  // RC-D8: a def2 typed in the reading companion. A new entry starts with
+  // it; an existing entry with a different def2 takes it below.
+  const typedDef2   = typeof def2Input === 'string' ? def2Input.trim() : '';
+  const def2Changed = !!typedDef2 && typedDef2 !== def2;
+  if (typedDef2) def2 = typedDef2;
+
   // Skip is per word per source: a new row of a word already skipped in
   // this source (another section, another form) starts skipped, so it
   // can't release a card the word was skipped to avoid.
@@ -148,7 +175,7 @@ export async function stageWordInput({
     const newLemma = {
       lemma:       lemmaText,
       def1,
-      def2:        '',
+      def2:        typedDef2,
       relatedForm:    '',
       relatedMeaning: '',
       hiddenRelated:  '',
@@ -164,6 +191,22 @@ export async function stageWordInput({
       wordInputs:  [newEntry, ...prev.wordInputs],
       lemmaMaster: [...prev.lemmaMaster, newLemma],
     }));
+  } else if (def2Changed) {
+    const now = new Date().toISOString();
+    updateData(prev => {
+      const out = { ...prev, wordInputs: [newEntry, ...prev.wordInputs] };
+      // eslint-disable-next-line no-unused-vars
+      const { counts, ...written } = applyDef2Write(out, {
+        lemma: existingLemmaEntry.lemma, def2: typedDef2, now, reason: def2Reason,
+      });
+      return { ...out, ...written };
+    });
+    // LD-D1: the word's cards take the new def2.
+    updateLinkedCards({
+      lemmaID: existingLemmaEntry.lemmaID, lemmaText: existingLemmaEntry.lemma,
+      buildUpdates: (c) => def2CardUpdate(c, typedDef2),
+      cards, uid, updateCards,
+    }).catch(e => console.error(`${logPrefix}: def2 card update failed`, e));
   } else {
     updateData(prev => ({
       ...prev,
@@ -216,5 +259,5 @@ export async function stageWordInput({
     }
   }
 
-  return { status: 'staged', row: newEntry, lemmaID, isNewLemma: !existingLemmaEntry };
+  return { status: 'staged', row: newEntry, lemmaID, isNewLemma: !existingLemmaEntry, def2Changed };
 }

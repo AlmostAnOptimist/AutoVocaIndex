@@ -7,6 +7,7 @@ import { playSound } from '../utils/soundEngine.js';
 import { parseDate, fmtDate } from '../utils/dateUtils.js';
 import { DatePicker } from './DatePicker.jsx';
 import { fmtApptDate, fmtTime } from './AppointmentModal.jsx';
+import { TimePicker } from './TimePicker.jsx';
 import { SH } from '../theme/buildStyles.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
 
@@ -63,6 +64,9 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
   const openQueueRef = useRef(undefined); // K3: the appointment's follow-ups as opened
   const [newQueueDate,  setNewQueueDate]  = useState('');
   const [newQueueTime,  setNewQueueTime]  = useState('');
+  // Text in a time field that isn't a time holds Save / Add.
+  const [timeBad,       setTimeBad]       = useState(false);
+  const [queueTimeBad,  setQueueTimeBad]  = useState(false);
   useEffect(() => {
     if (open && task) {
       setTitle(task.title || '');
@@ -121,7 +125,7 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
   const removeDateChip = (ds) => setMultiDates(prev => prev.filter(x => x !== ds));
 
   const addToQueue = () => {
-    if (!newQueueDate) return;
+    if (!newQueueDate || queueTimeBad) return;
     setFollowUpQueue(prev =>
       [...prev, { date: newQueueDate, time: newQueueTime }]
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -131,7 +135,7 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
   };
 
   const handleSave = () => {
-    if (!title.trim()) return;
+    if (!title.trim() || timeBad) return;
     const finalDates = multiDates.length > 1 ? multiDates : null;
     // Strip multi-date fields from the original, then re-add only if still
     // multi-date — the task sync writes whole docs, so omission removes them.
@@ -216,7 +220,7 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
             </div>
             <div style={S.formGroup}>
               <label style={S.formLabel}>Time (optional)</label>
-              <input style={S.formInput} type="time" value={time} onChange={e => setTime(e.target.value)} />
+              <TimePicker value={time} onChange={setTime} onInvalidChange={setTimeBad} align="right" />
             </div>
           </div>
 
@@ -357,9 +361,9 @@ export function EditTaskModal({ task, open, onClose, onSave, onDelete, dsh = 3, 
                 </div>
                 <div>
                   <label style={{ ...S.formLabel, fontSize: '10px', marginBottom: '3px' }}>Time (optional)</label>
-                  <input type="time" value={newQueueTime} onChange={e => setNewQueueTime(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); addToQueue(); } }} style={S.formInput} />
+                  <TimePicker compact value={newQueueTime} onChange={setNewQueueTime} onInvalidChange={setQueueTimeBad} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); addToQueue(); } }} />
                 </div>
-                <button onClick={addToQueue} disabled={!newQueueDate} style={{ ...S.btnGhost, padding: '8px 12px', fontSize: '12px', opacity: newQueueDate ? 1 : 0.4 }} className="btn-ghost">Add</button>
+                <button onClick={addToQueue} disabled={!newQueueDate || queueTimeBad} style={{ ...S.btnGhost, padding: '8px 12px', fontSize: '12px', opacity: newQueueDate && !queueTimeBad ? 1 : 0.4 }} className="btn-ghost">Add</button>
               </div>
               <div style={{ fontSize: '11px', color: C.textM, marginTop: '6px' }}>
                 Queued dates promote onto this appointment as each visit passes.

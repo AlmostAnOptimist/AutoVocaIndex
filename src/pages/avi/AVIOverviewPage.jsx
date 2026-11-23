@@ -1,6 +1,7 @@
 // src/pages/avi/AVIOverviewPage.jsx
 // AVI Overview tab — stat cards and per-source bar chart.
-// Stat cards are clickable and navigate to the relevant tab.
+// Stat cards are clickable and navigate to the relevant tab; the Lacking
+// Def2 card (audit B5) opens the fill queue instead.
 // Bar chart shows uploaded (solid) vs pending (faded) per source.
 
 import { useMemo, useState } from 'react';
@@ -23,6 +24,8 @@ export function AVIOverviewPage({
   goToSource,
   navigateToRecent,
   dsh,
+  lackingDef2Count = 0,
+  openDef2Queue,
 }) {
   const { C } = useAppTheme();
 
@@ -100,9 +103,12 @@ export function AVIOverviewPage({
     return { ordered: all, hasSourceless };
   }, [aviSources, chartOrder, sourceStats]);
 
+  // Scale: the longest single bar (one source's words or sentences,
+  // in deck + pending) spans the full bar track; every other bar is
+  // drawn against the same scale so lengths compare across rows.
   const maxVal = useMemo(() => {
     const vals = Object.values(sourceStats).map(s =>
-      s.uploadedW + s.pendingW + s.uploadedS + s.pendingS
+      Math.max(s.uploadedW + s.pendingW, s.uploadedS + s.pendingS)
     );
     return Math.max(...vals, 1);
   }, [sourceStats]);
@@ -217,6 +223,21 @@ export function AVIOverviewPage({
               </div>
             </div>
           )}
+
+          {/* Lacking Def2 (audit B5): shown from 1; opens the fill queue */}
+          {lackingDef2Count > 0 && (
+            <div
+              style={{ ...cardStyle, borderColor: C.accent2 || C.accent }}
+              onClick={openDef2Queue}
+              title="Fill in Definition 2"
+            >
+              <div style={cardLabelStyle}>Lacking Def2</div>
+              <div style={{ ...cardValueStyle, color: C.accent2 || C.accent }}>{lackingDef2Count}</div>
+              <div style={{ fontSize: '11px', color: C.textM, marginTop: '4px' }}>
+                {lackingDef2Count === 1 ? 'needs a Def2' : 'need a Def2'}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -241,7 +262,9 @@ export function AVIOverviewPage({
           <div style={sectionTitleStyle}>By source</div>
 
           {/* Legend */}
-          <div style={{ display: 'flex', gap: '16px', marginBottom: '14px' }}>
+          <div style={isMobile
+            ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', marginBottom: '14px' }
+            : { display: 'flex', gap: '16px', marginBottom: '14px' }}>
             <LegendItem color={C.accent}             label="Words (in deck)" />
             <LegendItem color={C.accent}   faded      label="Words (pending)" />
             <LegendItem color={C.accent2 || C.textS} label="Sentences (in deck)" />
@@ -296,12 +319,13 @@ export function AVIOverviewPage({
 function SourceBar({ title, stats, maxVal, last, onClick, C, muted }) {
   const { uploadedW, pendingW, uploadedS, pendingS } = stats;
   const total = uploadedW + pendingW + uploadedS + pendingS;
-  const BAR_W = 200; // max bar width in px
 
-  const wUploaded = (uploadedW / maxVal) * BAR_W;
-  const wPending  = (pendingW  / maxVal) * BAR_W;
-  const sUploaded = (uploadedS / maxVal) * BAR_W;
-  const sPending  = (pendingS  / maxVal) * BAR_W;
+  // Bar lengths are fractions of the track, not fixed pixels, so a bar can
+  // never run past its row. LABEL_ROOM keeps space at the end of the track
+  // for the count label beside the longest bar (e.g. "1272+12").
+  const LABEL_ROOM = 48;
+  const len = (n) => `calc((100% - ${LABEL_ROOM}px) * ${n / maxVal})`;
+  const labelLeft = (n) => `calc((100% - ${LABEL_ROOM}px) * ${n / maxVal} + 4px)`;
 
   const accent  = C.accent;
   const accent2 = C.accent2 || C.textS;
@@ -310,8 +334,8 @@ function SourceBar({ title, stats, maxVal, last, onClick, C, muted }) {
     <div
       onClick={onClick}
       style={{
-        display: 'flex', alignItems: 'center', gap: '12px',
-        padding: '10px 16px',
+        display: 'flex', alignItems: 'center', gap: isMobile ? '10px' : '12px',
+        padding: isMobile ? '10px 12px' : '10px 16px',
         borderBottom: last ? 'none' : `1px solid ${C.border}`,
         cursor: 'pointer',
         transition: 'background 0.12s',
@@ -321,7 +345,7 @@ function SourceBar({ title, stats, maxVal, last, onClick, C, muted }) {
     >
       {/* Source name */}
       <div style={{
-        width: '140px', flexShrink: 0, fontSize: '12px', fontWeight: 500,
+        width: isMobile ? '84px' : '140px', flexShrink: 0, fontSize: '12px', fontWeight: 500,
         color: muted ? C.textM : C.text, textAlign: 'right',
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         fontFamily: SH.fk,
@@ -330,15 +354,15 @@ function SourceBar({ title, stats, maxVal, last, onClick, C, muted }) {
       </div>
 
       {/* Bar area */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
         {/* Words bar */}
         <div style={{ position: 'relative', height: '14px', background: `${accent}18`, borderRadius: '3px', display: 'flex' }}>
-          {wUploaded > 0 && <div style={{ width: `${wUploaded}px`, height: '100%', background: accent, borderRadius: '2px 0 0 2px', transition: 'width 0.4s' }} />}
-          {wPending  > 0 && <div style={{ width: `${wPending}px`,  height: '100%', background: accent, opacity: 0.3, transition: 'width 0.4s' }} />}
+          {uploadedW > 0 && <div style={{ width: len(uploadedW), height: '100%', background: accent, borderRadius: '2px 0 0 2px', transition: 'width 0.4s' }} />}
+          {pendingW > 0 && <div style={{ width: len(pendingW), height: '100%', background: accent, opacity: 0.3, transition: 'width 0.4s' }} />}
           {(uploadedW > 0 || pendingW > 0) && (
             <span style={{
               position: 'absolute',
-              left: `${wUploaded + 4}px`,
+              left: labelLeft(uploadedW + pendingW),
               top: '50%', transform: 'translateY(-50%)',
               fontSize: '10px', fontFamily: SH.fm,
               color: C.text, fontWeight: 600,
@@ -350,12 +374,12 @@ function SourceBar({ title, stats, maxVal, last, onClick, C, muted }) {
         </div>
         {/* Sentences bar */}
         <div style={{ position: 'relative', height: '14px', background: `${accent2}18`, borderRadius: '3px', display: 'flex' }}>
-          {sUploaded > 0 && <div style={{ width: `${sUploaded}px`, height: '100%', background: accent2, borderRadius: '2px 0 0 2px', transition: 'width 0.4s' }} />}
-          {sPending  > 0 && <div style={{ width: `${sPending}px`,  height: '100%', background: accent2, opacity: 0.3, transition: 'width 0.4s' }} />}
+          {uploadedS > 0 && <div style={{ width: len(uploadedS), height: '100%', background: accent2, borderRadius: '2px 0 0 2px', transition: 'width 0.4s' }} />}
+          {pendingS > 0 && <div style={{ width: len(pendingS), height: '100%', background: accent2, opacity: 0.3, transition: 'width 0.4s' }} />}
           {(uploadedS > 0 || pendingS > 0) && (
             <span style={{
               position: 'absolute',
-              left: `${sUploaded + 4}px`,
+              left: labelLeft(uploadedS + pendingS),
               top: '50%', transform: 'translateY(-50%)',
               fontSize: '10px', fontFamily: SH.fm,
               color: C.text, fontWeight: 600,

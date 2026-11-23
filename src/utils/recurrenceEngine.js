@@ -23,7 +23,11 @@ export function getNextOccurrence(task, afterDate) {
 
   if (r.type === 'every_n_days') {
     const n = Math.max(2, Math.min(100, r.interval || 3));
-    return toDateStr(new Date(afterDate.getTime() + n * 86400000));
+    // Calendar days, not n x 24 hours: across a clock change (daylight
+    // saving, when abroad) 24-hour steps land a day early (audit TZ1).
+    const next = new Date(afterDate);
+    next.setDate(next.getDate() + n);
+    return toDateStr(next);
   }
 
   if (r.type === 'specific_days' || r.type === 'twice_weekly') {
@@ -206,17 +210,15 @@ export function getWindowEnd(task) {
 
 const OVERDUE_AUTO_UNSCHEDULE_DAYS = 14;
 
-// SRS spike-forecast tasks (srsEngine) only mean something on their own day.
-// One that was never checked off is "missed" once that day has passed, and
-// so is one the 14-day rule below already left with no date. Missed ones are
-// dropped by runRecurrenceEngine instead of piling up in Overdue (and then
-// Unscheduled). Completed spike tasks are kept like any other task.
-export function isMissedSpikeTask(task, logicalToday) {
-  if (!task || task.source !== 'srs_forecast' || task.completed || task.persistent) return false;
-  const last = taskLastDate(task);
-  if (!last) return true;
-  const d = parseDate(last);
-  return !!d && d < logicalToday;
+// SRS spike-forecast tasks ("SRS review — spike incoming"). The daily cap
+// now defers cards on any day over it, and the deferral notices on Today and
+// Flashcards say ahead of time what it will move, so no spike task is
+// created any more (DF-D7). Any not checked off, on whatever date, are
+// dropped by runRecurrenceEngine, persistent or not (a spike task was only
+// ever for its own day). Completed ones are kept like any other task.
+// (Before DF-D7 only those whose day had passed were dropped.)
+export function isMissedSpikeTask(task) {
+  return !!task && task.source === 'srs_forecast' && !task.completed;
 }
 
 // T8: enough steps for a daily task missed for almost three years.
@@ -292,9 +294,9 @@ export function runRecurrenceEngine(tasks, dsh) {
 
   let changed = false;
 
-  // Missed SRS spike tasks are deleted outright (isMissedSpikeTask).
+  // Uncompleted SRS spike tasks are deleted outright (isMissedSpikeTask).
   const kept = tasks.filter(task => {
-    if (!isMissedSpikeTask(task, logicalToday)) return true;
+    if (!isMissedSpikeTask(task)) return true;
     changed = true;
     return false;
   });

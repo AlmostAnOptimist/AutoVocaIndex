@@ -71,15 +71,18 @@ if (theme === 'hanok') return { ...sh,
     logoText: '#221C18',
   };
 
-if (theme === 'blossom') return { ...sh,
-    bg: '#EDE9E2', surface: '#F7F4ED', raised: '#FDFBF6',
-    border: '#DDD3C6', borderB: '#B9998F',
-    text: '#33241E', textS: '#75584C', textM: '#AB8F82',
-    accent: '#ab3f4a', accentSoft: 'rgba(171,63,74,0.12)',
-    accent2: '#738f63', accent2Soft: 'rgba(115,143,99,0.14)',
-    danger: '#B84038', success: '#3D7A5A', warning: '#C08A2E',
-    tL: '#3A8272', tLa: '#C08A2E', tH: '#8A8A34', tF: '#9C6A4E',
-    logoText: '#ab3f4a',
+  // Shiner (replaces Blossom Mist): a healing bruise. Warm plum-brown
+  // grounds, mauve bruise purples, overripe-banana browns and yellows.
+  if (theme === 'shiner') return { ...sh,
+    bg: '#231B1F', surface: '#2C2226', raised: '#382B2F',
+    border: '#4D3B3A', borderB: '#7A5E3C',
+    text: '#EFE5CA', textS: '#CDB797', textM: '#AA9284',
+    accent: '#CFC14A', accentSoft: 'rgba(207,193,74,0.14)',
+    accent2: '#A8708E', accent2Soft: 'rgba(168,112,142,0.18)',
+    accentText: '#22200A', // dark ink on sallow gold
+    danger: '#CC5A4E', success: '#83A057', warning: '#D69B38',
+    tL: '#86A25C', tLa: '#D9B44A', tH: '#B07C9C', tF: '#B5874C',
+    logoText: '#CFC14A',
   };
 
   // ember (default)

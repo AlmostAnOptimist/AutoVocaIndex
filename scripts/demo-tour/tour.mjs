@@ -120,7 +120,7 @@ const CAP = {
   recall2:      'Recall, reveal…',
   grade2:       '…and grade.',
   pauseDeck:    "If you want to take a break from studying a deck, click Pause. That deck's due cards will no longer count toward your Due Today total.",
-  spike:        'You can even set a threshold in Settings to warn you about review-dense days ahead of time. The warning will show here and on Today.',
+  spike:        'Set a daily review cap in Settings and anything over it is deferred, best-known cards first. Notices warn you a few days ahead, here and on Today.',
   quizzes:      'Quizzes draw on the same entries we added in AVI. Choose from vocabulary or cloze drills. You can also try AI-graded grammar drills (not available in demo).',
   quizAnswer:   'Pick an answer. Feedback is instant, with the right answer highlighted. (Instant Feedback can be turned off in the quiz settings.)',
   quizScores:   'Quiz scores are recorded so you can see your progress over time.',
@@ -687,7 +687,7 @@ async function main() {
       await scrollBy(-4000, 4);
       await caption(CAP.spike, 3500, { wait: 0 });
       await circle(page.locator('.nav-hover').filter({ hasText: 'Settings' }), { pad: 8 });
-      await circle(page.getByText(/card spike on/).first(), { pad: 14 });
+      await circle(page.getByText(/to be deferred/).first(), { pad: 14 });
     });
 
     await scene('Quizzes', async () => {

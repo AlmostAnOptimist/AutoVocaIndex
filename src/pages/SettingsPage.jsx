@@ -6,7 +6,7 @@
 
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useAppTheme } from '../hooks/useAppTheme.js';
-import { CATEGORIES, SOUND_OPTIONS, THEME_DEFS, APPOINTMENT_TYPES } from '../constants.js';
+import { CATEGORIES, SOUND_OPTIONS, APPOINTMENT_TYPES } from '../constants.js';
 import { playSound } from '../utils/soundEngine.js';
 import { SH } from '../theme/buildStyles.js';
 import { backfillCardAudio, cardNeedsAudio } from '../utils/ttsUtils.js';
@@ -19,6 +19,7 @@ import {
 import {
   SettingsHeader, SettingsTabBar, PanelHead, PanelEnd, SettingsGroup, SettingRow, SubLabel, chipStyle, isMobile,
 } from '../components/settings/SettingsKit.jsx';
+import { ThemePicker, ThemeSummary, PalettePreview, ContrastCheck } from '../components/settings/AppearanceKit.jsx';
 
 // ── Built-in stopwords (always active in AVI Search) ─────────
 const BUILT_IN_STOPWORDS = [
@@ -46,7 +47,7 @@ const readSavedTab = () => {
 };
 const FIRST_TAB = { general: 'general', agenda: 'agenda', language: 'content' };
 
-export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile, quizSoundsEnabled, setQuizSoundsEnabled, cards, uid, user, syncStatus, onSignOut, onOpenTheme }) {
+export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile, quizSoundsEnabled, setQuizSoundsEnabled, cards, uid, user, syncStatus, onSignOut, tabRequest = null, onTabRequestDone }) {
   const { C, S, theme } = useAppTheme();
   const [backfill,      setBackfill]      = useState(null); // null | { running, done, total }
   const backfillAbort = useRef(null);
@@ -119,7 +120,9 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
    };
 
   // ── Tabs, search, jumps between copies of a shared setting ───
-  const [tab, setTabState] = useState(readSavedTab);
+  // tabRequest: a tab another part of the app asks Settings to open
+  // (the mobile More menu's Appearance entry); cleared once it's shown.
+  const [tab, setTabState] = useState(() => (SETTINGS_TABS[tabRequest] ? tabRequest : readSavedTab()));
   const lastTab = useRef({ ...FIRST_TAB, [sectionOfTab(tab)]: tab });
   const [query, setQuery] = useState('');
   const [jump, setJump] = useState(null);        // { id, n }
@@ -132,6 +135,17 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
   const onSection = (sec) => { setQuery(''); setTab(lastTab.current[sec] || FIRST_TAB[sec]); };
   const onTab = (t) => { setQuery(''); setTab(t); };
   const onJump = (t, id) => { setQuery(''); setTab(t); setJump(j => ({ id, n: (j?.n || 0) + 1 })); };
+  useEffect(() => {
+    if (!tabRequest) return;
+    if (SETTINGS_TABS[tabRequest]) { setQuery(''); setTab(tabRequest); }
+    onTabRequestDone?.();
+  }, [tabRequest]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Appearance: the theme previewed in Palette and Contrast ──
+  // Follows the theme in use until another one is picked to preview;
+  // previewing never changes the theme.
+  const [previewPick, setPreviewPick] = useState(null);
+  const preview = previewPick || theme;
   useEffect(() => {
     if (!jump) return;
     const el = document.getElementById(`setting-${jump.id}`);
@@ -165,7 +179,8 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
   const ttsOn = settings.ttsEnabled !== false;
 
   // ── One control per setting id ────────────────────────────────
-  // Each returns { ctl, block?, note? }; note = { text, error? }.
+  // Each takes the tab being shown (null in search results) and returns
+  // { ctl, block?, note? }; note = { text, error? }.
   const controls = {
     account: () => ({
       ctl: (
@@ -193,24 +208,22 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
       };
     },
 
-    theme: () => {
-      const def = THEME_DEFS.find(t => t.id === theme);
-      return {
-        ctl: (
-          <>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: C.text }}>
-              {def && (
-                <span aria-hidden="true" style={{ display: 'inline-flex', flexWrap: 'wrap', width: '18px', height: '18px', borderRadius: '3px', overflow: 'hidden' }}>
-                  {def.sw.map((sw, i) => <span key={i} style={{ width: '50%', height: '50%', background: sw }} />)}
-                </span>
-              )}
-              {def?.name || theme}
-            </span>
-            {onOpenTheme && <button onClick={onOpenTheme} style={{ ...S.btnGhost, flexShrink: 0 }} className="btn-ghost">Change theme</button>}
-          </>
-        ),
-      };
-    },
+    // The full picker on Appearance; elsewhere (General, search) the
+    // current theme and a way to the picker.
+    theme: (here) => here === 'appearance'
+      ? { block: true, ctl: <ThemePicker onPicked={() => setPreviewPick(null)} /> }
+      : {
+          ctl: (
+            <>
+              <ThemeSummary />
+              <button onClick={() => onJump('appearance', 'theme')} style={{ ...S.btnGhost, flexShrink: 0 }} className="btn-ghost">Change theme</button>
+            </>
+          ),
+        },
+
+    palette: () => ({ block: true, ctl: <PalettePreview preview={preview} setPreview={setPreviewPick} /> }),
+
+    contrast: () => ({ block: true, ctl: <ContrastCheck preview={preview} /> }),
 
     defaultCat: () => ({
       ctl: (
@@ -499,7 +512,7 @@ export function SettingsPage({ settings, onUpdate, soundProfile, setSoundProfile
   };
 
   const renderRow = (id, here) => {
-    const c = controls[id]?.();
+    const c = controls[id]?.(here);
     if (!c) return null;
     return (
       <SettingRow key={id} id={id} here={here} block={c.block} note={c.note} flash={flashId === id} onJump={onJump}>

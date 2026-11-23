@@ -5,6 +5,7 @@
 
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
+import { withCardStamp } from './cardStamp.js';
 import { apiFetch } from './apiFetch.js';
 import { spokenLemma } from './spokenText.js';
 
@@ -54,7 +55,7 @@ export async function generateVocabCardAudio({ lemma, cardId, uid, onComplete })
   if (!lemma?.trim() || !cardId || !uid) return;
   try {
     const audioUrl = await fetchAudioUrl(sayLemma(lemma));
-    const write = updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { audioUrl });
+    const write = updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({ audioUrl }));
     onComplete?.({ audioUrl });
     await write;
   } catch (err) {
@@ -69,7 +70,7 @@ export async function generateSentenceCardAudio({ lemma, sentence, cardId, uid, 
     if (lemma?.trim())    updates.audioUrl         = await fetchAudioUrl(sayLemma(lemma));
     if (sentence?.trim()) updates.sentenceAudioUrl = await fetchAudioUrl(sentence);
     if (Object.keys(updates).length > 0) {
-      const write = updateDoc(doc(db, 'users', uid, 'flashcards', cardId), updates);
+      const write = updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp(updates));
       onComplete?.(updates);
       await write;
     }
@@ -91,7 +92,7 @@ export async function generateGrammarCardAudio({ examples, cardId, uid, onComple
   const sentences = (examples || '').split('\n').map(s => s.trim()).filter(Boolean);
   if (!sentences.length) {
     try {
-      await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { audioUrl: null, exampleAudio: [] });
+      await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({ audioUrl: null, exampleAudio: [] }));
       onComplete?.([]);
     } catch (err) {
       console.error('generateGrammarCardAudio (clear) failed:', err);
@@ -104,7 +105,7 @@ export async function generateGrammarCardAudio({ examples, cardId, uid, onComple
       const url = await fetchAudioUrl(text);
       exampleAudio.push({ text, url });
     }
-    await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { audioUrl: null, exampleAudio });
+    await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({ audioUrl: null, exampleAudio }));
     onComplete?.(exampleAudio);
   } catch (err) {
     console.error('generateGrammarCardAudio failed:', err);
@@ -118,7 +119,7 @@ export async function regenerateLemmaAudio({ card, uid }) {
   if (!word?.trim() || !card?.id || !uid) return null;
   try {
     const audioUrl = await fetchAudioUrl(sayLemma(word));
-    await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { audioUrl });
+    await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), withCardStamp({ audioUrl }));
     return audioUrl;
   } catch (err) {
     console.error('regenerateLemmaAudio failed:', err);
@@ -160,7 +161,7 @@ export async function refreshRenamedCardAudio({ cards, uid, updateCards }) {
     try {
       const audioUrl = await fetchAudioUrl(sayLemma(word));
       if (audioUrl === card.audioUrl) continue;
-      const write = updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { audioUrl });
+      const write = updateDoc(doc(db, 'users', uid, 'flashcards', card.id), withCardStamp({ audioUrl }));
       if (updateCards) {
         updateCards(prev => (prev ? prev.map(c => (c.id === card.id ? { ...c, audioUrl } : c)) : prev));
       }
@@ -245,13 +246,16 @@ export function playCardAudio(card, ttsSpeed = 0.9) {
 // Pass an AbortSignal via `signal` to support cancellation.
 
 // A card the backfill would generate audio for: a grammar card with example
-// sentences and no example audio; any other card without audioUrl. Settings'
+// sentences and no example audio; a sentence card missing its word clip or its
+// sentence clip (CX: the sentence clip also plays in vocab cards' Context);
+// any other card without audioUrl. Settings'
 // "N cards missing audio" uses the same rule (bug sweep N7: it still read
 // grammar examples from the old `notes` field and grammar audio from
 // audioUrl, so its count disagreed with what the backfill would do).
 export function cardNeedsAudio(c) {
   if (!c) return false;
   if (c.type === 'grammar') return !c.exampleAudio?.length && !!c.examples?.trim();
+  if (c.type === 'sentence') return !c.audioUrl || (!c.sentenceAudioUrl && !!c.sentence?.trim());
   return !c.audioUrl;
 }
 

@@ -8,5 +8,14 @@
   "icons": [
     { "src": "icons/avi-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "icons/avi-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Reading companion",
+      "short_name": "Reading",
+      "description": "Add words and sentences while you read",
+      "url": "/#reading",
+      "icons": [{ "src": "icons/avi-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
   ]
 }

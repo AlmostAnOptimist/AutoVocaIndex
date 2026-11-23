@@ -1,6 +1,10 @@
 // src/pages/ContentLibraryPage.jsx
 import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { collection, getDocs, getDoc, setDoc, doc, updateDoc, addDoc, deleteDoc, writeBatch, arrayRemove, query, where } from 'firebase/firestore';
+import { queueWrite } from '../utils/queuedWrite.js';
+import { loadGrammarEntries } from '../utils/grammarEntriesStore.js';
+import { sightingUnits, sightingMarks } from '../utils/grammarSightings.js';
+import { createPendingFields } from '../utils/pendingFields.js';
 import { db, auth } from '../firebase.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
@@ -411,7 +415,7 @@ function InlineSelectChip({ value, options, onSave, label, C }) {
 
 // ── Section list ───────────────────────────────────────────────
 function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes, correctionSessions,
-  aviWordSectionCounts, aviSentSectionCounts,
+  aviWordSectionCounts, aviSentSectionCounts, sightings,
   onNavigateToGrammar, onNavigateToNote, onNavigateToCorrection,
   onSectionToggle, onSectionTitleSave, onSchedule, onCycleStatus,
   onSectionFieldSave, onSectionOrderSave, onDeleteSection, onToggleNoteLink,
@@ -532,6 +536,15 @@ function SectionList({ sections, sourceId, sourceTitle, grammarEntries, allNotes
               {/* Status text */}
               {sec.status && sec.status !== 'Not started' && (
                 <span style={{ fontSize: '10px', color: sCol, flexShrink: 0, opacity: 0.85 }}>{statusLabel}</span>
+              )}
+              {/* G3c2: this finished section's sentences await a sightings review */}
+              {sightings?.bySection?.[sec.id] && (
+                <button data-sightings-mark={sec.id}
+                  onClick={e => { e.stopPropagation(); sightings.open(sightings.bySection[sec.id]); }}
+                  title="Sentences you mined here have not been looked through for grammar sightings. Opens the review in the Grammar Index."
+                  style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '6px', flexShrink: 0, cursor: 'pointer', background: 'transparent', color: C.accent, border: `1px solid ${C.accent}66`, whiteSpace: 'nowrap' }}>
+                  Sightings
+                </button>
               )}
 
               {/* Right-side buttons */}
@@ -776,7 +789,7 @@ function FamilyHeader({ family }) {
 // ── Source detail panel ────────────────────────────────────────
 function SourceDetailPanel({
   source, sections, grammarEntries, allNotes, correctionSessions,
-  aviWordSectionCounts, aviSentSectionCounts, tasks, allSources,
+  aviWordSectionCounts, aviSentSectionCounts, sightings, tasks, allSources,
   onNavigateToGrammar, onNavigateToNote, onNavigateToCorrection,
   onSectionToggle, onSectionTitleSave, onSourceTitleSave, onSourceFieldSave,
   onScheduleSection, onCycleStatus, onSectionFieldSave, onSectionOrderSave,
@@ -1009,6 +1022,17 @@ function SourceDetailPanel({
             <span style={{ fontSize: '11px', color: srcStatusCol, marginLeft: '2px' }}>{srcStatus}</span>
           </div>
         )}
+        {/* G3c2: this finished source's sentences that name no section await a sightings review */}
+        {sightings?.bySource?.[source.id] && (
+          <div style={{ marginBottom: '9px' }}>
+            <button data-sightings-mark={`source:${source.id}`}
+              onClick={() => sightings.open(sightings.bySource[source.id])}
+              title="Sentences you mined from this source, with no section, have not been looked through for grammar sightings. Opens the review in the Grammar Index."
+              style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '6px', cursor: 'pointer', background: 'transparent', color: C.accent, border: `1px solid ${C.accent}66`, whiteSpace: 'nowrap' }}>
+              Sightings
+            </button>
+          </div>
+        )}
 
         {/* Origin + Series */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
@@ -1226,6 +1250,7 @@ function SourceDetailPanel({
           <SectionList
             sections={sections} sourceId={source.id} sourceTitle={source.title}
             aviWordSectionCounts={aviWordSectionCounts} aviSentSectionCounts={aviSentSectionCounts}
+            sightings={sightings}
             grammarEntries={grammarEntries} allNotes={allNotes}
             correctionSessions={correctionSessions}
             onNavigateToGrammar={onNavigateToGrammar} onNavigateToNote={onNavigateToNote}
@@ -1772,7 +1797,7 @@ function ArchiveManagementModal({ sources, onArchiveSelected, onRestoreSelected,
 // ── Main page component ───────────────────────────────────────
 export function ContentLibraryPage({
   showDecoPanel,
-  soundProfile, onNavigateToGrammar, onNavigateToNote, addTask,
+  soundProfile, onNavigateToGrammar, onReviewSightings, onNavigateToNote, addTask,
   defaultOpenSourceId, onNavigateToCorrection,
   noteTarget, correctionTarget, correctionSessionTarget,
   triggerAddSource, triggerAddQuestion, triggerAddNote, triggerAddCorrection,
@@ -1817,6 +1842,9 @@ export function ContentLibraryPage({
   const [showQuickQuestion,  setShowQuickQuestion]   = useState(false);
   const [adAliases,          setAdAliases]            = useState({});
   const statusDebounceRef = useRef({});
+  // CL1: the fields waiting to be written for each section or source while
+  // its status button is being clicked (see utils/pendingFields.js).
+  const statusPending = useMemo(() => createPendingFields(), []);
   const migrationDoneRef  = useRef(false);
   const pendingArchiveCheckedRef = useRef(false);
 
@@ -1968,11 +1996,13 @@ export function ContentLibraryPage({
     if (!uid) return;
     (async () => {
       try {
-        const [grammarSnap, notesSnap] = await Promise.all([
-          getDocs(collection(db, 'users', uid, 'grammar_entries')),
+        // Grammar entries through the shared loader: one marker read unless
+        // they changed (grammarEntriesStore.js).
+        const [grammarRows, notesSnap] = await Promise.all([
+          loadGrammarEntries(uid),
           getDocs(collection(db, 'users', uid, 'notes')),
         ]);
-        setGrammarEntries(grammarSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setGrammarEntries(grammarRows);
         const allNoteDocs = notesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         setAllNotes(allNoteDocs.filter(n => n.type !== 'correction'));
         setCorrectionSessions(allNoteDocs.filter(n => n.type === 'correction'));
@@ -2107,10 +2137,14 @@ export function ContentLibraryPage({
       : { status: 'Done', previousStatus: section.status, lastActivityAt: now };
     setSections(prev => prev.map(s => s.id === section.id ? { ...s, ...updates } : s));
     if (!isDone && section.resourceId) setSources(prev => prev.map(s => s.id === section.resourceId ? { ...s, lastActivityAt: now } : s));
-    try {
-      await updateDoc(doc(db, 'users', uid, 'content_sections', section.id), updates);
-      if (!isDone && section.resourceId) await updateDoc(doc(db, 'users', uid, 'content_sources', section.resourceId), { lastActivityAt: now });
-    } catch (e) { console.error('Section toggle failed:', e); }
+    // OF2: queued, not waited for. Offline an awaited write never comes back,
+    // and everything below (completing the linked task, the archive check)
+    // used to sit behind it: it ran only once the connection returned, and
+    // not at all if the app was closed first.
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sections', section.id), updates), 'Section toggle failed:');
+    if (!isDone && section.resourceId) {
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sources', section.resourceId), { lastActivityAt: now }), 'Section toggle failed:');
+    }
     // Sync: when section → Done, complete the linked task (skip recurring tasks)
     if (!isDone && section.linkedTaskId) {
       const linked = tasks?.find(t => t.id === section.linkedTaskId);
@@ -2159,14 +2193,17 @@ export function ContentLibraryPage({
       ...(stamp ? { lastActivityAt: stamp } : {}),
       ...(release ? { linkedTaskId: null } : {}),
     };
+    // CL1: every click's fields are sent, not only the last click's.
+    const pendingFields = statusPending;
+    pendingFields.add(sectionId, secUpdates);
     clearTimeout(statusDebounceRef.current[sectionId]);
-    statusDebounceRef.current[sectionId] = setTimeout(async () => {
-      if (!uid) return;
-      try {
-        await updateDoc(doc(db, 'users', uid, 'content_sections', sectionId), secUpdates);
-        if (stamp && sec.resourceId) await updateDoc(doc(db, 'users', uid, 'content_sources', sec.resourceId), { lastActivityAt: stamp });
+    statusDebounceRef.current[sectionId] = setTimeout(() => {
+      const fields = pendingFields.take(sectionId);
+      if (!uid || !fields) return;
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sections', sectionId), fields), 'Status cycle failed:');
+      if (fields.lastActivityAt && sec.resourceId) {
+        queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sources', sec.resourceId), { lastActivityAt: fields.lastActivityAt }), 'Status cycle failed:');
       }
-      catch (e) { console.error('Status cycle failed:', e); }
     }, 500);
     setSections(prev => prev.map(s => s.id === sectionId ? { ...s, ...secUpdates } : s));
     if (stamp && sec.resourceId) setSources(prev => prev.map(s => s.id === sec.resourceId ? { ...s, lastActivityAt: stamp } : s));
@@ -2187,7 +2224,7 @@ export function ContentLibraryPage({
         }
       }
     }
-  }, [sections, sources, triggerAutoArchive, releaseLinkedTasks]);
+  }, [sections, sources, triggerAutoArchive, releaseLinkedTasks, statusPending]);
 
   const handleSectionTitleSave = useCallback(async (section, newTitle, newUrl) => {
     if (DEMO) return; // demo: Content Library is read-only (7C addendum)
@@ -2409,12 +2446,15 @@ export function ContentLibraryPage({
       ...(stamp ? { lastActivityAt: stamp } : {}),
       ...(release ? { linkedTaskId: null } : {}),
     };
+    // CL1: every click's fields are sent, not only the last click's.
+    const pendingFields = statusPending;
+    pendingFields.add('src_' + sourceId, srcUpdates);
     clearTimeout(statusDebounceRef.current['src_' + sourceId]);
-    statusDebounceRef.current['src_' + sourceId] = setTimeout(async () => {
+    statusDebounceRef.current['src_' + sourceId] = setTimeout(() => {
+      const fields = pendingFields.take('src_' + sourceId);
       const uid = auth.currentUser?.uid;
-      if (!uid) return;
-      try { await updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), srcUpdates); }
-      catch (e) { console.error('Source status cycle failed:', e); }
+      if (!uid || !fields) return;
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), fields), 'Source status cycle failed:');
     }, 500);
     setSources(prev => prev.map(s => s.id === sourceId ? { ...s, ...srcUpdates } : s));
     const noSecs = !sections.some(s => s.resourceId === sourceId);
@@ -2427,7 +2467,7 @@ export function ContentLibraryPage({
         if (uid) updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), { pendingArchive: null, pendingArchiveDate: null }).catch(() => {});
       }
     }
-  }, [sections, sources, triggerAutoArchive, releaseLinkedTasks]);
+  }, [sections, sources, triggerAutoArchive, releaseLinkedTasks, statusPending]);
 
   // Source-level Done toggle (section-less sources); writes sourceStatus field
   const handleSourceToggleDone = useCallback(async (source) => {
@@ -2438,13 +2478,12 @@ export function ContentLibraryPage({
     if (current === 'Done') {
       const revertTo = source.previousStatus || 'Not started';
       setSources(prev => prev.map(s => s.id === source.id ? { ...s, sourceStatus: revertTo, previousStatus: null, pendingArchive: null, pendingArchiveDate: null } : s));
-      try { await updateDoc(doc(db, 'users', uid, 'content_sources', source.id), { sourceStatus: revertTo, previousStatus: null, pendingArchive: null, pendingArchiveDate: null }); }
-      catch (e) { console.error('Source toggle failed:', e); }
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sources', source.id), { sourceStatus: revertTo, previousStatus: null, pendingArchive: null, pendingArchiveDate: null }), 'Source toggle failed:');
     } else {
       const now = new Date().toISOString();
       setSources(prev => prev.map(s => s.id === source.id ? { ...s, sourceStatus: 'Done', previousStatus: current, lastActivityAt: now } : s));
-      try { await updateDoc(doc(db, 'users', uid, 'content_sources', source.id), { sourceStatus: 'Done', previousStatus: current, lastActivityAt: now }); }
-      catch (e) { console.error('Source toggle failed:', e); }
+      // OF2: queued, so the archive check below doesn't wait on the network.
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sources', source.id), { sourceStatus: 'Done', previousStatus: current, lastActivityAt: now }), 'Source toggle failed:');
       if (noSecs && !source.archived && !source.pendingArchive && !isPassiveMediaExcluded(source)) {
         triggerAutoArchive(source.id);
       }
@@ -2494,13 +2533,18 @@ export function ContentLibraryPage({
       studyIntent: studyIntent || null, series: null, seriesOrder: null,
       lastActivityAt: null, sourceStatus: 'Not started', createdAt: new Date().toISOString(),
     };
-    const srcRef = await addDoc(collection(db, 'users', uid, 'content_sources'), srcPayload);
+    // OF2: ids are made up front and the writes queued, so the dialog closes
+    // at once instead of waiting on the server (one round trip per section
+    // before). Without signal it used to sit there, apparently stuck.
+    const srcRef = doc(collection(db, 'users', uid, 'content_sources'));
+    queueWrite(() => setDoc(srcRef, srcPayload), 'Add source failed:');
     setSources(prev => prev.some(s => s.id === srcRef.id) ? prev : [...prev, { id: srcRef.id, ...srcPayload }]);
     if (sectionCount > 0) {
       const newSections = [];
       for (let i = 1; i <= sectionCount; i++) {
         const secPayload = { content: String(i), resourceId: srcRef.id, status: 'Not started', createdAt: new Date().toISOString() };
-        const secRef = await addDoc(collection(db, 'users', uid, 'content_sections'), secPayload);
+        const secRef = doc(collection(db, 'users', uid, 'content_sections'));
+        queueWrite(() => setDoc(secRef, secPayload), 'Add source: section create failed:');
         newSections.push({ id: secRef.id, ...secPayload });
       }
       setSections(prev => [...prev, ...newSections.filter(n => !prev.some(p => p.id === n.id))]);
@@ -2517,7 +2561,8 @@ export function ContentLibraryPage({
     const newSecs  = [];
     for (let i = 1; i <= count; i++) {
       const secPayload = { content: String(maxNum + i), resourceId: sourceId, status: 'Not started', createdAt: new Date().toISOString() };
-      const secRef = await addDoc(collection(db, 'users', uid, 'content_sections'), secPayload);
+      const secRef = doc(collection(db, 'users', uid, 'content_sections')); // OF2: queued, not waited for
+      queueWrite(() => setDoc(secRef, secPayload), 'Add sections failed:');
       newSecs.push({ id: secRef.id, ...secPayload });
     }
     setSections(prev => [...prev, ...newSecs.filter(n => !prev.some(p => p.id === n.id))]);
@@ -2531,10 +2576,9 @@ export function ContentLibraryPage({
     const newSecs = [];
     for (const v of videos) {
       const secPayload = { content: v.content, resourceId: sourceId, status: 'Not started', createdAt: new Date().toISOString(), ...(v.url ? { url: v.url } : {}) };
-      try {
-        const secRef = await addDoc(collection(db, 'users', uid, 'content_sections'), secPayload);
-        newSecs.push({ id: secRef.id, ...secPayload });
-      } catch (e) { console.error('Add video failed:', e); }
+      const secRef = doc(collection(db, 'users', uid, 'content_sections')); // OF2: queued, not waited for
+      queueWrite(() => setDoc(secRef, secPayload), 'Add video failed:');
+      newSecs.push({ id: secRef.id, ...secPayload });
     }
     setSections(prev => [...prev, ...newSecs.filter(n => !prev.some(p => p.id === n.id))]);
     return newSecs.map(n => n.id);
@@ -2784,6 +2828,12 @@ export function ContentLibraryPage({
     return [...list].sort((a, b) => (familySortIndex(a) - familySortIndex(b)) || (a.title || '').localeCompare(b.title || ''));
   }, [sources, archiveTypeFilter, archiveSearch]);
 
+  // G3c2 (GS-D15): finished sections whose sentences have not been looked
+  // through for grammar sightings get a small mark that opens the review
+  // in the Grammar Index. Worked out from the sections, sources and
+  // sentence rows already here; nothing is analysed on this page.
+  const sightingsWaiting = useMemo(() => sightingMarks(sightingUnits({ sources, sections, sentenceRows: sentenceInputs })), [sources, sections, sentenceInputs]);
+  const sightings = useMemo(() => (onReviewSightings ? { ...sightingsWaiting, open: onReviewSightings } : null), [sightingsWaiting, onReviewSightings]);
   const totalDone    = useMemo(() => sections.filter(s => s.status === 'Done').length, [sections]);  const selectedSource = useMemo(() => sources.find(s => s.id === selectedSourceId) || null, [sources, selectedSourceId]);
 
   const tabBarRef     = useRef(null);
@@ -2924,6 +2974,7 @@ export function ContentLibraryPage({
                 allSources={sources}
                 aviWordSectionCounts={aviWordSectionCounts}
                 aviSentSectionCounts={aviSentSectionCounts}
+                sightings={sightings}
                 tasks={tasks}
                 onNavigateToGrammar={onNavigateToGrammar}
                 onNavigateToNote={handleNavigateToNoteInCL}
@@ -3090,6 +3141,7 @@ export function ContentLibraryPage({
                 allSources={sources}
                 aviWordSectionCounts={aviWordSectionCounts}
                 aviSentSectionCounts={aviSentSectionCounts}
+                sightings={sightings}
                 tasks={tasks}
                 onNavigateToGrammar={onNavigateToGrammar}
                 onNavigateToNote={handleNavigateToNoteInCL}

@@ -1,8 +1,8 @@
-// scripts/search-golden.mjs
+// tests/search-golden.mjs
 // Golden test set for the AVI search engine (src/utils/lemmaSearchEngine.js).
 // Decisions: AS-D5 to AS-D11, AS-D18 and AS-D29 of the AVI search overhaul.
 //
-// Run from the repo root:   node scripts/search-golden.mjs
+// Run from the repo root:   node tests/search-golden.mjs
 //
 // Same mechanics as heuristics-golden.mjs: bundles the engine (and the
 // aviUtils helpers it imports) with esbuild or rolldown, stubbing firebase
@@ -23,6 +23,7 @@ const STUB = `
   export const db = null; export const auth = null;
   export const doc = () => null; export const getDoc = async () => null;
   export const setDoc = async () => null; export const writeBatch = () => null;
+  export const serverTimestamp = () => null; // cardStamp.js, reached through aviUtils (audit B4c)
   export const DEMO = false; export const DEMO_TIER = 'public';
   export const DEMO_CAPS = {}; export const DEMO_LIMIT_NOTE = '';
   export const demoCapReached = () => false;

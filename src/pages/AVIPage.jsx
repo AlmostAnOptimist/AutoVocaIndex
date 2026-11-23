@@ -4,7 +4,7 @@
 // come in as props from App.jsx (from data.settings.aviCurrentSource/Section).
 // Tab content rendered by child page components (built in Phase 5).
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { useAVIData } from '../hooks/useAVIData.js';
@@ -15,7 +15,8 @@ import { AVIImportPage } from './avi/AVIImportPage.jsx';
 import { AVISourcePage } from './avi/AVISourcePage.jsx';
 import { AVIWordInputPage } from './avi/AVIWordInputPage.jsx';
 import { AVISentenceInputPage } from './avi/AVISentenceInputPage.jsx';
-import { ensureNuanceFlashcard, autoCreateSentenceCard } from '../utils/cardFactory.js';
+import { ensureNuanceFlashcard } from '../utils/cardFactory.js';
+import { useSentenceCardCascade } from '../hooks/useSentenceCardCascade.js';
 import { AVILemmaMasterPage } from './avi/AVILemmaMasterPage.jsx';
 import { AVISearchPage } from './avi/AVISearchPage.jsx';
 import { useSearchStore } from '../hooks/useLemmaSearch.js';
@@ -27,6 +28,8 @@ import {
 import { planDeckLeave, planIsEmpty, applyCardDedupe } from '../utils/cardDedupe.js';
 import { refreshRenamedCardAudio } from '../utils/ttsUtils.js';
 import { TabRail } from '../components/Ornaments.jsx';
+import { Def2Queue } from '../components/avi/Def2Queue.jsx';
+import { lackingDef2Rows } from '../utils/lackingDef2.js';
 
 // A8: cards renamed through updateLinkedCards get word audio for their new word.
 setRenamedCardsHandler(refreshRenamedCardAudio);
@@ -111,6 +114,12 @@ export function AVIPage({
   // Pre-loaded AVI data from App.jsx (eliminates duplicate Firestore reads)
   wordInputs, sentenceInputs, settings, inputsLoaded, onAVIInputsChange, onAviSettingsChange,
   onNavigateToFlashcards,
+  // Reading companion (RC-D12): an entry tapped in its session list opens
+  // here in the Search tab.
+  searchTarget = null, onSearchTargetConsumed,
+  // Lacking Def2 queue (audit B5): a request from Today's flag opens the
+  // queue here; closing it returns to Today.
+  def2QueueRequest = null, onDef2QueueRequestConsumed, onDef2QueueReturn,
 }) {
   const { C } = useAppTheme();
     const { data, updateData, loading, syncStatus } = useAVIData({ wordInputs, sentenceInputs, settingsData: settings, inputsLoaded, onInputsChange: onAVIInputsChange, onAviSettingsChange });
@@ -247,77 +256,48 @@ export function AVIPage({
   }, [data.wordInputs, loading]);
 
   // ── Sentence cardBack cascade ─────────────────────────────────
-  // When a lemmaMaster entry gains def1 or def2 after sentence rows were
-  // committed (lazy import defs), propagate the new cardBack and trigger
-  // card creation. Mirrors the nuanceInFlight guard pattern exactly.
-  const cardBackInFlight = useRef(new Set());
-  // A6: the effect runs on Lemma Master / sentence changes only, so it reads
-  // the latest decks and cards (for the duplicate guard) through a ref.
-  const cascadeLive = useRef({ decks, cards });
-  cascadeLive.current = { decks, cards };
-  useEffect(() => {
-    if (loading) return;
-    const uid = auth.currentUser?.uid;
-    if (!uid) return;
-
-    // L6: only a def2 releases a sentence card. A def1 alone (e.g. the
-    // post-import Def1 fill) no longer creates cards before you've decided
-    // whether to study or skip the word.
-    const defByNorm = {};
-    for (const l of data.lemmaMaster) {
-      const k = normalizeLemma(l.lemma);
-      const cb = l.def2 || '';
-      if (k && cb) defByNorm[k] = cb;
-    }
-
-    const toFix = data.sentenceInputs.filter(s =>
-      !s.cardBack && !s.skipUpload &&
-      !cardBackInFlight.current.has(s.uid) &&
-      defByNorm[normalizeLemma(s.targetWord)]
-    );
-    if (!toFix.length) return;
-
-    const fixMap = Object.fromEntries(
-      toFix.map(s => [s.uid, defByNorm[normalizeLemma(s.targetWord)]])
-    );
-    toFix.forEach(s => cardBackInFlight.current.add(s.uid));
-
-    updateData(prev => ({
-      ...prev,
-      sentenceInputs: prev.sentenceInputs.map(s =>
-        fixMap[s.uid] ? { ...s, cardBack: fixMap[s.uid] } : s
-      ),
-    }));
-
-    for (const row of toFix) {
-      const cardBack = fixMap[row.uid];
-      autoCreateSentenceCard({
-        entry: { ...row, cardBack },
-        lemmaMaster: data.lemmaMaster,
-        decks: cascadeLive.current.decks, cards: cascadeLive.current.cards,
-        uid, updateCards, updateDecks, aviSources,
-        dsh: settings?.dayStartHour ?? 3,
-      }).then(() => {
-        updateData(prev => ({
-          ...prev,
-          sentenceInputs: prev.sentenceInputs.map(s =>
-            s.uid === row.uid ? { ...s, uploaded: true } : s
-          ),
-        }));
-      }).catch(e => console.error('cardBack cascade: card creation failed', e))
-        .finally(() => cardBackInFlight.current.delete(row.uid));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.lemmaMaster, data.sentenceInputs, loading]);
+  // When a lemmaMaster entry gains a def2 after sentence rows were committed
+  // (lazy import defs), propagate the new cardBack and trigger card
+  // creation. Shared with the reading companion (useSentenceCardCascade.js).
+  useSentenceCardCascade({
+    data, updateData, loading,
+    cards, decks, updateCards, updateDecks, aviSources, settings,
+  });
 
   // ── Recently reset badge count ────────────────────────────────
   const recentCount =
     data.wordInputs.filter(w => !w.uploaded && !w.skipUpload && w.lastUncheckReason).length +
     data.sentenceInputs.filter(s => !s.uploaded && !s.skipUpload && s.lastUncheckReason).length;
 
+  // ── Lacking Def2 (audit B5) ───────────────────────────────────
+  // The queue is the Import tab's Fill Def2 modal over every word that
+  // lacks a Definition 2 (components/avi/Def2Queue.jsx). It keeps the rows
+  // it opened with, so a filled row stays in place and the modal can page
+  // on. A request from Today is taken once, when this page opens; leaving
+  // AVI closes the queue with the page.
+  const def2Lacking = useMemo(() => lackingDef2Rows(data.wordInputs, normalizeLemma), [data.wordInputs]);
+  const [def2Queue, setDef2Queue] = useState(() => def2QueueRequest); // { uids, uid, from } | null
+  useEffect(() => {
+    if (def2QueueRequest) onDef2QueueRequestConsumed?.();
+  }, [def2QueueRequest, onDef2QueueRequestConsumed]);
+  const openDef2Queue = useCallback(() => {
+    if (!def2Lacking.length) return;
+    setDef2Queue({ uids: def2Lacking.map(r => r.uid), uid: def2Lacking[0].uid, from: 'avi' });
+  }, [def2Lacking]);
+  const selectDef2QueueRow = useCallback((uid) => {
+    setDef2Queue(q => (q ? { ...q, uid } : q));
+  }, []);
+  const closeDef2Queue = useCallback(() => {
+    const from = def2Queue?.from;
+    setDef2Queue(null);
+    if (from === 'today') onDef2QueueReturn?.();
+  }, [def2Queue, onDef2QueueReturn]);
+
   // ── Shared props for all tab pages ────────────────────────────
   const sharedProps = {
     data, updateData, showAVIToast,
+    lackingDef2Count: def2Lacking.length,
+    openDef2Queue,
     settings,
     dsh: settings?.dayStartHour ?? 3,
     navigateToRecent: () => handleSetTab('recent'),
@@ -349,6 +329,13 @@ export function AVIPage({
   };
 
   const pendingSearchQuery = useRef('');
+  useEffect(() => {
+    if (!searchTarget) return;
+    pendingSearchQuery.current = searchTarget;
+    handleSetTab('search');
+    onSearchTargetConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTarget, handleSetTab]);
   // Search tab state lives here so the search, back trail, typed text and
   // basket survive switching to another AVI tab and back (AS-D14).
   const searchStore = useSearchStore();
@@ -486,6 +473,24 @@ export function AVIPage({
       <div aria-hidden="true" style={{ flexShrink: 0, height: AVI_BOTTOM_CLEARANCE }} />
 
       </div>
+      {/* ── Lacking Def2 queue (audit B5) ─────────────────────── */}
+      {def2Queue && (
+        <Def2Queue
+          queue={def2Queue}
+          onSelect={selectDef2QueueRow}
+          onClose={closeDef2Queue}
+          uid={auth.currentUser?.uid}
+          data={data}
+          updateData={updateData}
+          cards={cards}
+          decks={decks}
+          updateCards={updateCards}
+          updateDecks={updateDecks}
+          aviSources={aviSources || []}
+          dsh={settings?.dayStartHour ?? 3}
+          showAVIToast={showAVIToast}
+        />
+      )}
       {/* ── AVI toast ─────────────────────────────────────────── */}
       {toast && (
         <AVIToast

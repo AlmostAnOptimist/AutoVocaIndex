@@ -8,9 +8,13 @@ import {
   doc, serverTimestamp, writeBatch,
 } from 'firebase/firestore';
 import { db } from '../firebase.js';
+import { addGrammarMarkerBump } from '../utils/grammarEntriesStore.js';
+import { loadAnalyser } from '../utils/koreanAnalyser.js';
+import { patternCheckReport, commonEntries, commonMinimum, COMMON_SHARE } from '../utils/grammarPatternCheck.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { recomputeReviewStats } from '../utils/reviewStatsEngine.js';
+import { readDueDayStamps, stampDueDays, deviceZone } from '../utils/stampDueDays.js';
 import { normalizeLemma } from '../utils/aviUtils.js';
 import { planIsEmpty, applyCardDedupe } from '../utils/cardDedupe.js';
 import { planDef2Align } from '../utils/def2Cascade.js';
@@ -110,6 +114,7 @@ const ACTION_NAMES = {
   aviNuance: '동의어 cleanup', aviRetag: 'Source and section re-tag',
   aviStrays: 'Cards for skipped or deleted words',
   reviewStats: 'Recompute review stats', cardAudio: 'Update card audio',
+  dueDays: 'Stamp due days',
   grammarCheck: 'Grammar Index check', grammarDeadLinks: 'Remove dead links',
 };
 const KIND_LABEL = { read: 'Read-only', write: 'Writes', audio: 'Re-records audio' };
@@ -1474,6 +1479,216 @@ function CardAudioRefreshPanel({ uid, C, runs, markRun }) {
 // Bug sweep G2: it also lists grammar links on sections, section-less
 // sources and notes that point at deleted entries (deletes left them before
 // the fix); "Remove dead links" is the one write.
+// ── Pattern check (audit G3, GS-D8) ───────────────────────────
+// Read-only. Runs the grammar pattern recogniser over the Grammar Index as
+// it is: can each entry's pattern be read from its title, is each entry
+// found in its own examples, and how often does each appear in the mined
+// sentences. Nothing is stored; the answers decide which entries need a
+// hint and which are too common to collect sightings.
+function PatternCheckPanel({ uid, C, runs, markRun }) {
+  const [status, setStatus] = useState('idle'); // idle | running | ready | failed
+  const [report, setReport] = useState(null);
+  const [error, setError] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [offMsg, setOffMsg] = useState('');
+  const busy = status === 'running' || status === 'writing';
+
+  const btnSt = (disabled) => ({
+    padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 400,
+    border: `1px solid ${C.border}`, background: 'transparent',
+    color: C.textS, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+  });
+  const lineSt = { fontSize: '12.5px', color: C.textS, lineHeight: 1.6 };
+  const numSt  = { fontFamily: SH.fm, color: C.text };
+  const termSt = { fontFamily: SH.fk, color: C.text };
+  const dimSt  = { color: C.textM };
+  const headSt = { color: C.text, fontWeight: 600 };
+  const pct = (n, of) => (of ? `${Math.round((n / of) * 100)}%` : '—');
+
+  const run = async () => {
+    if (busy) return;
+    setStatus('running'); setError('');
+    try {
+      const [entrySnap, sentSnap, analyse] = await Promise.all([
+        getDocs(collection(db, 'users', uid, 'grammar_entries')),
+        getDocs(collection(db, 'users', uid, 'sentenceInputs')),
+        loadAnalyser(),
+      ]);
+      const entries = entrySnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const sentences = sentSnap.docs.map(d => d.data().sentence);
+      setReport(patternCheckReport(entries, sentences, analyse));
+      setStatus('ready');
+      markRun('patternCheck');
+    } catch (e) {
+      console.error('Pattern check failed', e);
+      setError(e?.message || String(e));
+      setStatus('failed');
+    }
+  };
+
+  // Switches off sightings for the entries seen in more than COMMON_SHARE of
+  // the mined sentences (decision GS-D3). Writes one field, sightingsOff,
+  // on each of those entries and nothing else: no card, audio or mastery
+  // changes. Entries switched back on by hand are never in the list.
+  const switchOffCommon = async () => {
+    const targets = commonEntries(report);
+    if (status !== 'ready' || !targets.length) return;
+    setStatus('writing'); setOffMsg('');
+    try {
+      let batch = writeBatch(db);
+      let ops = 0;
+      for (const t of targets) {
+        batch.update(doc(db, 'users', uid, 'grammar_entries', t.id), { sightingsOff: true });
+        ops++;
+        if (ops >= 450) { await batch.commit(); batch = writeBatch(db); ops = 0; }
+      }
+      addGrammarMarkerBump(batch, uid); // every device re-reads the entries
+      ops++;
+      if (ops > 0) await batch.commit();
+      const ids = new Set(targets.map(t => t.id));
+      setReport(prev => ({ ...prev, mined: { ...prev.mined, frequency: prev.mined.frequency.map(f => (ids.has(f.id) ? { ...f, off: true } : f)) } }));
+      setOffMsg(`Switched off sightings for ${targets.length} entr${targets.length === 1 ? 'y' : 'ies'}. Reload the main app to see it.`);
+      markRun('patternCommonOff');
+    } catch (e) {
+      console.error('Switching off common entries failed', e);
+      setOffMsg('Switching off failed. Nothing may have been changed; run the Pattern check again to see. Details are in the console.');
+    }
+    setStatus('ready');
+  };
+
+  const entryLine = (e) => (
+    <>
+      <span style={termSt}>{e.term}</span>
+      <span style={dimSt}> (#{e.number ?? '?'}{e.hinted ? ', hint' : ''}{e.off ? ', off' : ''})</span>
+    </>
+  );
+  const r = report;
+  const common = r ? commonEntries(r) : [];
+  const nOff = r ? r.mined.frequency.filter(f => f.off).length : 0;
+  const cutPct = Math.round(COMMON_SHARE * 100);
+  const top = r ? (showAll ? r.mined.frequency : r.mined.frequency.slice(0, 30)) : [];
+
+  return (
+    <>
+    <ActionRow
+      name="Pattern check" kind="read" lastRun={runs.patternCheck ?? null} C={C}
+      desc="Runs the grammar pattern recogniser over every Grammar Index entry: whether its pattern can be read from its title, whether the entry is found in its own examples, and how often it appears in your mined sentences. Runs on this device; nothing is sent anywhere and nothing about the entries is changed."
+      controls={
+        <button onClick={run} disabled={busy} style={btnSt(busy)}>
+          {busy ? 'Checking…' : 'Run Pattern check'}
+        </button>
+      }
+    >
+      {status === 'failed' && (
+        <ResultBox C={C}><div style={{ ...lineSt, color: C.danger }}>The check could not run: {error}</div></ResultBox>
+      )}
+      {r && (
+        <ResultBox C={C}>
+          <div style={lineSt}>
+            <span style={numSt}>{r.counts.entries}</span> entries:
+            {' '}<span style={numSt}>{r.counts.specific}</span> with a pattern of two or more parts,
+            {' '}<span style={numSt}>{r.counts.single}</span> with a one-part pattern,
+            {' '}<span style={numSt}>{r.counts.topic}</span> topics with no form,
+            {' '}<span style={numSt}>{r.counts.unread}</span> whose title could not be read as a pattern.
+            {r.unread.map(e => <div key={e.id} style={{ marginTop: '4px' }}>— {entryLine(e)}</div>)}
+          </div>
+
+          <div style={lineSt}>
+            <span style={headSt}>Found in its own examples.</span>
+            {' '}<span style={numSt}>{r.own.withExamples}</span> entries have examples
+            {' '}(<span style={numSt}>{r.own.withoutExamples}</span> have none and can't be checked).
+            {' '}Found in every line: <span style={numSt}>{r.own.all.length}</span>;
+            {' '}in some: <span style={numSt}>{r.own.some.length}</span>;
+            {' '}in none: <span style={numSt}>{r.own.none.length}</span>.
+            {' '}Lines found: <span style={numSt}>{r.own.linesFound}</span> of <span style={numSt}>{r.own.lines}</span> ({pct(r.own.linesFound, r.own.lines)}),
+            {' '}<span style={numSt}>{r.own.linesBySurfaceOnly}</span> of them by the written form only.
+          </div>
+          {r.own.none.length > 0 && (
+            <div style={lineSt}>
+              Not found in any of its examples (these need a hint, or their examples don't show the pattern):
+              {r.own.none.map(e => (
+                <div key={e.id} style={{ marginTop: '6px' }}>
+                  — {entryLine(e)}
+                  <div style={{ ...dimSt, paddingLeft: '14px', fontFamily: SH.fm, fontSize: '11px' }}>read as: {e.reads.join('  |  ') || '(nothing)'}</div>
+                  <div style={{ paddingLeft: '14px', fontFamily: SH.fk }}>{e.missed[0]}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {r.own.some.length > 0 && (
+            <div style={lineSt}>
+              Found in some of its examples only:
+              {r.own.some.map(e => (
+                <div key={e.id} style={{ marginTop: '6px' }}>
+                  — {entryLine(e)} <span style={numSt}>{e.found}/{e.lines}</span>
+                  <div style={{ paddingLeft: '14px', fontFamily: SH.fk }}>{e.missed[0]}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={lineSt}>
+            Entries whose patterns read exactly alike (they can't be told apart): <span style={numSt}>{r.sharedForms.length}</span> groups
+            {r.sharedForms.map(g => (
+              <div key={g.reads} style={{ marginTop: '4px' }}>
+                — {g.entries.map((e, i) => <span key={e.id}>{i > 0 && <span style={dimSt}>{'  ·  '}</span>}{entryLine(e)}</span>)}
+              </div>
+            ))}
+          </div>
+
+          <div style={lineSt}>
+            <span style={headSt}>In your mined sentences.</span>
+            {' '}<span style={numSt}>{r.mined.sentences}</span> different sentences;
+            {' '}<span style={numSt}>{r.mined.withALongerPattern}</span> ({pct(r.mined.withALongerPattern, r.mined.sentences)}) show at least one pattern of two or more parts.
+            {' '}<span style={numSt}>{r.mined.neverSeen}</span> entries appear in none.
+            {' '}<span style={numSt}>{nOff}</span> entries have sightings switched off.
+            {' '}{showAll ? 'Every entry' : 'The 30 most frequent'}, with the share of sentences each appears in. Where an entry also has a one-part form (the bare 면 of ~(으)면, N(이)면), the count by its longer forms alone is shown beside it; that is how it is found unless its short form is switched on:
+            {top.map(e => (
+              <div key={e.id} style={{ marginTop: '3px' }}>
+                — <span style={numSt}>{e.sentences}</span> <span style={dimSt}>({pct(e.sentences, r.mined.sentences)})</span> {entryLine(e)}
+                {e.kind === 'single' && <span style={dimSt}> one part</span>}
+                {e.kind === 'specific' && e.longer !== e.sentences && <span style={dimSt}> · <span style={numSt}>{e.longer}</span> by its longer forms</span>}
+              </div>
+            ))}
+            {r.mined.frequency.length > 30 && (
+              <div style={{ marginTop: '8px' }}>
+                <button onClick={() => setShowAll(v => !v)} style={btnSt(false)}>{showAll ? 'Show the 30 most frequent' : `Show all ${r.mined.frequency.length}`}</button>
+              </div>
+            )}
+          </div>
+        </ResultBox>
+      )}
+    </ActionRow>
+
+    <ActionRow
+      name="Switch off common entries" kind="write" lastRun={runs.patternCommonOff ?? null} C={C}
+      desc={`Stops collecting sightings for the entries seen in more than ${cutPct}% of your mined sentences (particles, plain endings and the like, which would turn up in every review). Uses the results of the check above. It changes that one setting on each entry and nothing else. An entry you have switched back on in its own Recognition part is left alone, and any entry can be switched either way there.`}
+      controls={
+        <button onClick={switchOffCommon} disabled={status !== 'ready' || common.length === 0} style={btnSt(status !== 'ready' || common.length === 0)}>
+          {status === 'writing' ? 'Switching off…' : `Switch off${r ? ` (${common.length})` : ''}`}
+        </button>
+      }
+    >
+      {r && (
+        <ResultBox C={C}>
+          <div style={lineSt}>
+            {common.length > 0
+              ? <>These <span style={numSt}>{common.length}</span> entries would be switched off (each is seen in <span style={numSt}>{commonMinimum(r.mined.sentences)}</span> or more of your <span style={numSt}>{r.mined.sentences}</span> sentences):</>
+              : <>No entry that is still on is seen in more than {cutPct}% of your sentences (<span style={numSt}>{commonMinimum(r.mined.sentences)}</span> or more of <span style={numSt}>{r.mined.sentences}</span>).</>}
+            {common.map(e => (
+              <div key={e.id} style={{ marginTop: '3px' }}>
+                — <span style={numSt}>{e.sentences}</span> <span style={dimSt}>({pct(e.sentences, r.mined.sentences)})</span> {entryLine(e)}
+              </div>
+            ))}
+          </div>
+        </ResultBox>
+      )}
+      {offMsg && <div style={{ fontSize: '11.5px', color: C.textM }}>{offMsg}</div>}
+    </ActionRow>
+    </>
+  );
+}
+
 function GrammarCheckPanel({ uid, C, runs, markRun }) {
   const [status, setStatus] = useState('idle'); // idle | scanning | ready | fixing
   const [report, setReport] = useState(null);
@@ -1658,6 +1873,89 @@ function GrammarCheckPanel({ uid, C, runs, markRun }) {
         {fixMsg && <div style={{ fontSize: '11.5px', color: C.textM }}>{fixMsg}</div>}
       </ActionRow>
     </>
+  );
+}
+
+const grammarBtnSt = (C, disabled, primary) => ({
+  padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: primary ? 600 : 400,
+  border: `1px solid ${primary ? C.accent : C.border}`, background: 'transparent',
+  color: primary ? C.accent : C.textS, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+});
+
+// ── Stamp due days (scheduler SC-D6) ──────────────────────────
+// One-time: gives every card reviewed before due days existed its due day as a plain
+// date, so it is due on the same day in any time zone. Check counts what
+// would be written; Stamp writes it. Adds two fields per card and changes
+// nothing else. See utils/stampDueDays.js.
+function DueDayStampRow({ uid, C, runs, markRun }) {
+  const [status,  setStatus]  = useState('idle'); // idle | checking | ready | stamping | done
+  const [count,   setCount]   = useState(null);
+  const [message, setMessage] = useState('');
+
+  const zone   = deviceZone();
+  const busy   = status === 'checking' || status === 'stamping';
+  const btnSt  = (disabled, primary) => grammarBtnSt(C, disabled, primary);
+  const lineSt = { fontSize: '12px', color: C.textS, lineHeight: 1.6 };
+
+  const check = async () => {
+    if (busy) return;
+    setStatus('checking'); setMessage(''); setCount(null);
+    try {
+      const { total, stamps, fromCache } = await readDueDayStamps(uid);
+      if (fromCache) { setMessage('This needs a connection. Try again when you are online.'); setStatus('idle'); return; }
+      setCount(stamps.length);
+      if (stamps.length === 0) { setMessage(`Nothing to stamp: all ${total} cards are up to date.`); setStatus('idle'); return; }
+      setMessage(`${stamps.length} of ${total} cards need a due day.`);
+      setStatus('ready');
+    } catch (e) {
+      console.error('Due day check failed', e);
+      setMessage('The check failed. See the console.');
+      setStatus('idle');
+    }
+  };
+
+  const stamp = async () => {
+    if (busy) return;
+    setStatus('stamping'); setMessage('');
+    try {
+      const n = await stampDueDays(uid, (done, total) => setMessage(`Stamping ${done} of ${total}…`));
+      setMessage(`Stamped ${n} cards. Reload AutoVocaIndex to pick them up.`);
+      setCount(0);
+      setStatus('done');
+      markRun('dueDays');
+    } catch (e) {
+      console.error('Due day stamp failed', e);
+      setMessage(e?.code === 'unavailable'
+        ? 'This needs a connection. Try again when you are online.'
+        : 'Stopped partway through. Run it again; cards already stamped are skipped.');
+      setStatus('idle');
+    }
+  };
+
+  return (
+    <ActionRow
+      name="Stamp due days" kind="write" lastRun={runs.dueDays ?? null} C={C}
+      desc="One-time. Gives each reviewed card its due day as a plain date, so it is due on the same day when you travel. Adds two fields per card and changes nothing else; new reviews do this on their own. Run it on a device set to the time zone you usually study in. Safe to repeat."
+      controls={
+        <>
+          <button onClick={check} disabled={busy} style={btnSt(busy)}>
+            {status === 'checking' ? 'Checking…' : 'Check'}
+          </button>
+          {status === 'ready' && (
+            <button onClick={stamp} style={btnSt(false, true)}>Stamp {count} cards</button>
+          )}
+        </>
+      }
+    >
+      {message && <div style={{ ...lineSt, color: C.text }}>{message}{status === 'done' && (
+        <button onClick={() => window.location.reload()} style={{ ...btnSt(false), marginLeft: '8px' }}>Reload</button>
+      )}</div>}
+      {status === 'ready' && (
+        <div style={lineSt}>
+          The old due dates are read in this device's time zone ({zone || 'unknown'}). If that isn't the zone you usually study in, run this on a device that is, or some cards could land a day off.
+        </div>
+      )}
+    </ActionRow>
   );
 }
 
@@ -1942,11 +2240,13 @@ export function DevDashboard({ user }) {
               >
                 {reviewStatsResult && <div style={{ fontSize: '11.5px', color: C.textM }}>{reviewStatsResult}</div>}
               </ActionRow>
+              <DueDayStampRow uid={user.uid} C={C} runs={runs} markRun={markRun} />
               <CardAudioRefreshPanel uid={user.uid} C={C} runs={runs} markRun={markRun} />
             </ActionGroup>
 
             <ActionGroup title="Grammar Index" C={C}>
               <GrammarCheckPanel uid={user.uid} C={C} runs={runs} markRun={markRun} />
+              <PatternCheckPanel uid={user.uid} C={C} runs={runs} markRun={markRun} />
             </ActionGroup>
 
             <ActionGroup title="Gazette" C={C}>

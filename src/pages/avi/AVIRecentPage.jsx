@@ -3,23 +3,39 @@
 // Displays wordInputs and sentenceInputs where lastUncheckReason !== ''.
 // "Looks good" clears the reason and restores uploaded=true.
 // The linked flashcard was already updated by the Lemma Master cascade.
+// RC-D13: a "Last session" tab lists the reading companion's most recent
+// session (from users/{uid}/companion/lastSession), so an entry can be found
+// and checked from any device.
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
+import { auth } from '../../firebase.js';
+import { loadCompanionSession } from '../../utils/companionSession.js';
 
 const SECTION_TABS = [
   { id: 'words',     label: 'Words'     },
   { id: 'sentences', label: 'Sentences' },
+  { id: 'session',   label: 'Last session' },
 ];
 
 export function AVIRecentPage({
   data, updateData,
   aviSources, aviSections,
-  goToSource, showAVIToast,
+  goToSource, goToSearch, showAVIToast,
 }) {
   const { C } = useAppTheme();
   const [activeSection, setActiveSection] = useState('words');
+  // RC-D13: read when the tab is first opened.
+  const [lastSession, setLastSession] = useState(undefined); // undefined = not read yet, null = none
+  useEffect(() => {
+    if (activeSection !== 'session' || lastSession !== undefined) return;
+    let live = true;
+    loadCompanionSession(auth.currentUser?.uid)
+      .then(s => { if (live) setLastSession(s || null); })
+      .catch(e => { console.error('Recent: reading the last session failed', e); if (live) setLastSession(null); });
+    return () => { live = false; };
+  }, [activeSection, lastSession]);
   const [srcFilter, setSrcFilter]         = useState('');
   const [secFilter, setSecFilter]         = useState('(All)');
 
@@ -170,7 +186,7 @@ export function AVIRecentPage({
         {/* Section tabs */}
         <div style={{ display: 'flex', gap: '4px', background: C.cardBg || C.surface, border: `1px solid ${C.border}`, padding: '4px', borderRadius: '12px', width: 'fit-content' }}>
           {SECTION_TABS.map(t => {
-            const count = t.id === 'words' ? resetWords.length : resetSentences.length;
+            const count = t.id === 'words' ? resetWords.length : t.id === 'sentences' ? resetSentences.length : 0;
             const active = activeSection === t.id;
             return (
               <button
@@ -198,7 +214,7 @@ export function AVIRecentPage({
       <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
 
         {/* Empty state */}
-        {totalReset === 0 && (
+        {totalReset === 0 && activeSection !== 'session' && (
           <div style={{ padding: '48px 0', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
             <div style={{ fontSize: '24px', marginBottom: '8px' }}>✓</div>
             No entries have been reset. Lemma Master edits will appear here for review.
@@ -334,7 +350,86 @@ export function AVIRecentPage({
             No reset sentence entries{srcFilter ? ` for ${srcFilter}` : ''}.
           </div>
         )}
+
+        {/* Last session (RC-D13): the reading companion's most recent session */}
+        {activeSection === 'session' && (
+          <LastSession
+            session={lastSession}
+            rowExists={(e) => !e.rowUid || (e.kind === 'sentence' ? data.sentenceInputs : data.wordInputs).some(r => r.uid === e.rowUid)}
+            onSearch={(w) => goToSearch?.(w)}
+            onSource={(src, sec) => goToSource?.(src, sec)}
+            thStyle={thStyle} tdStyle={tdStyle} C={C}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+// ── Last session (RC-D13) ─────────────────────────────────────
+function LastSession({ session, rowExists, onSearch, onSource, thStyle, tdStyle, C }) {
+  if (session === undefined) {
+    return <div style={{ padding: '32px 0', textAlign: 'center', color: C.textM, fontSize: '13px' }}>Loading…</div>;
+  }
+  const entries = session?.entries || [];
+  if (!entries.length) {
+    return (
+      <div style={{ padding: '48px 0', textAlign: 'center', color: C.textM, fontSize: '13px' }}>
+        No reading companion session yet. Words and sentences added there will appear here.
+      </div>
+    );
+  }
+  const when = (iso) => {
+    const d = new Date(iso || '');
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  };
+  return (
+    <>
+      <div style={{ fontSize: '12px', color: C.textM, fontFamily: SH.fm, margin: '2px 0 10px' }}>
+        Started {when(session.startedAt)} · {entries.length} entr{entries.length === 1 ? 'y' : 'ies'}
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+        <thead>
+          <tr>
+            {['Word', 'What happened', 'Source · §', 'Added'].map(h => <th key={h} style={thStyle}>{h}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(e => {
+            const gone = !rowExists(e) && e.status !== 'duplicate';
+            return (
+              <tr key={e.id}>
+                <td style={tdStyle}>
+                  <button
+                    type="button"
+                    onClick={() => onSearch(e.word)}
+                    title="Open in Search"
+                    style={{ fontFamily: SH.fk, fontWeight: 600, fontSize: '13px', color: e.kind === 'sentence' ? (C.accent2 || C.tL) : C.accent, background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left' }}
+                  >
+                    {e.word}
+                  </button>
+                </td>
+                <td style={{ ...tdStyle, color: e.status === 'duplicate' ? C.textM : C.text }}>
+                  {e.note}
+                  {gone && <div style={{ fontSize: '11px', color: C.warning, marginTop: '2px' }}>Row since deleted</div>}
+                </td>
+                <td style={tdStyle}>
+                  {e.source && (
+                    <span
+                      style={{ display: 'inline-block', padding: '2px 7px', borderRadius: '4px', fontSize: '11px', background: C.accentSoft, color: C.accent, cursor: 'pointer', fontFamily: SH.fm }}
+                      onClick={() => onSource(e.source, e.section)}
+                      title="Open in Source view"
+                    >
+                      {e.source}{e.section ? ` · §${e.section}` : ''}
+                    </span>
+                  )}
+                </td>
+                <td style={{ ...tdStyle, color: C.textM, fontFamily: SH.fm, fontSize: '11px', whiteSpace: 'nowrap' }}>{when(e.at)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </>
   );
 }

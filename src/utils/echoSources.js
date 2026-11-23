@@ -52,7 +52,7 @@ export function isCardPaused(card, paused) {
 }
 
 // How much a card is struggling, or null when it isn't. FSRS: the
-// triageBucket / quiz-weighting thresholds (lapses > 3, difficulty > 7) plus a
+// quiz-weighting thresholds (lapses > 3, difficulty > 7) plus a
 // last answer of Again (learning / relearning). Legacy SM-2: ease below 2.0 or
 // a failed last grade. Higher = worse.
 export function struggleScore(card) {

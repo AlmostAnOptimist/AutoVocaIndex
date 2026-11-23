@@ -98,9 +98,22 @@ function stabilityFailure(d, s, r) {
 }
 
 // ── Due date utilities ────────────────────────────────────────
-// Cards may have either:
-//   card.due         — ISO timestamp string (FSRS, new format)
-//   card.nextDueDate — YYYY-MM-DD string    (SM-2 legacy)
+// Cards may have:
+//   card.dueDay      — YYYY-MM-DD string: the day the card is due (SC-D6).
+//                      Written with every grade and deferral since Nov 2026.
+//                      A plain date has no time zone, so it reads the same
+//                      wherever the device is. Read first when it is current.
+//   card.dueDayFor   — the exact card.due that dueDay was written with. When
+//                      the two differ, something changed `due` without
+//                      knowing about dueDay (a tab still running older code,
+//                      say); dueDay is then out of date and is ignored.
+//   card.due         — ISO timestamp string (FSRS): local midnight of the due
+//                      day in the zone it was written in. Still written with
+//                      every grade; read when there is no current dueDay.
+//   card.nextDueDate — YYYY-MM-DD string    (SM-2 legacy, grammar cards)
+
+const isDay = (v) => typeof v === 'string' && v.length === 10;
+const hasCurrentDueDay = (card) => isDay(card.dueDay) && !!card.due && card.dueDayFor === card.due;
 
 function getDueMs(card) {
   const raw = card.due || card.nextDueDate;
@@ -115,6 +128,7 @@ function getDueMs(card) {
 // Returns the due date as a YYYY-MM-DD string in LOCAL time, regardless of format.
 // Used by the daily pipeline for date-string comparisons.
 export function getDueDateStr(card) {
+  if (hasCurrentDueDay(card)) return card.dueDay;
   const raw = card.due || card.nextDueDate;
   if (!raw) return null;
   if (raw.length === 10) return raw; // already a YYYY-MM-DD string (SM-2, grammar)
@@ -127,11 +141,11 @@ export function getDueDateStr(card) {
   return `${yr}-${mo}-${day}`;
 }
 
-// Days elapsed since the card was last reviewed.
-function daysSinceLastReview(card) {
+// Days elapsed since the card was last reviewed (as of nowMs, default now).
+function daysSinceLastReview(card, nowMs = Date.now()) {
   const raw = card.lastReview || card.lastReviewed;
   if (!raw) return 0;
-  return Math.max(0, (Date.now() - new Date(raw).getTime()) / 86_400_000);
+  return Math.max(0, (nowMs - new Date(raw).getTime()) / 86_400_000);
 }
 
 // ── Public card state helpers ─────────────────────────────────
@@ -153,28 +167,6 @@ export function isDueToday(card, dsh = 3) {
   return dueDateStr <= getLogicalDateStr(dsh);
 }
 
-// ── Triage helpers (daily pipeline) ──────────────────────────
-// Extended to handle both FSRS fields and SM-2 legacy fields.
-
-export function triageBucket(card) {
-  const isFSRS = !!card.stability;
-  if (isFSRS) {
-    const d   = card.difficulty ?? 5;
-    const s   = card.stability  ?? 1;
-    const lap = card.lapses     ?? 0;
-    if (lap > 3 || d > 7 || s < 2) return 'now';
-    if (d < 4 && s > 21)            return 'defer';
-    return 'soon';
-  } else {
-    // SM-2 legacy
-    const ef  = card.easeFactor   ?? 2.5;
-    const rep = card.repetitions  ?? 0;
-    if (ef < 1.8 || rep < 3)             return 'now';
-    if (ef >= 2.4 && card.interval > 14) return 'defer';
-    return 'soon';
-  }
-}
-
 // ── Logical-day due dates (bug sweep T1) ──────────────────────
 // A due date is a logical day: the day-start hour (dsh) decides which day
 // "today" is, exactly as isDueToday reads it. Counting from the wall-clock
@@ -187,36 +179,168 @@ export function logicalDueISO(days, dsh = 3) {
   return d.toISOString();
 }
 
-// Backlog triage deferral for an overdue "defer" card: push it out without a
-// review. T9: only the due date moves — same spacing as
-// before (70% of the stability or interval, less below 30 days) — and the
-// stability / interval is left alone; FSRS already accounts for lateness
-// when the card is next reviewed. T1/T3: dates are logical days.
-export function compressInterval(card, dsh = 3) {
-  const today  = toDateStr(getLogicalToday(dsh));
-  const isFSRS = !!card.stability;
-  if (isFSRS) {
-    const s     = card.stability || 1;
-    const ratio = Math.min(1, s / 30);
-    const days  = Math.max(1, Math.round(s * ratio * 0.7));
-    return {
-      due:            logicalDueISO(days, dsh),
-      triageBucket:   'defer',
-      lastTriageDate: today,
-    };
-  } else {
-    // SM-2 legacy
-    const iv    = card.interval || 1;
-    const ratio = Math.min(1, iv / 30);
-    const days  = Math.max(1, Math.round(iv * ratio * 0.7));
-    const next  = getLogicalToday(dsh);
-    next.setDate(next.getDate() + days);
-    return {
-      nextDueDate:    toDateStr(next),
-      triageBucket:   'defer',
-      lastTriageDate: today,
-    };
+// The logical day `days` from now, as a plain date.
+export function logicalDayStr(days, dsh = 3) {
+  const d = getLogicalToday(dsh);
+  d.setDate(d.getDate() + days);
+  return toDateStr(d);
+}
+
+// ── Day load and interval spread (SC-D5) ──────────────────────
+// How many cards are already due on each day: Map of 'YYYY-MM-DD' -> count.
+// New and grammar cards don't count; `isSkipped` leaves out paused cards.
+export function buildDueLoad(cards, isSkipped) {
+  const load = new Map();
+  for (const c of cards || []) {
+    if (!c || c.type === 'grammar' || isNewCard(c)) continue;
+    if (isSkipped && isSkipped(c)) continue;
+    const day = getDueDateStr(c);
+    if (day) load.set(day, (load.get(day) || 0) + 1);
   }
+  return load;
+}
+
+// Cards with the same stability always earn the same interval, so they pile
+// up on one day. An interval of a week or more may land a little either
+// side of the computed day: within 5% of the interval, at least 1 day and at
+// most 7. Shorter intervals are never moved.
+export const SPREAD_MIN_INTERVAL = 7;
+export function spreadWindow(interval) {
+  if (!(interval >= SPREAD_MIN_INTERVAL)) return 0;
+  return Math.min(7, Math.max(1, Math.round(interval * 0.05)));
+}
+
+// The interval to use: the day in the window with the fewest cards already
+// due; on a tie the day closest to the computed one, then the earlier. No
+// randomness, so the same deck always gives the same answer. Without a load
+// map the interval comes back unchanged.
+export function spreadInterval(interval, dueLoad, { dsh = 3, maximumInterval = FSRS_DEFAULTS.maximumInterval } = {}) {
+  const w = spreadWindow(interval);
+  if (!w || !dueLoad) return interval;
+  let best = interval, bestLoad = Infinity, bestDist = Infinity;
+  for (let delta = -w; delta <= w; delta++) {
+    const days = interval + delta;
+    if (days < 1 || days > maximumInterval) continue;
+    const load = dueLoad.get(logicalDayStr(days, dsh)) || 0;
+    const dist = Math.abs(delta);
+    if (load < bestLoad || (load === bestLoad && dist < bestDist)) {
+      best = days; bestLoad = load; bestDist = dist;
+    }
+  }
+  return best;
+}
+
+// ── Daily triage (SC-D1 to SC-D3) ─────────────────────────────
+// Relief for a day with more due than the cap, and only then. `dueCards` is
+// the day's pile: every card due today or earlier in an active deck (no new
+// or grammar cards). Returns the card writes; empty when the pile fits.
+//
+// Deferred: just enough cards to bring the pile down to the cap, those most
+// likely to be remembered today first. Never a card being learned or
+// relearned, never one with stability under 21 days, and never an older
+// SM-2 card. If there aren't enough such cards the pile stays over the cap.
+//
+// How far: up to 15% of the card's stability (1 to 21 days), on the lightest
+// day in that window. Only the due date moves (T9); stability is untouched,
+// and FSRS accounts for the extra days when the card is next reviewed.
+export const DEFER_MIN_STABILITY = 21;
+export const DEFER_SHARE         = 0.15;
+export const DEFER_MAX_DAYS      = 21;
+
+// Chance the card is remembered right now, by the FSRS forgetting curve.
+// `nowMs` lets the deferral forecast ask the same question of a later day.
+export function predictedRecall(card, nowMs = Date.now()) {
+  return retrievability(Math.max(daysSinceLastReview(card, nowMs), 0.1), card.stability || 1);
+}
+
+// `offset` (deferral notices, DF-D2): plan as if the clock were `offset`
+// days on. "Today", the landing days and each card's predicted recall all
+// move with it, so the forecast asks exactly what the pipeline will ask on
+// that day. 0 (the default) is the real run.
+//
+// Each deferred card is also marked (DF-D9): `deferredFor` is the `due` the
+// deferral gave it, and `deferredFrom` the day it was due before the first
+// deferral (kept if it is deferred again before being reviewed).
+export function planTriage(dueCards, { cap, dsh = 3, dueLoad, offset = 0 } = {}) {
+  const pile   = dueCards || [];
+  const excess = pile.length - cap;
+  if (!(excess > 0)) return [];
+
+  const today = logicalDayStr(offset, dsh);
+  const nowMs = Date.now() + offset * 86_400_000;
+  const load  = new Map(dueLoad || []);
+  const eligible = pile
+    .filter(c => c.state === 'review' && (c.stability || 0) >= DEFER_MIN_STABILITY)
+    .map(c => ({ card: c, recall: predictedRecall(c, nowMs) }))
+    .sort((a, b) =>
+      b.recall - a.recall ||
+      b.card.stability - a.card.stability ||
+      String(a.card.id).localeCompare(String(b.card.id)));
+
+  const updates = [];
+  for (const { card } of eligible.slice(0, excess)) {
+    const maxDays = Math.min(DEFER_MAX_DAYS, Math.max(1, Math.round(card.stability * DEFER_SHARE)));
+    let best = 1, bestLoad = Infinity;
+    for (let d = 1; d <= maxDays; d++) {
+      const n = load.get(logicalDayStr(offset + d, dsh)) || 0;
+      if (n < bestLoad) { best = d; bestLoad = n; }
+    }
+    const dueDay = logicalDayStr(offset + best, dsh);
+    load.set(dueDay, bestLoad + 1);
+    const due = logicalDueISO(offset + best, dsh);
+    const deferredFrom = isMarkedDeferred(card) && isDay(card.deferredFrom)
+      ? card.deferredFrom
+      : (getDueDateStr(card) || today);
+    updates.push({
+      id: card.id, due, dueDay, dueDayFor: due,
+      deferredFor: due, deferredFrom,
+      triageBucket: 'defer', lastTriageDate: today,
+    });
+  }
+  return updates;
+}
+
+// ── Deferred cards (DF-D9) ────────────────────────────────────
+// A deferral's mark holds while the card's `due` is still the one the
+// deferral gave it. Any grade writes a new `due` (also from a tab running
+// older code), so the mark goes stale by itself and nothing has to clear it.
+// The last review must also be older than the deferral's day, for the rare
+// grade that lands on the very same day.
+function isMarkedDeferred(card) {
+  return !!card && !!card.deferredFor && card.deferredFor === card.due;
+}
+function logicalDayOf(iso, dsh) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  d.setHours(d.getHours() - dsh);
+  return toDateStr(d);
+}
+// Deferred and not yet due again: these are the cards the deferred round offers.
+export function isDeferred(card, dsh = 3) {
+  if (!isMarkedDeferred(card) || isNewCard(card) || card.type === 'grammar') return false;
+  const rev = card.lastReview || card.lastReviewed;
+  if (rev && isDay(card.lastTriageDate)) {
+    const revDay = logicalDayOf(rev, dsh);
+    if (revDay && revDay >= card.lastTriageDate) return false;
+  }
+  return !isDueToday(card, dsh);
+}
+
+// ── One-time stamp of dueDay on existing cards (SC-D6) ────────
+// The writes for the Dev Dashboard's "Stamp due days": every reviewed,
+// non-grammar card whose due date is a timestamp without a current dueDay.
+// Purely additive; `due` itself is not touched. Run where the cards were
+// reviewed (Korea), since it reads the old timestamps in the device's zone.
+// Older SM-2 cards already hold a plain date and need nothing.
+export function planDueDayStamps(cards) {
+  const stamps = [];
+  for (const c of cards || []) {
+    if (!c || c.type === 'grammar' || isNewCard(c)) continue;
+    if (typeof c.due !== 'string' || isDay(c.due) || hasCurrentDueDay(c)) continue;
+    const day = getDueDateStr({ due: c.due });
+    if (isDay(day) && !day.includes('NaN')) stamps.push({ id: c.id, dueDay: day, dueDayFor: c.due });
+  }
+  return stamps;
 }
 
 // ── Main grading function ─────────────────────────────────────
@@ -226,11 +350,13 @@ export function compressInterval(card, dsh = 3) {
 // settings — from data.settings.fsrs (falls back to FSRS_DEFAULTS for each key)
 //
 // dsh      — day-start hour; the next due date counts from the logical day (T1)
+// dueLoad  — optional Map from buildDueLoad; when given, an interval of a
+//            week or more is spread to a lighter nearby day (SC-D5)
 //
 // Returns a plain object of updated fields to write to Firestore.
 // Never mutates the input card.
 
-export function fsrsGrade(card, rating, settings = {}, dsh = 3) {
+export function fsrsGrade(card, rating, settings = {}, dsh = 3, dueLoad = null) {
   const {
     desiredRetention   = FSRS_DEFAULTS.desiredRetention,
     maximumInterval    = FSRS_DEFAULTS.maximumInterval,
@@ -267,7 +393,14 @@ export function fsrsGrade(card, rating, settings = {}, dsh = 3) {
 
     if (rating === AGAIN) {
       newState     = state; // stay in learning / relearning
-      stability    = W[0];  // reset to minimum Again stability
+      // SC-D4: a card that was known and is being relearned loses half its
+      // stability with each further Again (FSRS-5's same-day rule, weights
+      // 17 and 18), never below the floor. Before, the second Again threw
+      // away the card's whole history. A card still being learned for the
+      // first time has no history to keep and stays at the floor.
+      stability    = state === 'relearning'
+        ? Math.max(W[0], (card.stability || W[0]) * Math.exp(W[17] * (AGAIN - 3 + W[18])))
+        : W[0];
       intervalDays = 0;
     } else {
       newState = 'review';
@@ -304,14 +437,18 @@ export function fsrsGrade(card, rating, settings = {}, dsh = 3) {
   }
 
   // ── Compute next due timestamp ─────────────────────────────
-  let due;
+  // dueDay is the same day as a plain date (SC-D6); readers use it first.
+  let due, dueDay;
   if (intervalDays === 0) {
     // Due immediately — 1 second in the past so it always reads as overdue.
     // This handles again-queue carry-over: if the session ends before this
     // card is resolved, it surfaces at the very start of the next session.
-    due = new Date(now.getTime() - 1000).toISOString();
+    due    = new Date(now.getTime() - 1000).toISOString();
+    dueDay = logicalDayStr(0, dsh);
   } else {
-    due = logicalDueISO(intervalDays, dsh);
+    intervalDays = spreadInterval(intervalDays, dueLoad, { dsh, maximumInterval });
+    due    = logicalDueISO(intervalDays, dsh);
+    dueDay = logicalDayStr(intervalDays, dsh);
   }
 
   return {
@@ -319,6 +456,8 @@ export function fsrsGrade(card, rating, settings = {}, dsh = 3) {
     stability:  parseFloat((stability || W[0]).toFixed(4)),
     difficulty: parseFloat((difficulty || 5).toFixed(4)),
     due,
+    dueDay,
+    dueDayFor: due,
     lastReview: now.toISOString(),
     lapses:     rating === AGAIN ? (card.lapses || 0) + 1 : (card.lapses || 0),
     reps:       (card.reps || 0) + 1,

@@ -8,6 +8,7 @@ import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { uid, toDateStr, getLogicalToday } from '../utils/dateUtils.js';
 import { DatePicker } from './DatePicker.jsx';
+import { TimePicker } from './TimePicker.jsx';
 import { APPOINTMENT_TYPES } from '../constants.js';
 import { getOrderedSectionsForSource } from '../utils/contentUtils.js';
 import { playSound } from '../utils/soundEngine.js';
@@ -220,6 +221,9 @@ export function AppointmentModal({
   const [followUpQueue,    setFollowUpQueue]    = useState([]);
   const [newQueueDate,     setNewQueueDate]     = useState('');
   const [newQueueTime,     setNewQueueTime]     = useState('');
+  // Text in a time field that isn't a time holds Save / Add.
+  const [timeBad,          setTimeBad]          = useState(false);
+  const [queueTimeBad,     setQueueTimeBad]     = useState(false);
   const [clearConfirm,     setClearConfirm]     = useState(false);
   const [costs,            setCosts]            = useState([]);
   const [costsSectionOpen, setCostsSectionOpen] = useState(false);
@@ -414,7 +418,7 @@ export function AppointmentModal({
     setAdditionalSources(prev => prev.map((a, i) => i === idx ? { ...a, ...patch } : a));
 
   const addToQueue = () => {
-    if (!newQueueDate) return;
+    if (!newQueueDate || queueTimeBad) return;
     setFollowUpQueue(prev =>
       [...prev, { date: newQueueDate, time: newQueueTime }]
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -436,7 +440,7 @@ export function AppointmentModal({
   };
 
   const handleSave = () => {
-    if (!date.trim()) return;
+    if (!date.trim() || timeBad) return;
     const apptId      = existing?.id || uid();
     const sortedQueue = [...followUpQueue].sort((a, b) => a.date.localeCompare(b.date));
     let finalTaskId   = taskId;
@@ -517,7 +521,7 @@ export function AppointmentModal({
     onClose();
   };
 
-  const isValid = !!date.trim();
+  const isValid = !!date.trim() && !timeBad;
 
   const handleKeyDown = (e) => {
     if (isSubmitEnter(e) && e.target.tagName !== 'TEXTAREA') {
@@ -547,7 +551,7 @@ export function AppointmentModal({
             </div>
             <div style={S.formGroup}>
               <label style={S.formLabel}>Time (optional)</label>
-              <input type="time" value={time} onChange={e => setTime(e.target.value)} style={S.formInput} />
+              <TimePicker value={time} onChange={setTime} onInvalidChange={setTimeBad} align="right" />
             </div>
           </div>
 
@@ -948,9 +952,9 @@ export function AppointmentModal({
               </div>
               <div>
                 <label style={{ ...S.formLabel, fontSize: '10px', marginBottom: '3px' }}>Time (optional)</label>
-                <input type="time" value={newQueueTime} onChange={e => setNewQueueTime(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); addToQueue(); } }} style={S.formInput} />
+                <TimePicker compact value={newQueueTime} onChange={setNewQueueTime} onInvalidChange={setQueueTimeBad} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); addToQueue(); } }} />
               </div>
-              <button onClick={addToQueue} disabled={!newQueueDate} style={{ ...S.btnGhost, padding: '8px 12px', fontSize: '12px', opacity: newQueueDate ? 1 : 0.4 }} className="btn-ghost">Add</button>
+              <button onClick={addToQueue} disabled={!newQueueDate || queueTimeBad} style={{ ...S.btnGhost, padding: '8px 12px', fontSize: '12px', opacity: newQueueDate && !queueTimeBad ? 1 : 0.4 }} className="btn-ghost">Add</button>
             </div>
           </div>
 

@@ -13,6 +13,7 @@ import { doc, getDoc, setDoc, writeBatch } from 'firebase/firestore';
 import { toDateStr, computeStreak, logicalDateOf } from './dateUtils.js';
 import { db } from '../firebase.js';
 import { DEMO } from '../demo/demoConfig.js';
+import { withCardStamp } from './cardStamp.js';
 import { apiFetch } from './apiFetch.js';
 
 // ── UUID ─────────────────────────────────────────────────────
@@ -179,6 +180,26 @@ const KOREAN_VERB_ENDINGS = [
   // a consonant-final noun, so they're safe to strip blind; vowel-final 라서
   // and 나 collide with verbs (모자라서, 가나요) and stay validated candidates.
   ['마다','',1], ['이나','',1], ['이라서','',1],
+  // LM2 (Nov 2026). 는다 + an ending after a consonant stem is as
+  // unambiguous as 는다면 (먹는다가, 먹는다는, 읽는다며→먹다/읽다). The
+  // fused-ㄴ vowel-stem shapes (쓴다가→쓰다) and the particle 깨나 are
+  // validated candidates in extractLemmaCandidates.
+  ['는다가','다',1], ['는다는','다',1], ['는다며','다',1], ['는다면서','다',1],
+  ['는다니','다',1], ['는다니까','다',1], ['는다지만','다',1], ['는다던','다',1],
+  ['는다는데','다',1],
+  // LM3 (Nov 18 2026). The plain statement of every 하다 and 되다 verb:
+  // 한다/된다 are always 하다/되다 (no noun ends in them), so this is a
+  // rule rather than a validated candidate (해석한다, 시작된다).
+  ['한다','하다',1], ['된다','되다',1],
+  // LM4 (Nov 20 2026). Copula shapes no verb takes, so the noun is safe to
+  // strip blind: a verb ending in 이다 contracts instead (먹여요, 먹여, never
+  // 먹이에요 or 먹이야) and takes 는 where the copula takes ㄴ (보이는데,
+  // never 보인데). The 이- rows only apply after a consonant-final noun
+  // (COPULA_I_SUFFIXES); 이었- is handled in copulaPastNoun. Verb endings
+  // new in LM4 are in LM4_ROWS, not here.
+  ['이에요','',1], ['이야','',1], ['이란','',1], ['이라도','',1], ['이라니','',1],
+  ['이군요','',1], ['이군','',1], ['이구나','',1],
+  ['인데','',1], ['인지','',1], ['인가','',1],
 ];
 // Pre-sorted longest-first so 하는 wins over 는, 에서 over 에, etc.
 const KVE_SORTED = [...KOREAN_VERB_ENDINGS].sort((a, b) => b[0].length - a[0].length);
@@ -186,7 +207,22 @@ const KVE_SORTED = [...KOREAN_VERB_ENDINGS].sort((a, b) => b[0].length - a[0].le
 // (학생이나, 학생이라서). After a vowel the 이 belongs to the noun itself —
 // 고양이나 is 고양이 + 나, not 고양 + 이나 — so these rules are skipped
 // there and the shorter rule (or a validated candidate) takes over.
-const COPULA_I_SUFFIXES = new Set(['이나', '이라서', '이라면', '이니까', '이가', '이라고', '이라는']);
+const COPULA_I_SUFFIXES = new Set(['이나', '이라서', '이라면', '이니까', '이가', '이라고', '이라는',
+  '이에요', '이야', '이란', '이라도', '이라니', '이군요', '이군', '이구나']);
+// LM4: table endings that carry the honorific 시 themselves.
+const HON_TABLE_SUFFIXES = new Set(['세요', '으세요', '십니다', '으십니다', '십니까', '으십니까']);
+// LM4: N이었- is the copula's past after a consonant-final noun (출신이었어,
+// 학생이었는데). A verb ending in 이다 contracts to 였 (움직였다), so the
+// noun is safe to take blind. → the noun, or ''.
+function copulaPastNoun(token) {
+  // (이였 is a common misspelling of 이었.)
+  const i = Math.max(token.indexOf('이었'), token.indexOf('이였'));
+  if (i < 1 || token.length - i > 7) return '';
+  const noun = token.slice(0, i);
+  if (!/^[가-힣]+$/.test(noun) || !/^[가-힣]*$/.test(token.slice(i + 2))) return '';
+  const d = decomposeSyllable(noun[noun.length - 1]);
+  return d && d[2] !== 0 ? noun : '';
+}
 
 // ── Stage C: function-word stoplist ───────────────────────────
 // Conjunctive adverbs and frequency adverbs that are dictionary headwords
@@ -210,6 +246,8 @@ const KOREAN_FUNCTION_WORDS = new Set([
   // L3: bare adverbs that also read as conjugations (안→안다, 다→다다,
   // 없이→없, 잘→자다, 늘→늘다, 곧→곧다) — each is its own headword.
   '안', '못', '다', '잘', '없이', '곧', '늘', '좀', '꼭', '또', '더',
+  // LM4: adverbs that end like one of the new endings (수록, 도록, 니, 든).
+  '갈수록', '되도록', '오래도록', '그러니', '아무래도', '어쨌든', '아무튼', '언제든지', '얼마든지', '그다지',
 ]);
 const isFunctionWord = (s) =>
   !!s && KOREAN_FUNCTION_WORDS.has(String(s).normalize('NFC'));
@@ -249,6 +287,8 @@ function isBarePastSyllable(ch) {
 }
 function decontractIfPast(cand) {
   if (!cand.endsWith('다') || cand.length < 2) return cand;
+  // LM4: written 하였다 is 하 + 였, not a contraction of 하이다.
+  if (cand.endsWith('하였다')) return cand.slice(0, -3) + '하다';
   while (cand.length >= 3 && isBarePastSyllable(cand[cand.length - 2]) && /[가-힣]/.test(cand[cand.length - 3])) {
     cand = cand.slice(0, -2) + '다';
   }
@@ -268,6 +308,23 @@ function decontractIfPast(cand) {
   return out;
 }
 
+// LM4: one tidy for every rule. Quote marks and closing punctuation come off
+// both ends, in any order (출신이었어?" used to keep its quote mark in the
+// candidate blocks, so none of them matched). Brackets stay: 마무리(하다)
+// is the parenthetical lemma convention and must pass through whole.
+const EDGE_QUOTES_LEAD = /^[\s\u2018\u2019\u201C\u201D"'`\u300C\u300E\u3008\u300A]+/;
+const EDGE_QUOTES_TAIL = /[\s\u2018\u2019\u201C\u201D"'`\u300D\u300F\u3009\u300B]+$/;
+const EDGE_PUNCT_TAIL = /[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/;
+function tidySurface(s) {
+  let out = String(s || '').trim();
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(EDGE_QUOTES_LEAD, '').replace(EDGE_QUOTES_TAIL, '').replace(EDGE_PUNCT_TAIL, '').trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 // ── extractLemmaFromText ──────────────────────────────────────
 // Attempts to de-conjugate Korean text into dictionary headword form.
 // Stage 3: the suffix table runs FIRST — the previous ends-with-다 early
@@ -277,12 +334,7 @@ export function extractLemmaFromText(cleaned) {
   const text  = String(cleaned).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const lines = text.split('\n').map(l => l.replace(/\s+/g, ' ').trim());
 
-  const tidy = (s) => {
-    if (!s) return '';
-    s = s.replace(/^[\u2018\u2019\u201C\u201D"'`\u300C\u300E\u3008\u300A]+\s*/g, '')
-         .replace(/\s*[\u2018\u2019\u201C\u201D"'`\u300D\u300F\u3009\u300B]+$/g, '');
-    return s.replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '').trim();
-  };
+  const tidy = tidySurface;
 
   const tryRules = (token) => {
     for (const rule of KVE_SORTED) {
@@ -303,8 +355,19 @@ export function extractLemmaFromText(cleaned) {
           // real ㄹ-stems never take 으 (걸으러→걷다, 들으면→듣다).
           if (replacement === '다' && suffix[0] === '으' && dLast && dLast[2] === 8) {
             cand = stem.slice(0, -1) + composeSyllable(dLast[0], dLast[1], 7) + '다';
+          } else if (replacement === '다' && /^[가-힣]+$/.test(stem)) {
+            // LM4: the stem may still carry 겠, tense or the honorific
+            // (하겠어요→하다, 하셨어요→하다, 하였습니다→하다; 계세요→계시다).
+            const hon = HON_TABLE_SUFFIXES.has(suffix);
+            const j = dLast ? dLast[2] : -1;
+            const viaEu = suffix[0] === '으' && j === 0;   // 지으세요 → 짓다
+            // (겠다/겠어 rules: hand the 겠 back so 아/어야겠 is seen whole.)
+            // A ㄹ stem drops its ㄹ before ㄴ: 만드는데, 아니까 → 만들다, 알다.
+            const lDrop = /^[는니네나냐느]/.test(suffix);
+            const ls = viaEu ? euLemmas(stem, {}) : stemLemmas(suffix.startsWith('겠') ? stem + '겠' : stem, { honEnding: hon, lDrop });
+            if (ls.length) return { lemma: ls[0], len: suffix.length };
           }
-          return decontractIfPast(cand) || token;
+          return { lemma: decontractIfPast(cand) || token, len: suffix.length };
         }
       }
     }
@@ -313,16 +376,26 @@ export function extractLemmaFromText(cleaned) {
   const deconjugate = (token) => {
     if (!token || !/[가-힣]/.test(token)) return token;
     if (isFunctionWord(token)) return token; // Stage C: never deconjugate
+    // LM4: the copula's past after a consonant-final noun (출신이었어→출신).
+    const copNoun = copulaPastNoun(token);
+    if (copNoun) return copNoun;
+    // LM4: written 하여 (대하여, 관하여, 하여서) is 하다; no noun ends in it.
+    const hayeo = token.match(/^([가-힣]*)하여(서|도|야|요)?$/);
+    if (hayeo) return hayeo[1] + '하다';
+    // LM4: the table and the ending peeler both answer; the longer ending
+    // wins (하더라도 is 더라도, not the table's 도), the table on a tie.
+    const peeled = peelPrimary(token);
     const direct = tryRules(token);
-    if (direct !== null) return direct;
+    if (direct !== null) return peeled && peeled.len > direct.len ? peeled.lemma : direct.lemma;
     // Polite-요 retry: no rule matched the full token — peel a trailing 요
     // and run the table once more (는요→는→strip, 거든요→거든, 을까요→
     // 을까…). Conservative: the bare form is adopted only when a rule
     // actually fires on it, so 요-final nouns (필요) never lose their 요.
     if (token.endsWith('요') && hangulCount(token) >= 2) {
       const retried = tryRules(token.slice(0, -1));
-      if (retried !== null) return retried;
+      if (retried !== null) return peeled && peeled.len > retried.len + 1 ? peeled.lemma : retried.lemma;
     }
+    if (peeled) return peeled.lemma;
     return token;
   };
 
@@ -379,8 +452,7 @@ function peelOne(w, list) {
 // Returns the deeper peels of a stacked-particle surface (two or more
 // layers removed), deepest first; [] for anything that isn't stacked.
 function stackedParticlePeels(surface) {
-  let w = String(surface || '').trim()
-    .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
+  let w = tidySurface(surface);
   if (w.endsWith('요') && hangulCount(w) >= 3) w = w.slice(0, -1);
   if (!/^[가-힣]+$/.test(w)) return [];
   const chain = [];
@@ -398,19 +470,303 @@ function stackedParticlePeels(surface) {
   return verbReading ? [verbReading, ...peels] : peels;
 }
 
+// ── LM4: ending peeler ────────────────────────────────────────
+// The suffix table lists whole endings one by one and had no idea of how
+// an ending attaches. This is the missing half: endings by attachment
+// class, peeled from the end of a word to reach the stem, with the stem
+// changes each class causes undone on the way (으 inserted after a
+// consonant, ㄹ dropped, ㄷ/ㅅ/ㅂ irregulars, a fused ㄴ/ㄹ/ㅂ/ㅁ, tense,
+// 겠, honorific 시).
+//
+// Classes:
+//   A   any stem, unchanged                    먹더라, 가더라, 만들더라
+//   N   any stem; a ㄹ stem drops its ㄹ          먹느라, 만드느라
+//   U   으 after a consonant stem; ㄹ stays      먹으려다, 가려다, 만들려다
+//   S   as U, but a ㄹ stem drops its ㄹ          먹으니, 만드니
+//   Q   as S, and also straight onto a consonant stem (question 먹니)
+//   Fㄴ Fㄹ Fㅂ Fㅁ  the ending starts with a consonant that sits under the
+//       stem's last syllable (예쁜지, 갈수록, 갑시다, 함); after a
+//       consonant stem it is spelled 은/을/읍/음 (좋은지, 먹을수록)
+//   V   아/어 fused into the stem's last syllable, then 서, 야, 도 or 라
+//       (해도, 가라, 누워서 → 눕다); older blocks cover part of this
+//   E   어/아 written out after a consonant stem (먹어라)
+// Sure:
+//   y  safe to apply blind: no noun ends this way
+//   e  safe only in the 으/은/을/읍/음 spelling (먹으니; 보니 could be 언니)
+//   p  safe only after a tense or 겠 (했군; 장군 is a noun)
+//   n  never blind: a dictionary-checked candidate
+// Honorific endings (세요, 십시오, 셔서) carry the 시 themselves. 세요,
+// 십니다 and 십니까 are also table rules; they are repeated here for the
+// other readings (만드세요 → 만들다).
+// A sure reading goes right after the primary. An unsure one goes to the
+// end of the candidate list, behind everything the older blocks offer, so
+// it only ever answers where those found nothing the dictionary confirms
+// (친구나 stays 친구, 달려 stays 달리다, and 보니 gains 보다).
+const LM4_ROWS = [];
+{
+  const add = (cls, sure, list, hon = false) => { for (const e of list.split(' ')) LM4_ROWS.push({ e, cls, sure, hon }); };
+  add('A', 'y', '더라고 더라구 더라도 더라면 더라 더니만 더니 던데 던가 던지 더군 더구나 더냐 더구먼 자마자 도록 다시피 길래 든지 든가 거니와 구먼');
+  add('A', 'p', '던 군 구나');
+  // Never blind: 사건만, 보고서, 사고자, 반듯이 and 위노라 are nouns, adverbs and names.
+  add('A', 'n', '듯이 듯 든 건만 건대 건 되 고서 고자 고는 고도 기는 기도 기만 기를 기가 기에는 기엔 기에 길 다니 자는 자면 재 구 노라');
+  // 어라/아라 only after a consonant stem (먹어라); after a vowel it is a name or slang (고아라).
+  add('E', 'y', '어라 아라');
+  add('V', 'n', '서 야 도 라');
+  add('N', 'y', '느라고 느라 느니 는군 는구나 는구먼 는지라 는지 는가 는걸');
+  add('N', 'n', '는');   // attributive 는 on a ㄹ stem: 만드는 → 만들다
+  add('U', 'y', '려는데 려는 려면 려던 려니까 려니 려나 려무나 렵니다 렵니까 므로 리라');
+  // 려다(가) straight after a vowel is also 리 + 어다(가): 내려다, 데려다, 올려다.
+  add('U', 'e', '려다가 려다 려 며 라 렴 마');
+  add('U', 'n', '라는 래');
+  add('S', 'y', '십시오 셔서 셔도 셔야 십시다 세요 십니다 십니까', true);
+  add('Q', 'e', '니');
+  add('Fㄴ', 'y', '지라');
+  add('Fㄴ', 'e', '지 가');
+  add('Fㄴ', 'n', '데 걸');
+  add('Fㄹ', 'y', '수록 지라도 텐데 망정 뿐더러');
+  add('Fㄹ', 'e', '지 게 걸 래 려고');
+  add('Fㄹ', 'n', '까 지도');
+  add('Fㅂ', 'y', '시다 니다 니까');
+  add('Fㅁ', 'e', '으로써');   // 함으로써, but 사람으로써 is a noun
+  add('Fㅁ', 'n', '');
+}
+const LM4_FUSED = { 'ㄴ': [4, '은'], 'ㄹ': [8, '을'], 'ㅂ': [17, '읍'], 'ㅁ': [16, '음'] };
+// Verbs whose own stem ends in 시 (마시다, 모시다): the 시 is not the
+// honorific. 계시다 and 주무시다 exist only with it.
+const LEXICAL_SI = ['마시', '모시', '계시', '주무시', '잡수시', '부시', '쑤시', '적시'];
+const HON_ONLY_STEMS = ['계', '주무'];
+// Stems that only exist with their ㄹ: before a ㄹ-dropping ending 아, 드,
+// 마, 노, 우 and 여 are 알다, 들다, 말다, 놀다, 울다 and 열다 (아세요, 드시고,
+// 맙시다, 노느라); 아다, 드다… are not words, so the ㄹ form comes first.
+// The same holds at the end of a longer stem for 아, 드, 마 and 노 (만드,
+// 흔드, 뛰노: no verb ends in 아다, 드다, 마다 or 노다), but not for 우 and 여
+// (배우다, 보이다 → 보여).
+const lFirst = (b) => /[아드마노]$/.test(b) || b === '우' || b === '여';
+
+// The fused-vowel restore shared with block (h): 해 → 하, 봐 → 보, 줘 → 주,
+// 마셔 → 마시, 돼 → 되.
+const FUSED_VOWEL_RESTORE = { 9: 8, 14: 13, 1: 0, 6: 20, 10: 11 };
+const lastJong = (s) => { const d = s ? decomposeSyllable(s[s.length - 1]) : null; return d ? d[2] : -1; };
+const withJong = (s, j) => { const d = decomposeSyllable(s[s.length - 1]); return s.slice(0, -1) + composeSyllable(d[0], d[1], j); };
+const isHangulStem = (s) => !!s && /^[가-힣]+$/.test(s);
+
+// A stem as it stands before an ending → its dictionary forms, most likely
+// first. Undoes 겠, tense (했→하, 먹었→먹, 하였→하) and honorific 시.
+//   lDrop      the ending makes a ㄹ stem drop its ㄹ, so also offer stem+ㄹ
+//   honEnding  the ending held the 시 itself (세요, 십시오)
+function stemLemmas(S, { lDrop = false, honEnding = false } = {}) {
+  if (!isHangulStem(S)) return [];
+  // No stem ends in 다: what stands before the ending is a quoted plain
+  // statement (간다던데, 예쁘다더라, 있다는걸, 했다길래).
+  if (S.length >= 2 && S.endsWith('다') && !honEnding) {
+    const nda = fusedNdaReadings(S).readings;
+    return nda.length ? nda : stemLemmas(S.slice(0, -1), {});
+  }
+  // …or a quoted copula after a consonant-final noun (학생이라던데 → 학생).
+  if (S.length >= 3 && S.endsWith('이라') && lastJong(S.slice(0, -2)) > 0) return [S.slice(0, -2)];
+  let st = S;
+  if (st.length >= 2 && st.endsWith('겠')) {
+    st = st.slice(0, -1);
+    // 아/어야겠: 해야겠군요, 봐야겠다, 먹어야겠어 → 하다, 보다, 먹다.
+    if (st.length >= 2 && st.endsWith('야')) {
+      const u = st.slice(0, -1), d = decomposeSyllable(u[u.length - 1]);
+      if (u.length >= 2 && (u.endsWith('어') || u.endsWith('아'))) return stemLemmas(u.slice(0, -1), {});
+      if (d && d[2] === 0 && FUSED_VOWEL_RESTORE[d[1]] !== undefined) {
+        const restored = u.slice(0, -1) + composeSyllable(d[0], FUSED_VOWEL_RESTORE[d[1]], 0) + '다';
+        // 해 is 하 + 여; any other ㅐ is more often the stem's own (내야겠다).
+        return u.endsWith('해') || d[1] !== 1 ? [restored, u + '다'] : [u + '다', restored];
+      }
+      if (d && d[2] === 0 && (d[1] === 0 || d[1] === 4)) return [u + '다'];
+    }
+  }
+  let lemma;
+  if (st.endsWith('하였')) lemma = st.slice(0, -1) + '다';
+  else lemma = lastJong(st) === 20 ? decontractIfPast(st + '다') : st + '다';
+  const base = lemma.slice(0, -1);
+  const tensed = base !== S;
+  const out = [];
+  const add = (c) => { if (c && !out.includes(c)) out.push(c); };
+  // A fused ㅐ past is 하 + 였 (했) or a stem that ends in ㅐ (냈 → 내다,
+  // 보냈 → 보내다): the tense peel picks ㅏ, so the ㅐ stem is offered too.
+  const dT = tensed ? decomposeSyllable(st[st.length - 1]) : null;
+  const aeStem = dT && dT[2] === 20 && dT[1] === 1 ? withJong(st, 0) : '';
+  // b다, and what b may be hiding: a ㅂ-irregular (도우 → 돕다) or a dropped ㄹ.
+  const plain = (b, dropped) => {
+    if (dropped && lFirst(b)) add(withJong(b, 8) + '다');
+    add(b + '다');
+    if (b.length >= 2 && b.endsWith('우') && lastJong(b.slice(0, -1)) === 0) add(withJong(b.slice(0, -1), 17) + '다');
+    // (No ㄹ behind a copula-shaped stem: 것이 + ㅂ니다 is never 것일다.)
+    if (dropped && lastJong(b) === 0 && !(b.length >= 2 && b.endsWith('이'))) add(withJong(b, 8) + '다');
+  };
+  if (honEnding) {
+    if (HON_ONLY_STEMS.some(x => base.endsWith(x))) return [base + '시다'];
+    plain(base, true);
+    return out;
+  }
+  if (base.length >= 2 && base.endsWith('시') && !LEXICAL_SI.some(x => base.endsWith(x))) {
+    const X = base.slice(0, -1);
+    if (X.length >= 2 && X.endsWith('으')) {
+      // 으시 only ever follows a consonant stem: 읽으시다 → 읽다, and the
+      // irregulars 들으시다 → 듣다, 지으시다 → 짓다.
+      const b = X.slice(0, -1), j = lastJong(b);
+      add((j === 8 ? withJong(b, 7) : j === 0 ? withJong(b, 19) : b) + '다');
+      add(base + '다');
+      return out;
+    }
+    if (lastJong(X) === 0) {
+      // 셨 (tense on top of 시) is the honorific far more often than a
+      // 시-final verb (가셨어요 is 가다 before 가시다); bare 시 could be a
+      // noun or a verb of its own (하시고, 가시고), so it stays first.
+      if (tensed) { plain(X, true); add(base + '다'); }
+      else { add(base + '다'); plain(X, true); }
+      return out;
+    }
+  }
+  plain(base, lDrop && !tensed);
+  if (aeStem) add(aeStem + '다');
+  if (dT && dT[2] === 20 && dT[0] !== 11 && base.length >= 1) {
+    // What else a fused past may hide. ㅓ/ㅏ: a stem in ㅡ (컸 → 크다,
+    // 바빴 → 바쁘다). ㅐ: a ㅎ-irregular (어땠 → 어떻다, 빨갰 → 빨갛다).
+    if (dT[1] === 4 || dT[1] === 0) add(st.slice(0, -1) + composeSyllable(dT[0], 18, 0) + '다');
+    if (dT[1] === 1) {
+      add(st.slice(0, -1) + composeSyllable(dT[0], 4, 27) + '다');
+      add(st.slice(0, -1) + composeSyllable(dT[0], 0, 27) + '다');
+    }
+  }
+  return out;
+}
+// 으 + ending after a stem: regular after a consonant (먹으니), ㄷ-irregular
+// after ㄹ (들으니 → 듣다; a real ㄹ stem never takes 으), ㅅ-irregular after
+// a vowel (지으니 → 짓다; a real vowel stem never takes 으).
+function euLemmas(b, opts) {
+  if (!isHangulStem(b)) return [];
+  const j = lastJong(b);
+  if (j === 8) return [withJong(b, 7) + '다'];
+  if (j === 0) return [withJong(b, 19) + '다'];
+  return stemLemmas(b, opts);
+}
+
+// Every way an LM4 ending can be read off the end of q.
+//   → [{ len, sure, readings }], longest ending first
+function peelEndings(q) {
+  const found = [];
+  if (!q || hangulCount(q) < 2) return found;
+  const hit = (len, sure, readings) => { if (readings.length) found.push({ len, sure, readings }); };
+  for (const { e, cls, sure, hon } of LM4_ROWS) {
+    const F = cls[0] === 'F' ? LM4_FUSED[cls[1]] : null;
+    if (F) {
+      const [j, syl] = F;
+      if (q.endsWith(syl + e) && q.length > e.length + 1) {
+        hit(e.length + 1.5, sure !== 'n', euLemmas(q.slice(0, -(e.length + 1)), {}));
+      }
+      if (q.endsWith(e) && q.length > e.length) {
+        const st = e ? q.slice(0, -e.length) : q;
+        const jj = lastJong(st);
+        const sureF = sure === 'y';
+        if (jj === j) {
+          const open = withJong(st, 0);
+          // A fused ㄹ may be the stem's own (만들지, 살게): offer both, the
+          // stem's own first where the open stem is no word (알수록, 들수록).
+          const more = j === 8 ? stemLemmas(st, {}) : [];
+          const opened = stemLemmas(open, { lDrop: j !== 8 });
+          hit(e.length + 0.5, sureF, lFirst(open) ? [...more, ...opened] : [...opened, ...more]);
+        } else if (j === 16 && jj === 10) {
+          hit(e.length + 0.5, sureF, [withJong(st, 8) + '다']); // 삶 → 살다
+        }
+      }
+      continue;
+    }
+    if (!q.endsWith(e) || q.length <= e.length) continue;
+    const S = q.slice(0, -e.length);
+    if (!isHangulStem(S)) continue;
+    if (cls === 'V') {
+      const d = decomposeSyllable(S[S.length - 1]);
+      if (d && d[2] === 0 && [0, 1, 4, 6, 9, 10, 14].includes(d[1])) {
+        const rs = d[1] === 10 ? [] : [S + '다'];
+        const rest = FUSED_VOWEL_RESTORE[d[1]];
+        if (rest !== undefined) rs.push(S.slice(0, -1) + composeSyllable(d[0], rest, 0) + '다');
+        // ㅂ-irregular: 누워서 → 눕다, 도와서 → 돕다.
+        if (d[0] === 11 && (d[1] === 14 || d[1] === 9) && S.length >= 2 && lastJong(S.slice(0, -1)) === 0) {
+          rs.push(withJong(S.slice(0, -1), 17) + '다');
+        }
+        hit(e.length, false, rs);
+      }
+      continue;
+    }
+    const pastStem = lastJong(S) === 20 || S.endsWith('겠');
+    const sureBare = sure === 'y' || (sure === 'p' && pastStem);
+    if (cls === 'E') {
+      if (lastJong(S) > 0) hit(e.length, true, stemLemmas(S, {}));
+    } else if (cls === 'A') {
+      // 듯(이) follows a stem (하듯이) or an attributive (미친 듯이 written solid).
+      const j = lastJong(S);
+      const attr = (e === '듯' || e === '듯이') && (j === 4 || j === 8) ? stemLemmas(withJong(S, 0), { lDrop: j === 4 }) : [];
+      hit(e.length, sureBare, [...attr, ...stemLemmas(S, {})]);
+    } else if (cls === 'N') {
+      hit(e.length, sureBare, stemLemmas(S, { lDrop: true }));
+    } else {
+      // U, S, Q: the 으 spelling first, then straight onto a vowel or ㄹ stem.
+      const j = lastJong(S);
+      if (S.length >= 2 && S.endsWith('으')) {
+        hit(e.length + 1, sure !== 'n', euLemmas(S.slice(0, -1), { honEnding: hon }));
+      } else if (j === 0) {
+        const more = e === '려다' || e === '려다가' ? [S + '리다'] : [];
+        hit(e.length, sureBare, [...stemLemmas(S, { lDrop: cls !== 'U', honEnding: hon }), ...more]);
+      } else if (j === 8 && cls === 'U') {
+        // A ㄹ stem (만들려면), or the colloquial extra ㄹ (할려면, 죽일려고).
+        hit(e.length, sureBare, [...stemLemmas(S, {}), ...(e.startsWith('려') && e !== '려' ? stemLemmas(withJong(S, 0), {}) : [])]);
+      } else if (cls === 'Q' && j !== 8) {
+        hit(e.length, false, stemLemmas(S, {}));
+      }
+    }
+  }
+  return found.sort((a, b) => b.len - a.len);
+}
+// The peeler's blind answer for a word, if it has one: the longest sure
+// ending. → { lemma, len } or null. A trailing polite 요 is looked through.
+function peelPrimary(token) {
+  for (const [q, extra] of [[token, 0], [token.endsWith('요') && hangulCount(token) >= 3 ? token.slice(0, -1) : '', 1]]) {
+    if (!q) continue;
+    const m = peelEndings(q)[0];
+    if (m && m.sure) return { lemma: m.readings[0], len: m.len + extra };
+  }
+  return null;
+}
+// All the peeler's readings for a word, longest ending first (at most
+// `cap` of each).  → { sure, unsure }
+function peelReadings(t2, cap = 6) {
+  const sure = [], unsure = [];
+  const qs = [t2];
+  if (t2.endsWith('요') && hangulCount(t2) >= 3) qs.push(t2.slice(0, -1));
+  const all = qs.flatMap(q => peelEndings(q)).sort((a, b) => b.len - a.len);
+  for (const m of all) {
+    for (const r of m.readings) {
+      if (r === t2 || sure.includes(r) || unsure.includes(r)) continue;
+      (m.sure ? sure : unsure).push(r);
+    }
+  }
+  return { sure: sure.slice(0, cap), unsure: unsure.slice(0, cap) };
+}
+
 // ── extractLemmaCandidates ────────────────────────────────────
 // Ranked candidate lemmas for one surface token, including irregular-verb
 // recoveries (ㅂ/르/ㄷ/ㅅ/으) that are too ambiguous to apply blind.
 // Consumed by resolveLemmaWithDictionary, which only accepts a candidate
 // after validating it as a headword against the global lemma map.
 export function extractLemmaCandidates(surface) {
+  return lemmaCandidates(surface).out;
+}
+// → { out, added }: the ranked list, and the readings LM4 added to it (the
+// ones the resolver holds back when the surface is a dictionary word).
+function lemmaCandidates(surface) {
   const out = [];
+  const added = new Set();
   const push = (c) => { if (c && /[가-힣]/.test(c) && !out.includes(c)) out.push(c); };
   push(extractLemmaFromText(surface) || '');
   // Stage C: function words never conjugate — freeze the candidate list at
   // the identity so no sibling (그러나→그러다, 그러면→그러다) can validate
   // past it downstream.
-  if (isFunctionWord(out[0])) return out;
+  if (isFunctionWord(out[0])) return { out, added };
 
   // L3 — stacked particles (봄에는→봄, 친구들에게는→친구, 해녀들이→해녀).
   // The table strips one particle, so 봄에는 stopped at 봄에. Peel up to
@@ -425,9 +781,7 @@ export function extractLemmaCandidates(surface) {
 
   // Peel only the polite 요 (and a fully spelled 었어요/았어요) so the
   // contracted stem stays intact: 들어요→들어, 더워요→더워, 써요→써.
-  let t = String(surface || '').trim()
-    .replace(/^[\u300C\u300E\u3008\u300A]+/, '')
-    .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
+  let t = tidySurface(surface);
   t = t.replace(/(었어요|았어요)$/, '').replace(/요$/, '');
   const nSyl = hangulCount(t);
   if (t && nSyl >= 1) {
@@ -481,9 +835,7 @@ export function extractLemmaCandidates(surface) {
     }
   }
   // Stage 3.3 — validated alternatives for three ambiguity classes:
-  const t2 = String(surface || '').trim()
-    .replace(/^[\u300C\u300E\u3008\u300A]+/, '')
-    .replace(/[.,:;?!~\u2026\u00B7\u30FB\u3001\u3002\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5E\u300D\u300F\u3009\u300B]+$/, '');
+  const t2 = tidySurface(surface);
   // (a) X기 nominalizer vs noun ending in 기: 비치기→비치다 candidate;
   //     junk like 이야기→이야다 never survives validation.
   // L3: two-syllable surfaces too (가기→가다, 먹기→먹다); 2-syllable 기
@@ -678,8 +1030,10 @@ export function extractLemmaCandidates(surface) {
     if (t2.endsWith('인') && hangulCount(t2) >= 2) push(t2.slice(0, -1));
     // The table's 이-copula rules read 고양이나 as 고양 + 이나; offer the
     // 이-final noun too (the resolver prefers it when both validate).
-    for (const suf of COPULA_I_SUFFIXES) {
-      if (b.endsWith(suf) && hangulCount(b) > suf.length) { push(b.slice(0, -suf.length) + '이'); break; }
+    for (const w of [t2, b]) {
+      for (const suf of COPULA_I_SUFFIXES) {
+        if (w.endsWith(suf) && hangulCount(w) > suf.length) { push(w.slice(0, -suf.length) + '이'); break; }
+      }
     }
     // Conditional 다면 on a fused-ㄴ declarative: 원한다면→원하다,
     // 간다면→가다 (the table's 다면 rule leaves 원한다).
@@ -775,7 +1129,152 @@ export function extractLemmaCandidates(surface) {
     }
     if (extra.length) out.splice(1, 0, ...extra);
   }
-  return out;
+  // LM2 — the plain statement ㄴ다/는다 with an ending after it (가, 는, 며,
+  // 면서, 니, 니까, 지만, 던, 는데…), polite 요 allowed. On a vowel stem the
+  // ㄴ is fused into the last syllable, so the table leaves 쓴다가→쓴다 and
+  // 간다며→간다다: offer the stem without the ㄴ (쓰다, 가다) and with ㄹ
+  // restored for ㄹ stems (만든다가→만들다), ranked right after the primary
+  // so the dictionary check reaches them. The primary still comes first, so
+  // a noun + particle keeps its noun (판다가→판다). 다면/다고/대 have their
+  // own blocks above.
+  // LM3 — bare ㄴ다 too (간다, 만난다, 쓴다): the same readings. The surface
+  // is never checked as its own candidate, so the resolver keeps a surface
+  // that is a dictionary word itself (판다, 안다) ahead of these
+  // (bareNdaReadings, resolveLemmaDetailed).
+  {
+    const extra = [];
+    const add = (c) => { if (c && !out.includes(c) && !extra.includes(c)) extra.push(c); };
+    for (const c of fusedNdaReadings(t2).readings) add(c);
+    if (extra.length) out.splice(1, 0, ...extra);
+  }
+  // LM2 — the particle 깨나, "quite a bit of" (힘깨나, 돈깨나). Never the
+  // primary and ranked last: 어깨나 and 참깨나 are 어깨/참깨 + 나, and that
+  // reading is already a candidate above, so it is checked first.
+  if (t2.endsWith('깨나') && hangulCount(t2) >= 3) push(t2.slice(0, -2));
+  // ── LM4 ──
+  // Everything from here on is recorded in `added`.
+  const pushNew = (c) => { if (c && /[가-힣]/.test(c) && !out.includes(c)) { out.push(c); added.add(c); } };
+  const insertAfter = (c, after) => {
+    if (!c || !/[가-힣]/.test(c) || out.includes(c)) return;
+    const at = out.indexOf(after);
+    out.splice(at < 0 ? out.length : at + 1, 0, c);
+    added.add(c);
+  };
+  const peeled = peelReadings(t2);
+  // The peeler's sure readings, right after the primary (one already
+  // further down the list moves up).
+  {
+    const extra = peeled.sure.filter(c => c !== out[0]);
+    if (extra.length) {
+      for (const c of extra) if (!out.includes(c)) added.add(c);
+      const rest = out.slice(1).filter(c => !extra.includes(c));
+      out.splice(1, out.length - 1, ...extra, ...rest);
+    }
+  }
+  // What follows from the shape of the primary and of the sure readings:
+  //   honorific  X시다 → X다 (하시고 → 하시다 → 하다)
+  //   copula     X이다 → X  (학생이고 → 학생이다 → 학생); the verb reading
+  //              stays ahead, so 보이고 is still 보이다
+  //   a dropped ㄹ before ㄴ/ㅅ: 만드는데 → 만드다 → 만들다
+  for (const c of [out[0], ...peeled.sure]) {
+    if (!c || !c.endsWith('다')) continue;
+    if (c.endsWith('시다') && hangulCount(c) >= 3) {
+      let prev = c;
+      for (const l of stemLemmas(c.slice(0, -1), {})) { if (l !== c) { insertAfter(l, prev); prev = out.includes(l) ? l : prev; } }
+    }
+    if (c.endsWith('이다') && hangulCount(c) >= 3) insertAfter(c.slice(0, -2), c);
+  }
+  {
+    const p = out[0] || '';
+    const st = p.endsWith('다') ? p.slice(0, -1) : '';
+    if (st && p !== t2 && t2.startsWith(st) && t2.length > st.length && lastJong(st) === 0 && !st.endsWith('이')
+      && '는니네나냐느세시십'.includes(t2[st.length])) insertAfter(withJong(st, 8) + '다', p);
+  }
+  // The same two shapes on the older blocks' candidates (하신 → 하시다 →
+  // 하다; 학생이네 → 학생이다 → 학생), and the peeler's unsure readings:
+  // behind everything older.
+  for (const c of peeled.unsure) pushNew(c);
+  for (const c of out.slice(1, 8)) {
+    if (!c.endsWith('다')) continue;
+    if (c.endsWith('시다') && hangulCount(c) >= 3) for (const l of stemLemmas(c.slice(0, -1), {})) pushNew(l);
+    if (c.endsWith('이다') && hangulCount(c) >= 3) pushNew(c.slice(0, -2));
+  }
+  // Noun readings, last of all:
+  //   the copula with its 이 dropped after a vowel-final noun (친구고, 친구다 → 친구)
+  {
+    const p = out[0] || '';
+    if (p.endsWith('다') && p.length >= 3) {
+      const st = p.slice(0, -1);
+      if (lastJong(st) === 0 && hangulCount(st) >= 2 && t2.startsWith(st) && !st.endsWith('이')) pushNew(st);
+    }
+  }
+  //   the copula before ㄹ (학생일 때 → 학생), and 라도/라니/란 after a
+  //   vowel-final noun (친구라도 → 친구)
+  if (t2.endsWith('일') && hangulCount(t2) >= 2) pushNew(t2.slice(0, -1));
+  for (const suf of ['라도', '라니', '란']) {
+    if (t2.endsWith(suf) && t2.length > suf.length) {
+      const st = t2.slice(0, -suf.length);
+      if (lastJong(st) === 0) pushNew(st);
+      break;
+    }
+  }
+  //   a one-syllable noun and its particle (집에, 말로, 손과, 집까지): the
+  //   table only strips these from longer nouns, to keep 사과 and 도로 whole
+  for (const [pt, rule] of SHORT_NOUN_PARTICLES) {
+    if (t2.endsWith(pt) && t2.length === pt.length + 1 && particleFits(t2[0], rule)) { pushNew(t2[0]); break; }
+  }
+  return { out, added };
+}
+const SHORT_NOUN_PARTICLES = [
+  ['까지', 'A'], ['부터', 'A'], ['처럼', 'A'], ['조차', 'A'], ['마저', 'A'], ['밖에', 'A'], ['하고', 'A'],
+  ['이랑', 'C'], ['랑', 'V'], ['에', 'A'], ['로', 'VL'], ['의', 'A'], ['도', 'A'], ['만', 'A'], ['과', 'C'], ['와', 'V'],
+];
+// LM4: the readings the resolver must not let beat a surface that is a
+// dictionary word itself: everything LM4 reads into it (멍하니 the adverb
+// is not 멍하다 + 니; 편지, 파일 and 아래 are nouns; 보이다 is not 보 + 이다)
+// and LM3's bare ㄴ다 readings. They are still offered as alternates.
+function guardedReadings(raw) {
+  const set = new Set(bareNdaReadings(raw));
+  for (const c of lemmaCandidates(raw).added) set.add(c);
+  // A dictionary verb in 시다 typed as it stands (가시다, 드시다) is not the
+  // honorific of a shorter verb.
+  const t = tidySurface(normalizeLemma(raw) || raw);
+  if (t.endsWith('시다') && t.length >= 3) for (const l of stemLemmas(t.slice(0, -1), {})) set.add(l);
+  return set;
+}
+// LM2: endings that follow a plain-statement 다, longest first. LM3: ''
+// (bare 다) last.
+const FUSED_DA_TAILS = ['는데', '면서', '니까', '지만', '기에', '길래', '더라', '가', '는', '며', '니', '던', ''];
+
+// LM2/LM3: the dictionary forms behind a plain-statement ㄴ다/는다, with or
+// without an ending after it. → { bare, readings }: bare when nothing
+// follows the 다. 하/되 never hide a ㄹ, so 할다/될다 are never offered.
+function fusedNdaReadings(t2) {
+  const readings = [];
+  const q = t2.endsWith('요') && hangulCount(t2) >= 3 ? t2.slice(0, -1) : t2;
+  const tail = FUSED_DA_TAILS.find(x => q.endsWith('다' + x));
+  if (tail === undefined) return { bare: false, readings };
+  const st = q.slice(0, -(tail.length + 1));
+  const dN = st ? decomposeSyllable(st[st.length - 1]) : null;
+  // 는 is itself a ㄴ-final syllable: after a longer stem it is the 는다
+  // of a consonant stem (먹는다가→먹다); alone it is 늘다 (는다가).
+  if (st.endsWith('는') && hangulCount(st) >= 2) {
+    readings.push(st.slice(0, -1) + '다');
+  } else if (dN && dN[2] === 4) {
+    const head = st.slice(0, -1);
+    const open = composeSyllable(dN[0], dN[1], 0);
+    readings.push(head + open + '다');
+    if (open !== '하' && open !== '되') readings.push(head + composeSyllable(dN[0], dN[1], 8) + '다');
+  }
+  return { bare: tail === '', readings };
+}
+// LM3: the readings the resolver must not let beat a surface that is a
+// dictionary word itself (판다 the noun, 안다 "to hug"). Only the bare
+// shape: with an ending after it the table's primary already comes first.
+function bareNdaReadings(raw) {
+  const t = normalizeLemma(raw) || raw;
+  const r = fusedNdaReadings(t);
+  return r.bare ? r.readings : [];
 }
 
 // ── detectMode ────────────────────────────────────────────────
@@ -938,10 +1437,30 @@ export async function resolveLemmaWithDictionary(surface, opts = {}) {
   return (await resolveLemmaDetailed(surface, { ...opts, withAlternates: false })).lemma;
 }
 
+// LM4: a second opinion on a word's dictionary form, from outside the
+// rules. The app registers the Korean analyser (lemmaSecondOpinion.js); with
+// nothing registered the resolver works from the rules alone.
+//   fn(surface, context) → Promise<string[]>   likeliest reading first
+// A reading is only ever a candidate: it is checked against the dictionary
+// like the rules' own, and ranked right after the rules' first answer. A
+// slow, failed or empty answer changes nothing.
+let lemmaSecondOpinion = null;
+const SECOND_OPINION_MS = 4000;
+export function setLemmaSecondOpinion(fn) { lemmaSecondOpinion = typeof fn === 'function' ? fn : null; }
+async function secondOpinionReadings(surface, context) {
+  if (!lemmaSecondOpinion) return [];
+  let timer = null;
+  try {
+    const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), SECOND_OPINION_MS); });
+    const got = await Promise.race([Promise.resolve().then(() => lemmaSecondOpinion(surface, context)), late]);
+    return Array.isArray(got) ? got.filter(c => typeof c === 'string' && /[가-힣]/.test(c)).slice(0, 2) : [];
+  } catch { return []; } finally { if (timer) clearTimeout(timer); }
+}
+
 // L3: how many candidates are validated against the GLM per surface. The
 // stacked-particle peels sit right after the primary, so the irregular
 // recoveries further down need the extra room.
-const GLM_CANDIDATE_CHECKS = 8;
+const GLM_CANDIDATE_CHECKS = 10;
 const MAX_ALTERNATES = 3;
 
 // L3 (lemma repair, Oct 2026): the same cascade, also
@@ -952,6 +1471,8 @@ const MAX_ALTERNATES = 3;
 //   { lemma, alternates: string[] }
 // alternates are only computed with { withAlternates: true }; they never
 // include the lemma itself, and function words get none.
+// opts: localHeadwords, withAlternates, context (LM4: the sentence the word
+// came from, for the second opinion).
 export async function resolveLemmaDetailed(surface, opts = {}) {
   const raw = String(surface || '').trim();
   if (!raw) return { lemma: '', alternates: [] };
@@ -991,8 +1512,15 @@ export async function resolveLemmaDetailed(surface, opts = {}) {
     return { lemma: normalizeLemma(raw) || raw, alternates: [] };
   }
 
-  const candidates = extractLemmaCandidates(raw);
-  const primary = candidates[0] || raw;
+  const heuristic = extractLemmaCandidates(raw);
+  const primary = heuristic[0] || raw;
+  // LM4: the second opinion's readings join right after the rules' first
+  // answer. Not asked for when a trusted mapping already answered and no
+  // alternates are wanted. opts.context is the sentence the word came from.
+  const second = (trusted && !withAlternates) ? [] : await secondOpinionReadings(raw, opts.context);
+  const candidates = second.length
+    ? [primary, ...second.filter(c => c !== primary), ...heuristic.slice(1).filter(c => !second.includes(c))]
+    : heuristic;
   const toCheck = candidates.filter(c => c && c !== raw).slice(0, GLM_CANDIDATE_CHECKS);
 
   // Headword validation of the candidates, in rank order. Skipped when a
@@ -1020,12 +1548,18 @@ export async function resolveLemmaDetailed(surface, opts = {}) {
 
   if (trusted) return finish(trusted);
 
+  // LM3: a surface that is a dictionary word itself keeps itself ahead of
+  // its bare-ㄴ다 readings (판다 stays the noun, 안다 stays "to hug"); the
+  // readings still show as alternates.
+  const guarded = rawIsHeadword ? guardedReadings(raw) : null;
+  const eligible = (c) => !guarded || !guarded.has(c);
+
   // Local headword validation: free and synchronous — a candidate the user
   // already studies is accepted immediately (몰라요→모르다 when 모르다 is
   // in lemmaMaster).
   if (localHeadwords) {
     for (const c of candidates) {
-      if (c && c !== raw && isLocal(c)) return finish(c);
+      if (c && c !== raw && isLocal(c) && eligible(c)) return finish(c);
     }
   }
 
@@ -1033,7 +1567,7 @@ export async function resolveLemmaDetailed(surface, opts = {}) {
   // machine-generated with the same naive suffix assumptions as the
   // heuristic, so a validated headword candidate (이야기는→이야기) must
   // beat a seed row that merely agrees with a heuristic guess.
-  const ok = await validate();
+  const ok = (await validate()).filter(eligible);
   if (ok.length) {
     // L3: 고양이나 validates as both 고양 (+ 이나) and 고양이 (+ 나) — a
     // validated 이-final noun the surface spells out is the likelier one.
@@ -1046,7 +1580,7 @@ export async function resolveLemmaDetailed(surface, opts = {}) {
   // from the map (쉬워지다, 따뜻해지다): accept one when its base validates
   // (쉬워 → 쉽다).
   for (const c of toCheck) {
-    if (!c.endsWith('지다') || hangulCount(c) < 3) continue;
+    if (!c.endsWith('지다') || hangulCount(c) < 3 || !eligible(c)) continue;
     const stem = c.slice(0, -2);
     const dS = decomposeSyllable(stem[stem.length - 1]);
     if (!dS || dS[2] !== 0 || ![0, 1, 4, 6, 9, 14].includes(dS[1])) continue; // fused 아/어/해/여/와/워
@@ -1060,7 +1594,7 @@ export async function resolveLemmaDetailed(surface, opts = {}) {
   // independently jamo-derived candidate is two independent signals —
   // hallucinated junk (까닥여→퇴창) can never coincide with a candidate we
   // generated. Reached only when nothing validated as a headword.
-  if (seedMapping && seedMapping !== raw && candidates.includes(seedMapping)) return finish(seedMapping);
+  if (seedMapping && seedMapping !== raw && candidates.includes(seedMapping) && eligible(seedMapping)) return finish(seedMapping);
 
   // L3: a surface that is itself a dictionary word keeps itself rather
   // than taking an uncorroborated seed rewrite (봄 stayed 보다).
@@ -1079,6 +1613,18 @@ export async function resolveLemmaDetailed(surface, opts = {}) {
   if (seedMapping && seedMappingPlausible(raw, seedMapping)) {
     const mKey = globalLemmaKey(seedMapping);
     if (glmEntryTrust(mKey, await fetchGlmEntry(mKey)).headword) return finish(seedMapping);
+  }
+
+  // LM4: nothing was confirmed and the rules left the word as it was: take
+  // the second opinion's reading if it has one (a form the rules have no
+  // ending for, of a word the map lacks).
+  if (second.length && primary === tidySurface(raw) && second[0] !== primary) return finish(second[0]);
+
+  // LM4: nothing was confirmed. An unknown word in a copula shape is far
+  // more likely a noun the map lacks (a name, a loanword) than a verb
+  // ending in 이다, so the noun is the better guess (민수입니다 → 민수).
+  if (primary.endsWith('이다') && primary !== tidySurface(raw) && candidates.includes(primary.slice(0, -2))) {
+    return finish(primary.slice(0, -2));
   }
 
   return finish(primary || raw);
@@ -1222,7 +1768,7 @@ export async function updateLinkedCards({ lemmaID, lemmaText, updates, buildUpda
   if (memoryFirst) applyInMemory();
 
   const batch = writeBatch(db);
-  pairs.forEach(([c, u]) => batch.update(doc(db, 'users', uid, 'flashcards', c.id), u));
+  pairs.forEach(([c, u]) => batch.update(doc(db, 'users', uid, 'flashcards', c.id), withCardStamp(u)));
   await batch.commit();
 
   if (!memoryFirst) applyInMemory();

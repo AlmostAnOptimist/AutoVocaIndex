@@ -1,21 +1,28 @@
 // Generic mobile bottom sheet for "tap to see full detail" patterns across
 // AVI's mobile layouts (Word Input, Lemma Master, Source, Search) — one
 // shared implementation instead of four bespoke popups.
+//
+// RC-D16: portaled to document.body. The Source sheet renders inside the
+// topbar, whose position: relative + z-index: 10 made it a stacking context,
+// so the sheet's own z-index never got above the mobile tab bar (z 50) and
+// its bottom (the Close button) sat hidden behind it. The bottom padding
+// also clears the home-indicator area.
 
+import { createPortal } from 'react-dom';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 
 export function MobileInfoSheet({ open, onClose, title, children }) {
   const { C } = useAppTheme();
   if (!open) return null;
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1400, display: 'flex', alignItems: 'flex-end' }}
     >
       <div
         onClick={e => e.stopPropagation()}
-        style={{ width: '100%', background: C.surface, borderTop: `1px solid ${C.border}`, borderRadius: '18px 18px 0 0', padding: '10px 18px 22px', maxHeight: '70vh', overflowY: 'auto' }}
+        style={{ width: '100%', background: C.surface, borderTop: `1px solid ${C.border}`, borderRadius: '18px 18px 0 0', padding: '10px 18px calc(22px + env(safe-area-inset-bottom, 0px))', maxHeight: '70vh', overflowY: 'auto' }}
       >
         <div style={{ width: '36px', height: '4px', background: C.border, borderRadius: '2px', margin: '0 auto 12px' }} />
         {title && (
@@ -33,6 +40,7 @@ export function MobileInfoSheet({ open, onClose, title, children }) {
           Close
         </button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

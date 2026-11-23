@@ -1601,7 +1601,7 @@ function EchoSession({ state, draft, onDraft, onChange, save, onRetrySave, onPra
 //   never reviewed                       → weight 1 (neutral)
 // FSRS cards (have stability — every card graded since the FSRS switch):
 //   lapses > 3 or difficulty > 7         → base weight 3 (same "struggling"
-//                                          thresholds as triageBucket)
+//                                          thresholds as echoSources.js)
 //   otherwise                            → base weight 1
 //   state learning/relearning            → weight × 2 (last answer was Again)
 // Legacy SM-2 cards (no stability):

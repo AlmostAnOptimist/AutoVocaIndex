@@ -9,6 +9,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef, memo } from 'react';
 import { doc, writeBatch } from 'firebase/firestore';
 import { db, auth } from '../../firebase.js';
+import { withCardStamp } from '../../utils/cardStamp.js';
 import { useAppTheme } from '../../hooks/useAppTheme.js';
 import { SH } from '../../theme/buildStyles.js';
 import { Def1Display } from '../../components/avi/Def1Display.jsx';
@@ -1008,9 +1009,9 @@ export function AVILemmaMasterPage({
       const toFix = cards.filter(c => c.linkedAVILemmaId && idRemap[c.linkedAVILemmaId]);
       if (toFix.length) {
         const batch = writeBatch(db);
-        toFix.forEach(c => batch.update(doc(db, 'users', uidNow, 'flashcards', c.id), {
+        toFix.forEach(c => batch.update(doc(db, 'users', uidNow, 'flashcards', c.id), withCardStamp({
           linkedAVILemmaId: idRemap[c.linkedAVILemmaId],
-        }));
+        })));
         batch.commit().then(() => {
           updateCards(prev => prev ? prev.map(c =>
             c.linkedAVILemmaId && idRemap[c.linkedAVILemmaId]

@@ -15,6 +15,7 @@
 
 import { doc, writeBatch, increment } from 'firebase/firestore';
 import { db } from '../firebase.js';
+import { withCardStamp } from './cardStamp.js';
 import { normalizeLemma } from './aviUtils.js';
 import { autoCreateWordCard, autoCreateSentenceCard } from './cardFactory.js';
 
@@ -74,7 +75,7 @@ export async function removeCardsForWord({ uid, found, updateCards, updateDecks 
   };
   for (const p of plan) {
     const ref = doc(db, 'users', uid, 'flashcards', p.id);
-    if (p.rest.length) batch.update(ref, { deckIds: p.rest });
+    if (p.rest.length) batch.update(ref, withCardStamp({ deckIds: p.rest }));
     else batch.delete(ref);
     decrements.set(p.deckId, (decrements.get(p.deckId) || 0) + 1);
     ops++;

@@ -63,7 +63,7 @@ export function demoCapReached(arr, capKey) {
 // ── Video tour sample forecast ───────────────────────────────
 // The recorded video tour (scripts/demo-tour) opens the demo with ?tour in
 // the address. The demo's sample cards have almost no review history, so on
-// their own they never fill Today's Reviews or trigger a spike warning; in
+// their own they never fill Today's Reviews or trigger a deferral notice; in
 // tour mode the review widgets show this sample forecast instead, so the
 // video can show what those features look like in use. Never active outside
 // the demo, and nothing is written: only the on-screen snapshot changes.
@@ -73,18 +73,16 @@ export const DEMO_TOUR = DEMO && typeof window !== 'undefined'
 // Links to the video are hidden while the video itself is being recorded.
 export const SHOW_TOUR_LINK = DEMO && !!DEMO_TOUR_URL && !DEMO_TOUR;
 
-export function tourSampleSnapshot(result, logicalDate) {
+export function tourSampleSnapshot(result) {
+  return { ...result, dueAtDayStart: 34, dueCardIds: null, tomorrowCount: 101 };
+}
+
+// The deferral notice the tour shows on Today and Flashcards: tomorrow has
+// 101 reviews due against the default cap of 80, so 21 are deferred.
+export function tourSampleForecast(logicalDate) {
   const tomorrow = new Date(`${logicalDate}T12:00:00`);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const p2 = n => String(n).padStart(2, '0');
-  const taskDateStr = `${tomorrow.getFullYear()}-${p2(tomorrow.getMonth() + 1)}-${p2(tomorrow.getDate())}`;
-  const dayName = tomorrow.toLocaleDateString('en-US', { weekday: 'long' });
-  return {
-    ...result,
-    dueAtDayStart: 34,
-    dueCardIds: null,
-    tomorrowCount: 101,
-    spikes: [{ dueCount: 101, taskDateStr, dayName }],
-    spikeDetected: true,
-  };
+  const day = `${tomorrow.getFullYear()}-${p2(tomorrow.getMonth() + 1)}-${p2(tomorrow.getDate())}`;
+  return { days: [{ offset: 1, day, due: 101, deferred: 21, over: 0 }], ifUnfinished: null, backlog: 0 };
 }

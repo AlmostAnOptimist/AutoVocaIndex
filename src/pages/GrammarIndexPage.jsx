@@ -2,6 +2,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, getDoc, setDoc, query, where, arrayRemove } from 'firebase/firestore';
 import { db, auth } from '../firebase.js';
+import { withCardStamp } from '../utils/cardStamp.js';
 import { useAppTheme } from '../hooks/useAppTheme.js';
 import { SH } from '../theme/buildStyles.js';
 import { Icons } from '../components/Icons.jsx';
@@ -15,8 +16,28 @@ import { useGlobalKey } from '../hooks/useGlobalKey.js';
 import { usePaginationKeys } from '../hooks/usePaginationKeys.js';
 import { getLogicalToday, toDateStr } from '../utils/dateUtils.js';
 import { queueWrite } from '../utils/queuedWrite.js';
+import { GrammarRecognition } from '../components/GrammarRecognition.jsx';
+import { GrammarSightings } from '../components/GrammarSightings.jsx';
+import { sightingUnits, exampleOrigin } from '../utils/grammarSightings.js';
 import { isSubmitEnter } from '../utils/keyUtils.js';
+import { loadGrammarEntries, bumpGrammarEntriesMarker, rememberGrammarEntries } from '../utils/grammarEntriesStore.js';
 const GRAMMAR_CACHE_KEY = 'avi_grammar_entries';
+// Every queued grammar_entries write on this page goes through entryWrite:
+// queued like before, then the entries marker moves so other devices re-read
+// (grammarEntriesStore.js). One move covers all the writes an action issues
+// together (a delete renumbering every later entry is one), sent after them.
+// The page's own entries already hold the change, so this device doesn't
+// re-read.
+let entryBumpPending = false;
+function entryWrite(uid, makeWrite, label) {
+  queueWrite(makeWrite, label);
+  if (entryBumpPending) return;
+  entryBumpPending = true;
+  queueMicrotask(() => {
+    entryBumpPending = false;
+    bumpGrammarEntriesMarker(uid, { inMemory: true });
+  });
+}
 // P1: fingerprint of the grammar corpus this device last wrote, so the corpus
 // doc is rewritten only when its content changes (not on every visit).
 const CORPUS_SIG_KEY = 'avi_grammar_corpus_sig';
@@ -294,7 +315,7 @@ function NewEntryForm({ onSave, onCancel, entryCount, allEntries, C, S }) {
 function EntryDetail({
   entry, allEntries, linkedCardId, linkedCard, linkedNotes, linkedSections,
   onClose, onSave, onDelete, onRename, onNavigateToCard, onNavigateToNote, onNavigateToEntry,
-  onAddQuestion, onLinkSection, onNavigateToContent, allSections, C, S,
+  onAddQuestion, onLinkSection, onNavigateToContent, allSections, onOpenSightings, C, S,
   readOnly = false,
 }) {
   const [editing,       setEditing]       = useState(false);
@@ -303,6 +324,17 @@ function EntryDetail({
   const [explanation,   setExplanation]   = useState(entry.explanation || '');
   const [examples,      setExamples]      = useState(entry.examples    || '');
   const [examplesExpanded, setExamplesExpanded] = useState(!(linkedCard?.exampleAudio?.length > 0));  const [masteryLevel,  setMasteryLevel]  = useState(entry.masteryLevel || 'introduced');
+  // G3: the entry's examples can now change while this panel is open (a kept
+  // sighting, saved from the review). Take the new text in, or this panel
+  // would go on showing the old examples and its next save (leaving the
+  // box, or Save in Edit) would write them back over the new ones. The user's own
+  // typing is not disturbed: saving it makes entry.examples equal to what
+  // is already in the box.
+  const [examplesSeen, setExamplesSeen] = useState(entry.examples || '');
+  if ((entry.examples || '') !== examplesSeen) {
+    setExamplesSeen(entry.examples || '');
+    setExamples(entry.examples || '');
+  }
   const [showComparePicker, setShowComparePicker] = useState(false);
   const [secSearch,     setSecSearch]     = useState('');
   const [secPickerOpen, setSecPickerOpen] = useState(false);
@@ -515,7 +547,9 @@ function EntryDetail({
             label="Examples"
             C={C}
             defaultOpen={!!entry.examples}
-            action={audioByText.size > 0 && (
+            action={(
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+              {audioByText.size > 0 && (
               <button
                 onClick={() => setExamplesExpanded(v => !v)}
                 style={{
@@ -528,6 +562,15 @@ function EntryDetail({
                 {examplesExpanded ? 'Hide text' : 'Edit text'}
                 <span style={{ fontSize: '10px', display: 'inline-block', transition: 'transform 0.15s', transform: examplesExpanded ? 'rotate(-90deg)' : 'rotate(90deg)' }}>›</span>
               </button>
+              )}
+              {/* G3 (GS-D15): every sighting of this entry across the sentences the user has mined. */}
+              {onOpenSightings && !readOnly && (
+                <button onClick={() => onOpenSightings(entry)} data-own-sightings
+                  style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '6px', background: 'transparent', color: C.textS, border: `1px solid ${C.border}`, cursor: 'pointer' }}>
+                  From your sentences
+                </button>
+              )}
+              </span>
             )}
           >
             {examplesExpanded && (
@@ -561,7 +604,13 @@ function EntryDetail({
                       >
                         {playingKey === i ? Icons.speakerPlaying : Icons.speaker}
                       </button>
-                      <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.textS, lineHeight: 1.6 }}>{line}</span>
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ fontFamily: SH.fk, fontSize: '13px', color: C.textS, lineHeight: 1.6 }}>{line}</span>
+                        {/* G3 (GS-D14): where a kept sighting came from. Lines written by hand have none. */}
+                        {exampleOrigin(entry, line) && (
+                          <span style={{ display: 'block', fontFamily: SH.fm, fontSize: '10.5px', color: C.textM, lineHeight: 1.4 }}>{exampleOrigin(entry, line)}</span>
+                        )}
+                      </span>
                     </div>
                   );
                 })}
@@ -637,6 +686,10 @@ function EntryDetail({
                   >
                     <div style={{ fontSize: '13px', fontWeight: 500, color: C.text, marginBottom: '3px' }}>
                       {note.title || <span style={{ fontStyle: 'italic', color: C.textM }}>Untitled</span>}
+                      {/* G2 (GS-D9): a corrections session linked to this entry sits among its notes. */}
+                      {note.type === 'correction' && (
+                        <span style={{ marginLeft: '8px', fontSize: '9px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.textM }}>Corrections</span>
+                      )}
                     </div>
                     {(note.bodyHtml || note.body) && (
                       <div style={{ fontSize: '12px', color: C.textM, marginBottom: '4px', lineHeight: 1.4 }}>
@@ -796,6 +849,13 @@ function EntryDetail({
             )}
           </CollapsibleSection>
 
+          {/* Recognition (audit G3, GS-D3): how the entry's pattern is read,
+              the switch for collecting sightings, and an optional hint.
+              Rendered only when opened, which is when the analyser loads. */}
+          <CollapsibleSection label="Recognition" C={C} defaultOpen={false}>
+            <GrammarRecognition key={entry.id} entry={entry} onSave={(updates) => onSave(entry.id, updates)} readOnly={readOnly} C={C} />
+          </CollapsibleSection>
+
           {/* Delete — bottom of panel, separated to reduce accidental clicks */}
           {!readOnly && (
           <div style={{ marginTop: '32px', paddingTop: '16px', borderTop: `1px solid ${C.border}` }}>
@@ -841,7 +901,8 @@ function EntryDetail({
 
 // ── Main page ─────────────────────────────────────────────────
 export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNavigateToContent, defaultOpenEntryId,
-  onMasteryCounts, onEntriesChange, getCardNextDueDate, onCardNextDueDateChanged, updateCards, cards, dsh = 3 }) {
+  onMasteryCounts, onEntriesChange, getCardNextDueDate, onCardNextDueDateChanged, updateCards, cards, dsh = 3,
+  sentenceInputs, librarySources, librarySections, sightingsRequest, onSightingsRequestConsumed }) {
   const { C, S } = useAppTheme();
   const [entries,     setEntries]     = useState([]);
   // P1: which entry has which grammar card comes from App's in-memory cards
@@ -886,17 +947,13 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
   if (!uid) return;
   (async () => {
     try {
-      // ── Grammar entries: paint from cache instantly, then always refresh from Firestore ──
+      // ── Grammar entries: paint from cache instantly, then the shared loader,
+      // which reads them all only when the entries marker says they changed ──
       try {
         const cached = localStorage.getItem(GRAMMAR_CACHE_KEY);
         if (cached) setEntries(JSON.parse(cached));
       } catch {}
-      const entrySnap = await getDocs(collection(db, 'users', uid, 'grammar_entries'));
-      const rows = entrySnap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => (a.entryNumber || 0) - (b.entryNumber || 0));
-      setEntries(rows);
-      try { localStorage.setItem(GRAMMAR_CACHE_KEY, JSON.stringify(rows)); } catch {}
+      setEntries(await loadGrammarEntries(uid));
 
       // ── Flashcards (for cardMap cross-reference) ──
       // P1: only when App's cards haven't loaded; otherwise cardMap is
@@ -1007,6 +1064,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
           console.error('Renumber migration failed for', u.id, e);
         }
       }
+      if (updates.length) bumpGrammarEntriesMarker(uid, { inMemory: true });
       setEntries(prev => {
         const map = Object.fromEntries(updates.map(u => [u.id, u.entryNumber]));
         return prev.map(e => map[e.id] !== undefined ? { ...e, entryNumber: map[e.id] } : e)
@@ -1062,6 +1120,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
           console.error('compareTo migration: update failed for', u.id, e);
         }
       }
+      if (updates.length) bumpGrammarEntriesMarker(uid, { inMemory: true });
 
       // Update local state
       if (updates.length > 0) {
@@ -1098,15 +1157,55 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
 
       if (shouldLink && !alreadyLinks) {
         const next = [...otherChips, thisTerm].join(' | ');
-        await updateDoc(doc(db, 'users', uid, 'grammar_entries', otherEntry.id), { compareTo: next });
+        entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', otherEntry.id), { compareTo: next }), 'Grammar Index: compare-to sync failed');
         setEntries(prev => prev.map(e => e.id === otherEntry.id ? { ...e, compareTo: next } : e));
       } else if (!shouldLink && alreadyLinks) {
         const next = otherChips.filter(c => c.toLowerCase().trim() !== thisTerm.toLowerCase().trim()).join(' | ');
-        await updateDoc(doc(db, 'users', uid, 'grammar_entries', otherEntry.id), { compareTo: next });
+        entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', otherEntry.id), { compareTo: next }), 'Grammar Index: compare-to sync failed');
         setEntries(prev => prev.map(e => e.id === otherEntry.id ? { ...e, compareTo: next } : e));
       }
     }
   }, [entries]);
+
+  // ── Sightings review (audit G3, GS-D10 to GS-D15) ──────────────
+  // What awaits review is worked out from the Library's sources and
+  // sections and the AVI sentence rows App already holds; nothing hooks into
+  // marking a section Done. Finishing a review stamps the section (or the
+  // source, for sentences with no section). App's listeners bring the stamp
+  // back; until they do, the stamps written here are laid over the props so
+  // the list updates at once.
+  // A request from the Library (the mark on a finished section, G3c2) opens
+  // that unit's review as the page arrives; it is taken once.
+  const [sightingsOpen, setSightingsOpen] = useState(!!sightingsRequest);
+  const [sightingsStart, setSightingsStart] = useState(sightingsRequest || null);
+  useEffect(() => { if (sightingsRequest) onSightingsRequestConsumed?.(); }, [sightingsRequest, onSightingsRequestConsumed]);
+  // An entry's own "from your sentences" (G3d): the entry's id while open.
+  const [sightingsEntryId, setSightingsEntryId] = useState(null);
+  const closeSightings = useCallback(() => { setSightingsOpen(false); setSightingsStart(null); setSightingsEntryId(null); }, []);
+  const [sightingStamps, setSightingStamps] = useState({});
+  const sightingsWaiting = useMemo(() => {
+    const later = (id, own) => { const mine = sightingStamps[id]; return mine && (!own || mine > own) ? mine : own; };
+    return sightingUnits({
+      sources:  (librarySources  || []).map(src => { const at = later(`src:${src.id}`, src.sightingsReviewedAt); return at === src.sightingsReviewedAt ? src : { ...src, sightingsReviewedAt: at }; }),
+      sections: (librarySections || []).map(sec => { const at = later(`sec:${sec.id}`, sec.sightingsReviewedAt); return at === sec.sightingsReviewedAt ? sec : { ...sec, sightingsReviewedAt: at }; }),
+      sentenceRows: sentenceInputs,
+    });
+  }, [librarySources, librarySections, sentenceInputs, sightingStamps]);
+  const stampSightingsUnit = useCallback((unit, at) => {
+    const uid = auth.currentUser?.uid;
+    if (!uid || !unit || DEMO) return; // demo: Grammar Index is read-only
+    const local = {};
+    if (unit.kind === 'source') {
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sources', unit.sourceId), { sightingsReviewedAt: at }), 'Sightings: review stamp failed');
+      local[`src:${unit.sourceId}`] = at;
+    } else {
+      unit.sectionIds.forEach(id => {
+        queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sections', id), { sightingsReviewedAt: at }), 'Sightings: review stamp failed');
+        local[`sec:${id}`] = at;
+      });
+    }
+    setSightingStamps(prev => ({ ...prev, ...local }));
+  }, []);
 
   const handleSave = useCallback(async (id, updates) => {
     const uid = auth.currentUser?.uid;
@@ -1122,7 +1221,11 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
         finalUpdates = { ...updates, masteryLevelChangedAt: new Date().toISOString() };
       }
     }
-    await updateDoc(doc(db, 'users', uid, 'grammar_entries', id), finalUpdates);
+    // OF2: every write in an entry save is queued, not waited for. The
+    // entry, its card and the lists on screen update at once; before, each
+    // step sat behind the one before it and an edit made without signal
+    // never showed.
+    entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', id), finalUpdates), 'Grammar Index: entry save failed');
     setEntries(prev => {
       const next = prev.map(e => e.id === id ? { ...e, ...finalUpdates } : e);
       updateCache(next);
@@ -1143,11 +1246,11 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
         // previously these were merged into one `notes` string and recovered
         // by splitting on blank lines, which broke whenever explanation itself
         // had a paragraph break.
-        await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), {
+        queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({
           back: newBack,
           explanation,
           examples,
-        });
+        })), 'Grammar Index: card update failed');
         // Keep in-memory cards in sync so the next session sees changes immediately.
         updateCards?.(prev => prev?.map(c => c.id === cardId ? { ...c, back: newBack, explanation, examples } : c) ?? prev);
         // Regenerate TTS whenever examples change (fire-and-forget). The completion
@@ -1204,7 +1307,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
         }
 
         if (newNextDueDate !== currentNextDueDate) {
-          await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { nextDueDate: newNextDueDate });
+          queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({ nextDueDate: newNextDueDate })), 'Grammar Index: card due date update failed');
           onCardNextDueDateChanged(cardId, newNextDueDate);
         }
       }
@@ -1222,11 +1325,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       ? (current.includes(entryId) ? current : [...current, entryId])
       : current.filter(id => id !== entryId);
     setSections(prev => prev.map(s => s.id === section.id ? { ...s, glossaryTermIds: next } : s));
-    try {
-      await updateDoc(doc(db, 'users', uid, 'content_sections', section.id), { glossaryTermIds: next });
-    } catch (e) {
-      console.error('Section link failed:', e);
-    }
+    queueWrite(() => updateDoc(doc(db, 'users', uid, 'content_sections', section.id), { glossaryTermIds: next }), 'Section link failed:');
   }, []);
 
   const handleDelete = useCallback(async (entryId, cardId) => {
@@ -1242,7 +1341,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     // S6: every write below is queued, so deleting never waits on the
     // network. G2: the deleted card also leaves the in-memory cards, so it
     // stops coming up in this session's Grammar Deck.
-    queueWrite(() => deleteDoc(doc(db, 'users', uid, 'grammar_entries', entryId)), 'Delete entry failed:');
+    entryWrite(uid, () => deleteDoc(doc(db, 'users', uid, 'grammar_entries', entryId)), 'Delete entry failed:');
     if (cardId) {
       queueWrite(() => deleteDoc(doc(db, 'users', uid, 'flashcards', cardId)), 'Delete card failed:');
       updateCards?.(prev => (prev ? prev.filter(c => c.id !== cardId) : prev));
@@ -1278,7 +1377,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       const hasRef = chips.some(c => c.toLowerCase().trim() === deletedTerm.toLowerCase().trim());
       if (hasRef) {
         const next = chips.filter(c => c.toLowerCase().trim() !== deletedTerm.toLowerCase().trim()).join(' | ');
-        queueWrite(() => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { compareTo: next }),
+        entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { compareTo: next }),
           `compareTo cleanup failed for ${other.id}`);
       }
     }
@@ -1287,7 +1386,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     const toRenumber = remaining.filter(e => (e.entryNumber || 0) > deletedNumber);
     for (const other of toRenumber) {
       const newNum = (other.entryNumber || 0) - 1;
-      queueWrite(() => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { entryNumber: newNum }),
+      entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { entryNumber: newNum }),
         `Renumber failed for ${other.id}`);
     }
 
@@ -1316,7 +1415,8 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     if (!uid) return;
     if (DEMO) return; // demo: Grammar Index is read-only (7C, decision A)
     const oldTerm = entries.find(e => e.id === entryId)?.glossaryTerm || '';
-    await updateDoc(doc(db, 'users', uid, 'grammar_entries', entryId), { glossaryTerm: newTerm });
+    // OF2: queued, as in handleSave.
+    entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', entryId), { glossaryTerm: newTerm }), 'Grammar Index: rename failed');
     setEntries(prev => {
       const next = prev.map(e => e.id === entryId ? { ...e, glossaryTerm: newTerm } : e);
       updateCache(next);
@@ -1326,7 +1426,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     // Update the linked flashcard's front too
     const cardId = cardMap[entryId];
     if (cardId) {
-      await updateDoc(doc(db, 'users', uid, 'flashcards', cardId), { front: newTerm });
+      queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', cardId), withCardStamp({ front: newTerm })), 'Grammar Index: card rename failed');
       // Keep in-memory cards in sync so the next session sees the new title immediately.
       updateCards?.(prev => prev?.map(c => c.id === cardId ? { ...c, front: newTerm } : c) ?? prev);
     }
@@ -1338,11 +1438,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       if (idx !== -1) {
         chips[idx] = newTerm;
         const next = chips.join(' | ');
-        try {
-          await updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { compareTo: next });
-        } catch (e) {
-          console.error('compareTo rename sync failed for', other.id, e);
-        }
+        entryWrite(uid, () => updateDoc(doc(db, 'users', uid, 'grammar_entries', other.id), { compareTo: next }), 'Grammar Index: compare-to rename sync failed');
         setEntries(prev => prev.map(e => e.id === other.id ? { ...e, compareTo: next } : e));
       }
     }
@@ -1378,9 +1474,11 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
     const now         = new Date().toISOString();
     // setDoc on an id confirmed free above — never updateDoc, which would
     // write onto an existing entry if the id were taken.
-    await setDoc(doc(db, 'users', uid, 'grammar_entries', entryId), {
+    const created = setDoc(doc(db, 'users', uid, 'grammar_entries', entryId), {
       ...fields, entryNumber, createdAt: now,
     });
+    bumpGrammarEntriesMarker(uid, { inMemory: true }); // issued after the entry
+    await created;
     const cardData = {
       type: 'grammar', front: fields.glossaryTerm, back: fields.compareTo || '', notes: '',
       deckIds: [GRAMMAR_DECK_ID], linkedGrammarEntryId: entryId, linkedAVILemmaId: null,
@@ -1389,7 +1487,7 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
       lastGrade: null, lastReviewed: null, gapEvents: [],
       triageBucket: null, lastTriageDate: null, createdAt: now,
     };
-    const cardRef = await addDoc(collection(db, 'users', uid, 'flashcards'), cardData);
+    const cardRef = await addDoc(collection(db, 'users', uid, 'flashcards'), withCardStamp(cardData));
     // G2 (create half): the new card joins the in-memory deck now, so it is
     // in the Grammar Deck without waiting for the next refresh or reload.
     updateCards?.(prev => (prev ? [...prev, { id: cardRef.id, ...cardData }] : prev));
@@ -1473,9 +1571,12 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
 
   // Lift the full entries array to App so the Grammar Deck picker in FlashcardsPage
   // has live data even before this page has mounted in the current session.
+  // Also keeps this device's copy equal to the page's entries, which is what
+  // entryWrite's marker bumps vouch for (not before the first load).
   useEffect(() => {
     if (onEntriesChange) onEntriesChange(entries);
-  }, [entries, onEntriesChange]);
+    if (!loading) rememberGrammarEntries(entries);
+  }, [entries, onEntriesChange, loading]);
 
   // ↑/↓ navigate entries with cross-page support; Escape closes the detail panel.
   // No-ops automatically when focus is in the search box or any inline edit input.
@@ -1642,6 +1743,18 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
             )}
           </div>
 
+          {/* G3 (GS-D15): finished sections whose sentences have not been
+              looked through for sightings. Shown only when some are waiting. */}
+          {!DEMO && sightingsWaiting.length > 0 && (
+            <button onClick={() => setSightingsOpen(true)} data-sightings-line
+              style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: '12px', padding: 0, background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', color: C.textS }}>
+              <span style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textM }}>Sightings to review</span>
+              <span style={{ fontFamily: SH.fm, color: C.accent }}>{sightingsWaiting.length}</span>
+              <span>{sightingsWaiting.length === 1 ? 'finished section' : 'finished sections'}</span>
+              <span style={{ color: C.textM }}>›</span>
+            </button>
+          )}
+
           <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '16px', paddingBottom: '16px', borderBottom: `1px solid ${C.border}` }}>
             {FILTERS.map(f => {
               const active = filter === f.id;
@@ -1765,9 +1878,23 @@ export function GrammarIndexPage({ onNavigateToFlashcard, onNavigateToNote, onNa
             onNavigateToContent={onNavigateToContent}
             onNavigateToEntry={(entry) => { setSelected(entry); }}
             onAddQuestion={handleAddQuestion}
+            onOpenSightings={(entry) => setSightingsEntryId(entry.id)}
             C={C} S={S}
           />
         </div>
+      )}
+
+      {(sightingsOpen || sightingsEntryId) && (
+        <GrammarSightings
+          key={sightingsEntryId || 'units'}
+          units={sightingsWaiting} entries={entries}
+          sentenceRows={sentenceInputs} entryId={sightingsEntryId}
+          startUnitKey={sightingsStart}
+          onSaveEntry={handleSave} onStampUnit={stampSightingsUnit}
+          onOpenSource={onNavigateToContent}
+          onClose={closeSightings}
+          C={C} S={S}
+        />
       )}
     </div>
   );

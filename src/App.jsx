@@ -1,15 +1,21 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { doc, updateDoc, collection, getDocs, getDocsFromServer, writeBatch, query, where, setDoc, getDoc, onSnapshot, deleteDoc, deleteField } from 'firebase/firestore';
+import { doc, updateDoc, collection, getDocs, getDocsFromServer, getDocsFromCache, writeBatch, query, where, setDoc, getDoc, onSnapshot, deleteDoc, deleteField } from 'firebase/firestore';
+import { queueWrite } from './utils/queuedWrite.js';
+import { useNewVersion } from './hooks/useNewVersion.js';
+import {
+  newestStamp, mergeChangedCards, createBumper, createRefreshGate,
+  bumpCardsMarker, watchCardsMarker, readCardsChangedSince, onReviewInProgress,
+} from './utils/cardsMarker.js';
 import { db, auth } from './firebase.js';
 import { ThemeContext } from './theme/ThemeContext.js';
 import { useAppTheme } from './hooks/useAppTheme.js';
 import { SH, frameBevelFilled } from './theme/buildStyles.js';
+import { useOrnament } from './components/Ornaments.jsx';
 import { MobileInfoSheet } from './components/MobileInfoSheet.jsx';
 
 import { NavItem } from './components/NavItem.jsx';
-import { ThemePanel } from './components/ThemePanel.jsx';
 import { fmtApptDate, fmtTime } from './components/AppointmentModal.jsx';
 import { AddTaskModal } from './components/AddTaskModal.jsx';
 import { EditTaskModal } from './components/EditTaskModal.jsx';
@@ -23,26 +29,30 @@ import { AppointmentsPage } from './pages/AppointmentsPage.jsx';
 import { SettingsPage } from './pages/SettingsPage.jsx';
 import { GrammarIndexPage } from './pages/GrammarIndexPage.jsx';
 import { ContentLibraryPage, sectionTaskTitle } from './pages/ContentLibraryPage.jsx';
-import { getSourceSections } from './utils/aviUtils.js';
+import { getSourceSections, normalizeLemma } from './utils/aviUtils.js';
+import './utils/lemmaSecondOpinion.js'; // LM4: the analyser as the lemma resolver's second opinion
+import { lackingDef2Rows } from './utils/lackingDef2.js';
+import { loadGrammarEntries, readStored as readStoredGrammar, masteryCounts as grammarMasteryOf } from './utils/grammarEntriesStore.js';
 import { AVISourceSearchSelect } from './components/avi/AVISourceSearchSelect.jsx';
 import { AVIPage } from './pages/AVIPage.jsx';
-import { QuizzesPage } from './pages/QuizzesPage.jsx';
+import { ReadingCompanionPage } from './pages/ReadingCompanionPage.jsx';
 import { NotesPage } from './pages/NotesPage.jsx';
 import { FlashcardsPage } from './pages/FlashcardsPage.jsx';
 
-import { DevDashboard } from './pages/DevDashboard.jsx';
+import { lazyPage } from './components/LazyPage.jsx';
 
 import { birbSrc, decoBlockStyle } from './utils/decoAssets.js';
 
 import { uid, parseDate, toDateStr, getLogicalToday, getLogicalDateStr, getTaskDates, taskOccursOn, isDateDone } from './utils/dateUtils.js';
-import { runDailyPipeline, DAILY_CAP } from './utils/srsEngine.js';
+import { runDailyPipeline, filterActiveCards, DAILY_CAP } from './utils/srsEngine.js';
+import { buildDeferralForecast } from './utils/deferralOutlook.js';
 import { isDueToday } from './utils/fsrs.js';
 import { runRecurrenceEngine, nextDueAfterCompletion, isOverdueTask, isUnscheduledTask } from './utils/recurrenceEngine.js';
 import { mergeSameNameDecks } from './utils/cardDedupe.js';
 import { getOrderedSectionsForSource, sectionDoneWrites } from './utils/contentUtils.js';
 import { loadState, saveState, createInitialTasks } from './utils/storage.js';
-import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow, mergeRemoteData, planRemoteRefresh } from './hooks/useFirestore.js';
-import { DEMO, DEMO_LIMIT_NOTE, demoCapReached, isQuotaError, DEMO_TOUR, tourSampleSnapshot } from './demo/demoConfig.js';
+import { firestoreLoad, useFirestoreSync, firestoreWriteTasksNow, firestoreWriteTaskFields, mergeRemoteData, mergeBootEdits, planRemoteRefresh } from './hooks/useFirestore.js';
+import { DEMO, DEMO_LIMIT_NOTE, demoCapReached, isQuotaError, DEMO_TOUR, tourSampleSnapshot, tourSampleForecast } from './demo/demoConfig.js';
 import { ensureDemoSeed } from './demo/seedCopy.js';
 import { DemoBanner } from './demo/DemoBanner.jsx';
 import { DemoCapacityScreen } from './demo/DemoCapacityScreen.jsx';
@@ -51,14 +61,26 @@ import { useLogicalDay } from './hooks/useLogicalDay.js';
 import { resolveEditTarget, applyTaskEdit, applyFieldEdits, sameValue } from './utils/taskEdit.js';
 import { planFollowUpPromotion } from './utils/apptPromotion.js';
 import {
-  THEME_KEY, SOUND_KEY, QUIZ_SOUND_KEY, CATEGORIES,
+  THEME_KEY, SOUND_KEY, QUIZ_SOUND_KEY, CATEGORIES, themeIdOf,
   NAV_SECTIONS, PAGE_TITLES,
 } from './constants.js';
+
+// Loaded the first time they are opened, not with the rest of the app
+// (offline decisions OF-D4). Don't import these two files normally anywhere:
+// one ordinary import puts the whole page back into the first load
+// (tests/lazy-pages-scan-golden.mjs checks).
+const QuizzesPage  = lazyPage(() => import('./pages/QuizzesPage.jsx'),  m => m.QuizzesPage,  { label: 'Loading quizzes…' });
+const DevDashboard = lazyPage(() => import('./pages/DevDashboard.jsx'), m => m.DevDashboard, { label: 'Loading Dev Dashboard…' });
 
 // ── Shared flashcard data hook ────────────────────────────────
 // Loads decks (phase 1) and cards (phase 2) once for the whole app session.
 // Both FlashcardsPage and QuizzesPage receive this data as props — no duplicate reads.
-// localStorage provides instant first render; Firestore refreshes in the background.
+// Decks: localStorage provides instant first render; Firestore refreshes in
+// the background. Cards (offline decisions OF-D1): first shown from the copy
+// Firestore itself keeps on the device, then refreshed from the server. The
+// localStorage copy of the cards is gone: at about 3,400 cards it was
+// roughly 2.5 MB of a 5 MB limit, rewritten on every grade. FC_CARDS_PREFIX
+// is kept only to remove what older versions left behind.
 const FC_CARDS_PREFIX = 'avi_fc_cards_';
 const FC_DECKS_PREFIX = 'avi_fc_decks_';
 // Per-device, per-uid stamp of the last logical day a forced server read of
@@ -74,12 +96,18 @@ const isMobile = typeof window !== 'undefined' && (window.innerWidth <= 700 || w
 // mode is baked in at module load — reload to re-evaluate. Gated to
 // touch-only devices whose short edge exceeds the phone breakpoint, so
 // phone rotation never triggers it.
+// RC-D2: never on the reading companion. Its layout is fluid, and in split
+// screen or pop-up view "orientation" is the window's shape, so resizing the
+// pane would otherwise reload it (and empty its session list).
 if (
   typeof window !== 'undefined' &&
   window.matchMedia('(hover: none) and (pointer: coarse)').matches &&
   Math.min(window.screen.width, window.screen.height) > 700
 ) {
-  window.matchMedia('(orientation: portrait)').addEventListener('change', () => location.reload());
+  window.matchMedia('(orientation: portrait)').addEventListener('change', () => {
+    if (window.location.hash === '#reading') return;
+    location.reload();
+  });
 }
 
 function fcRead(key) {
@@ -127,31 +155,25 @@ function mergeRowsPreservingIdentity(prev, next) {
   });
 }
 
-// Reads grammar mastery counts from localStorage so FlashcardsPage has data even
-// before GrammarIndexPage mounts in the current session.
+// Grammar entries and their mastery counts from this device's copy, for the
+// first paint; App replaces them from loadGrammarEntries when a page that
+// shows them opens (grammarEntriesStore.js).
 function readGrammarMasteryCounts() {
-  try {
-    const cached = localStorage.getItem('avi_grammar_entries');
-    if (!cached) return null;
-    const entries = JSON.parse(cached);
-    const c = { all: entries.length, introduced: 0, practicing: 0, confident: 0, mastered: 0 };
-    entries.forEach(e => { if (c[e.masteryLevel] !== undefined) c[e.masteryLevel]++; });
-    return c;
-  } catch { return null; }
+  const { rows } = readStoredGrammar(localStorage);
+  return rows ? grammarMasteryOf(rows) : null;
 }
 
-// Same cache, full entries this time — lets the Grammar Deck picker in FlashcardsPage
-// have data even before GrammarIndexPage has mounted in the current session.
 function readGrammarEntries() {
-  try {
-    const cached = localStorage.getItem('avi_grammar_entries');
-    return cached ? JSON.parse(cached) : [];
-  } catch { return []; }
+  return readStoredGrammar(localStorage).rows || [];
 }
+
+// Pages that show grammar entries. Opening one checks the entries marker
+// (one read) and reads the entries only if they changed.
+const GRAMMAR_ENTRY_PAGES = new Set(['flashcards', 'quizzes', 'grammar', 'content']);
 
 function useFlashcardData(uid, dsh = 3) {
   const [decks,        setDecksState]  = useState(() => fcRead(uid ? FC_DECKS_PREFIX + uid : null) || []);
-  const [cards,        setCardsState]  = useState(() => fcRead(uid ? FC_CARDS_PREFIX + uid : null));  // null = not yet loaded
+  const [cards,        setCardsState]  = useState(null);  // null = not yet loaded
   const [fcLoading,    setFcLoading]   = useState(() => !fcRead(uid ? FC_DECKS_PREFIX + uid : null));
 
   const decksKey   = uid ? FC_DECKS_PREFIX + uid : null;
@@ -164,14 +186,40 @@ function useFlashcardData(uid, dsh = 3) {
   dshRef.current = dsh;
   const refreshInFlight = useRef(null);
 
-  // Stable updaters — write through to cache
-  const updateCards = useCallback((updater) => {
-    setCardsState(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      fcWrite(cardsKey, next);
-      return next;
-    });
+  // OF-D1: free the space the old localStorage copy of the cards took.
+  useEffect(() => {
+    if (!cardsKey) return;
+    try { localStorage.removeItem(cardsKey); } catch { /* storage unavailable */ }
   }, [cardsKey]);
+
+  // ── Keeping cards in step across devices (OF-D2; utils/cardsMarker.js) ──
+  // The newest changed-at stamp read from the server so far; the next
+  // "changed since" read starts from it.
+  // Only rows that came from the server count. The on-device copy also
+  // holds this device's own latest writes, and going by their stamps would
+  // skip an older change made elsewhere that this device hasn't read yet.
+  // stampsKnownRef: a full server read has happened, so "nothing newer than
+  // lastStampRef" is a true statement (even while no card is stamped yet).
+  const lastStampRef   = useRef(null);
+  const stampsKnownRef = useRef(false);
+  const noteStamps = useCallback((rows, { fullRead = false } = {}) => {
+    lastStampRef.current = newestStamp(rows, lastStampRef.current);
+    if (fullRead) stampsKnownRef.current = true;
+  }, []);
+  // The startup read of the cards, so a "changed since" read can wait for it.
+  const bootCardsRef = useRef(null);
+  // Says "cards changed here" to the other devices, at most every 30 seconds.
+  const bumper = useMemo(() => createBumper({
+    bump: () => { if (uid) queueWrite(() => bumpCardsMarker(uid), 'App: cards marker update failed'); },
+  }), [uid]);
+
+  // Stable updaters. updateCards is for changes made on this device: it also
+  // lets the other devices know. Rows read from Firestore go in through
+  // setCardsState directly, so a refresh never announces itself as a change.
+  const updateCards = useCallback((updater) => {
+    setCardsState(prev => (typeof updater === 'function' ? updater(prev) : updater));
+    bumper.touch();
+  }, [bumper]);
 
   const updateDecks = useCallback((updater) => {
     setDecksState(prev => {
@@ -229,14 +277,27 @@ function useFlashcardData(uid, dsh = 3) {
     })();
 
     // Phase 2: cards (background — pipeline runs here)
-    (async () => {
+    bootCardsRef.current = (async () => {
+      // OF-D1: first, what Firestore already holds on this device. It is
+      // there in a fraction of a second, with or without a connection, and
+      // is replaced by the server read below. Skipped when the device has
+      // no copy yet, and never put over rows that have already arrived.
+      try {
+        const cached = await getDocsFromCache(collection(db, 'users', uid, 'flashcards'));
+        if (!cached.empty) {
+          const cachedRows = filterCardRows(cached.docs.map(d => ({ id: d.id, ...d.data() })));
+          setCardsState(prev => prev ?? cachedRows);
+        }
+      } catch (e) {
+        console.warn('App: no on-device copy of the cards yet', e);
+      }
       try {
         const cardSnap = await readCol(collection(db, 'users', uid, 'flashcards'));
         const allRows  = cardSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         // Filter out backless vocabulary cards (grammar cards always kept)
         const cardRows = allRows.filter(c => c.type === 'grammar' || (c.back !== '' && c.back != null));
-        setCardsState(cardRows);
-        fcWrite(cardsKey, cardRows);
+        setCardsState(prev => mergeRowsPreservingIdentity(prev, cardRows));
+        if (!cardSnap.metadata?.fromCache) noteStamps(allRows, { fullRead: true });
         bootOk.cards = true;
         maybeStamp();
       } catch (e) {
@@ -245,6 +306,20 @@ function useFlashcardData(uid, dsh = 3) {
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
+
+  // Decks and every card, from the server (throws when it can't be reached).
+  const readAllFromServer = useCallback(async () => {
+    const [deckSnap, cardSnap] = await Promise.all([
+      getDocsFromServer(collection(db, 'users', uid, 'decks')),
+      getDocsFromServer(collection(db, 'users', uid, 'flashcards')),
+    ]);
+    const deckRows = sortDeckRows(deckSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+    const allRows  = cardSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const cardRows = filterCardRows(allRows);
+    updateDecks(prev => mergeRowsPreservingIdentity(prev, deckRows));
+    setCardsState(prev => mergeRowsPreservingIdentity(prev, cardRows));
+    noteStamps(allRows, { fullRead: true });
+  }, [uid, updateDecks, noteStamps]);
 
   // Resume-time daily refresh. Warm resumes (bfcache / PWA restore) never
   // re-run the load effect above, so without this a card edited on another
@@ -263,14 +338,7 @@ function useFlashcardData(uid, dsh = 3) {
     if (fcRead(refreshKey) === todayStr) return Promise.resolve();
     refreshInFlight.current = (async () => {
     try {
-      const [deckSnap, cardSnap] = await Promise.all([
-        getDocsFromServer(collection(db, 'users', uid, 'decks')),
-        getDocsFromServer(collection(db, 'users', uid, 'flashcards')),
-      ]);
-      const deckRows = sortDeckRows(deckSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      const cardRows = filterCardRows(cardSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      updateDecks(prev => mergeRowsPreservingIdentity(prev, deckRows));
-      updateCards(prev => mergeRowsPreservingIdentity(prev, cardRows));
+      await readAllFromServer();
       fcWrite(refreshKey, todayStr);
     } catch (e) {
       console.warn('App: daily flashcard refresh failed (will retry on next trigger)', e);
@@ -279,7 +347,57 @@ function useFlashcardData(uid, dsh = 3) {
     }
     })();
     return refreshInFlight.current;
-  }, [uid, refreshKey, updateDecks, updateCards]);
+  }, [uid, refreshKey, readAllFromServer]);
+
+  // OF-D2: another device changed cards (the marker moved). Read only the
+  // cards stamped since the newest one seen here, and the decks with them
+  // (a few dozen documents; a new deck or a changed count comes along).
+  // At most once a minute and never during a review: the gate holds the
+  // read until the session ends. The daily read above stays as the
+  // fallback for deleted cards and any write that missed the stamp.
+  const readChangedCards = useCallback(async () => {
+    if (!uid) return;
+    try {
+      // Let the startup read finish first; it may make this one unnecessary.
+      try { await bootCardsRef.current; } catch { /* its own handler logged it */ }
+      // No full server read yet on this run (the app started offline, from
+      // the on-device copy): there is no "since" to ask from, so read all.
+      if (!stampsKnownRef.current) { await readAllFromServer(); return; }
+      const [rows, deckSnap] = await Promise.all([
+        readCardsChangedSince(uid, lastStampRef.current),
+        getDocsFromServer(collection(db, 'users', uid, 'decks')),
+      ]);
+      const deckRows = sortDeckRows(deckSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      updateDecks(prev => mergeRowsPreservingIdentity(prev, deckRows));
+      if (!rows.length) return;
+      noteStamps(rows);
+      setCardsState(prev => mergeChangedCards(prev, rows, c => filterCardRows([c]).length > 0));
+    } catch (e) {
+      console.warn('App: reading changed cards failed (the daily refresh will catch up)', e);
+    }
+  }, [uid, updateDecks, noteStamps, readAllFromServer]);
+  const changedGate = useMemo(() => createRefreshGate({ run: readChangedCards }), [readChangedCards]);
+  useEffect(() => {
+    if (!uid) return;
+    const stopWatching = watchCardsMarker(uid, changedGate.request);
+    // A review holds the read; when it ends, the read (if one is waiting)
+    // runs and the marker update for the session's last grades goes out.
+    const stopReview = onReviewInProgress((active) => {
+      changedGate.hold(active);
+      if (!active) bumper.flush();
+    });
+    const flushIfHidden = () => { if (document.visibilityState === 'hidden') bumper.flush(); };
+    const flushNow = () => bumper.flush();
+    document.addEventListener('visibilitychange', flushIfHidden);
+    window.addEventListener('pagehide', flushNow);
+    return () => {
+      stopWatching();
+      stopReview();
+      changedGate.cancel();
+      document.removeEventListener('visibilitychange', flushIfHidden);
+      window.removeEventListener('pagehide', flushNow);
+    };
+  }, [uid, changedGate, bumper]);
 
   return { cards, decks, fcLoading, updateCards, updateDecks, refreshFlashcardsIfStale };
 }
@@ -359,12 +477,35 @@ function AVISourceSelector({ sources, sections, currentSource, currentSection, o
   );
 }
 
+// ── Reading companion button (RC-D4) ─────────────────────────
+// In the header on AVI: between the source selector and Nav on mobile, to
+// the right of the source and section selectors on desktop. Styled like the
+// Content Library's Module Reader button, so it doesn't read as a chip.
+function ReadingCompanionButton({ onOpen, C }) {
+  const orn = useOrnament();
+  return (
+    <button type="button" onClick={onOpen} aria-label="Open the reading companion" title="Reading companion"
+      style={{
+        minHeight: isMobile ? 38 : 34, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px',
+        cursor: 'pointer', padding: isMobile ? '0 11px' : '0 14px', flexShrink: 0,
+        fontFamily: SH.fp, fontSize: '13px', fontWeight: 700, letterSpacing: '0.08em',
+        background: C.accent, color: C.accentText || '#ffffff', border: `1px solid ${C.accent}`,
+        boxShadow: `inset 0 0 0 2px ${C.accent}, inset 0 0 0 3px rgba(255,255,255,0.5)`,
+      }}>
+      <svg aria-hidden="true" width="16" height="15" viewBox="0 0 16 15"><path d="M8 3.2C6.4 2 4.2 1.6 1.5 1.8v10.4c2.7-.2 4.9.2 6.5 1.4 1.6-1.2 3.8-1.6 6.5-1.4V1.8C11.8 1.6 9.6 2 8 3.2z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><line x1="8" y1="3.2" x2="8" y2="13.6" stroke="currentColor" strokeWidth="1.4" /><polygon points="8,6.6 9.4,8 8,9.4 6.6,8" fill={orn.jewel} /></svg>
+      Reading
+    </button>
+  );
+}
+
 // ── Pages reachable by hash (U4) ──────────────────────────────────────────────
 // Every nav item plus Settings. A reload or Back/Forward to one of these
 // opens it; anything else (an empty hash) is Today. The old hard-coded list
 // left out Finance and Health (a reload there went to Today) and had a
 // 'notes' page the app doesn't render.
-const PAGE_IDS = new Set([...NAV_SECTIONS.flatMap(s => s.items.map(i => i.id)), 'settings']);
+// RC-D2/RC-D3: plus the reading companion (#reading; the installed app's
+// "Reading companion" shortcut opens it).
+const PAGE_IDS = new Set([...NAV_SECTIONS.flatMap(s => s.items.map(i => i.id)), 'settings', 'reading']);
 function pageFromHash(hash) {
   const id = String(hash || '').replace(/^#/, '');
   if (!id) return 'today';
@@ -388,7 +529,6 @@ const NAV_ICONS = {
 // ── Inner app (consumes ThemeContext) ─────────────────────────────────────────
 function InnerApp({
   data, page, setPage,
-  themeOpen, setThemeOpen,
   addOpen, setAddOpen, addCat,
   editTask, editOpen, openEdit, closeEdit,
   saveTask, deleteTask,
@@ -400,9 +540,9 @@ function InnerApp({
   quizSoundsEnabled, setQuizSoundsEnabled,
   syncStatus, user, onSignOut,
   flashcardDue,
-  srsSnapshot, onPipelineResult,
+  srsSnapshot, deferralForecast,
   cards, decks, fcLoading, updateCards, updateDecks,
-  noteTarget, setNoteTarget, grammarTarget, setGrammarTarget,
+  noteTarget, setNoteTarget, grammarTarget, setGrammarTarget, sightingsTarget, setSightingsTarget,
   grammarMasteryCounts, onMasteryCounts, getCardNextDueDate, onCardNextDueDateChanged,
   grammarEntries, onEntriesChange, flashcardStudyTarget, setFlashcardStudyTarget,
   echoDeckTarget, setEchoDeckTarget,
@@ -426,7 +566,22 @@ function InnerApp({
     if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [page]);
   const [moreOpen,              setMoreOpen]              = useState(false);
+  // A Settings tab to open on arrival (the More menu's Appearance entry).
+  const [settingsTabRequest,    setSettingsTabRequest]    = useState(null);
   const [pendingApptLink,       setPendingApptLink]       = useState(null);
+  // Reading companion (RC-D12): a session entry opens in AVI's Search tab.
+  const [aviSearchTarget,       setAviSearchTarget]       = useState(null);
+  // Lacking Def2 (audit B5): how many words have no Definition 2, for
+  // Today's flag. Tapping it sends a request to AVI, which hosts the queue
+  // (the Import tab's Fill Def2 modal) because it has what the modal needs
+  // loaded; closing the queue comes back to Today.
+  const lackingDef2 = useMemo(() => lackingDef2Rows(aviWordInputs, normalizeLemma), [aviWordInputs]);
+  const [def2QueueRequest, setDef2QueueRequest] = useState(null); // { uids, uid, from: 'today' } | null
+  const openDef2QueueFromToday = useCallback(() => {
+    if (!lackingDef2.length) return;
+    setDef2QueueRequest({ uids: lackingDef2.map(r => r.uid), uid: lackingDef2[0].uid, from: 'today' });
+    setPage('avi');
+  }, [lackingDef2, setPage]);
   const [clTriggerAddSource,    setCLTriggerAddSource]    = useState(0);
   const [clTriggerAddQuestion,  setCLTriggerAddQuestion]  = useState(0);
   const [clTriggerAddNote,      setCLTriggerAddNote]      = useState(0);
@@ -515,6 +670,33 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
   const sharedPageProps = { tasks, onToggle: toggleTask, onEdit: openEdit, dsh, soundProfile, updateData, flashcardDue, settings: data.settings || {}, appointments,
  };
 
+  // ── Reading companion (RC-D2): its own page, without the sidebar, topbar
+  // or tab bar, for a split-screen pane or a pop-up window beside a reader.
+  if (page === 'reading') {
+    return (
+      <>
+        <style>{G}</style>
+        <ReadingCompanionPage
+          cards={cards}
+          decks={decks}
+          updateCards={updateCards}
+          updateDecks={updateDecks}
+          aviSources={aviSources}
+          aviSections={aviSections}
+          wordInputs={aviWordInputs}
+          sentenceInputs={aviSentenceInputs}
+          inputsLoaded={aviInputsLoaded}
+          settings={data.settings || {}}
+          onAVIInputsChange={onAVIInputsChange}
+          onAviSettingsChange={onAviSettingsChange}
+          onSectionComplete={onSectionComplete}
+          onOpenAVI={() => setPage('avi')}
+          onOpenInSearch={(q) => { setAviSearchTarget(q || ''); setPage('avi'); }}
+        />
+      </>
+    );
+  }
+
   return (
     <>
       <style>{G}</style>
@@ -529,7 +711,10 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
             bottom: 0,
             width: 'calc((100vw - 220px) / 3)',
             pointerEvents: 'none',
-            zIndex: 9,
+            // On Today the image sits one layer down so the Lacking Def2
+            // flag, which hangs off the reviews card, can show over it
+            // (audit B5). Nothing else on Today reaches under the image.
+            zIndex: page === 'today' ? 0 : 9,
           }}>
             {birbSrc ? (
               <img
@@ -579,7 +764,6 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
             <div style={{ height: '60px' }} />
           </div>
           <div style={S.sidebarBottom}>
-            <NavItem icon={Icons.palette} label="Appearance" active={false} onClick={() => setThemeOpen(true)} collapsed={sidebarCollapsed} />
             <NavItem icon={Icons.gear} label="Settings" active={page === 'settings'} onClick={() => setPage('settings')} collapsed={sidebarCollapsed} />
 
             {/* Sync status -- the dot stays as the ambient sync-error
@@ -616,13 +800,16 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
         <main style={S.main}>
           <div style={{ ...S.topbar, justifyContent: isMobile ? 'center' : 'space-between', ...(isMobile && (page === 'flashcards' || page === 'quizzes' || page === 'grammar' || page === 'upcoming') && { height: 0, minHeight: 0, overflow: 'hidden', borderBottom: 'none', padding: 0 }) }}>
             {page === 'avi'
-              ? <AVISourceSelector
-                  sources={aviSources} sections={aviSections}
-                  currentSource={data.settings?.aviCurrentSource || ''}
-                  currentSection={data.settings?.aviCurrentSection || ''}
-                  onUpdate={onAVISourceUpdate}
-                  C={C} S={S}
-                />
+              ? <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                  <AVISourceSelector
+                    sources={aviSources} sections={aviSections}
+                    currentSource={data.settings?.aviCurrentSource || ''}
+                    currentSection={data.settings?.aviCurrentSection || ''}
+                    onUpdate={onAVISourceUpdate}
+                    C={C} S={S}
+                  />
+                  {!isMobile && <ReadingCompanionButton onOpen={() => setPage('reading')} C={C} />}
+                </div>
               : DEMO
               ? <div className="topbar-desktop" style={{ display: 'flex', alignItems: 'center' }}>
                   <DemoBanner variant="chip" />
@@ -646,7 +833,7 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                 </>
               )}
               {page === 'avi' && isMobile
-                ? <div id="avi-nav-slot" />
+                ? <><ReadingCompanionButton onOpen={() => setPage('reading')} C={C} /><div id="avi-nav-slot" /></>
                 : (page === 'content' || page === 'flashcards' || page === 'quizzes') && isMobile
                 ? null
                 : <QuickAddButtons onAdd={cat => openAddTask(cat)} />
@@ -659,7 +846,10 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
               <TodayPage
                 {...sharedPageProps}
                 cards={cards}
+                lackingDef2Count={lackingDef2.length}
+                onOpenDef2Queue={openDef2QueueFromToday}
                 srsSnapshot={srsSnapshot}
+                deferralForecast={deferralForecast}
               />
             )}
             {page === 'upcoming'    && <UpcomingPage     {...sharedPageProps} clSources={aviSources} clSections={aviSections} onPlannerCommit={plannerCommit} />}
@@ -697,18 +887,19 @@ const [clTriggerAddCorrection,setCLTriggerAddCorrection]= useState(0);
                 user={user}
                 syncStatus={syncStatus}
                 onSignOut={onSignOut}
-                onOpenTheme={() => setThemeOpen(true)}
+                tabRequest={settingsTabRequest}
+                onTabRequestDone={() => setSettingsTabRequest(null)}
               />
             )}
-{page === 'grammar'    && <GrammarIndexPage defaultOpenEntryId={grammarTarget} onNavigateToFlashcard={(cardIdOrIds) => { setFlashcardStudyTarget(Array.isArray(cardIdOrIds) ? cardIdOrIds : [cardIdOrIds]); setPage('flashcards'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} onNavigateToContent={(sourceId) => { setContentSourceTarget(sourceId); setPage('content'); }} onMasteryCounts={onMasteryCounts} onEntriesChange={onEntriesChange} getCardNextDueDate={getCardNextDueDate} onCardNextDueDateChanged={onCardNextDueDateChanged} updateCards={updateCards} cards={cards} dsh={dsh} />}
-{page === 'content'  && <ContentLibraryPage showDecoPanel={showDecoPanel} soundProfile={soundProfile} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} addTask={addTask} defaultOpenSourceId={contentSourceTarget} onNavigateToCorrection={(id) => { setCorrectionSessionTarget(id); setPage('content'); }}
+{page === 'grammar'    && <GrammarIndexPage defaultOpenEntryId={grammarTarget} sightingsRequest={sightingsTarget} onSightingsRequestConsumed={() => setSightingsTarget(null)} sentenceInputs={aviSentenceInputs} librarySources={aviSources} librarySections={aviSections} onNavigateToFlashcard={(cardIdOrIds) => { setFlashcardStudyTarget(Array.isArray(cardIdOrIds) ? cardIdOrIds : [cardIdOrIds]); setPage('flashcards'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} onNavigateToContent={(sourceId) => { setContentSourceTarget(sourceId); setPage('content'); }} onMasteryCounts={onMasteryCounts} onEntriesChange={onEntriesChange} getCardNextDueDate={getCardNextDueDate} onCardNextDueDateChanged={onCardNextDueDateChanged} updateCards={updateCards} cards={cards} dsh={dsh} />}
+{page === 'content'  && <ContentLibraryPage showDecoPanel={showDecoPanel} soundProfile={soundProfile} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onReviewSightings={(unitKey) => { setGrammarTarget(null); setSightingsTarget(unitKey); setPage('grammar'); }} onNavigateToNote={(noteId) => { setNoteTarget(noteId); setPage('content'); }} addTask={addTask} defaultOpenSourceId={contentSourceTarget} onNavigateToCorrection={(id) => { setCorrectionSessionTarget(id); setPage('content'); }}
  aviSources={aviSources} aviSections={aviSections} aviWordSectionCounts={aviWordSectionCounts} aviSentSectionCounts={aviSentSectionCounts} onSourcesChange={onSourcesChange} onSectionsChange={onSectionsChange} onSourceRename={onSourceRename} tasks={tasks} onCompleteLinkedTask={toggleTask} patchTask={patchTask} registerSectionUpdateCallback={registerSectionUpdateCallback} settings={data.settings || {}} appointments={appointments} cards={cards || []} decks={decks || []} grammarMasteryCounts={grammarMasteryCounts} noteTarget={noteTarget} correctionTarget={correctionTarget} correctionSessionTarget={correctionSessionTarget} pendingApptLink={pendingApptLink} onApptLinkConsumed={() => setPendingApptLink(null)}
 wordInputs={aviWordInputs} sentenceInputs={aviSentenceInputs}
 updateCards={updateCards} updateDecks={updateDecks} onSourceCascadeComplete={onSourceCascadeComplete}
 triggerAddSource={clTriggerAddSource} triggerAddQuestion={clTriggerAddQuestion}
 triggerAddNote={clTriggerAddNote} triggerAddCorrection={clTriggerAddCorrection}
 onDeleteTask={deleteTask} />}
-{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} addTask={addTask} tasks={tasks} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} onNotice={showToast} aviSources={aviSources} />}
+{page === 'flashcards' && <FlashcardsPage soundProfile={soundProfile} dsh={dsh} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} cards={cards} decks={decks} fcLoading={fcLoading} updateCards={updateCards} updateDecks={updateDecks} grammarMasteryCounts={grammarMasteryCounts} grammarEntries={grammarEntries} flashcardStudyTarget={flashcardStudyTarget} setFlashcardStudyTarget={setFlashcardStudyTarget} fsrsSettings={data.settings?.fsrs || {}} srsSnapshot={srsSnapshot} deferralForecast={deferralForecast} settings={data.settings || {}} onEchoDeck={(deckId) => { setEchoDeckTarget(deckId); setPage('quizzes'); }} onNotice={showToast} aviSources={aviSources} sentenceInputs={aviSentenceInputs} />}
 {page === 'quizzes' && <QuizzesPage soundProfile={soundProfile} quizSoundsEnabled={quizSoundsEnabled} cards={cards} decks={decks} settings={data.settings || {}} grammarEntries={grammarEntries} onNavigateToGrammar={(entryId) => { setGrammarTarget(entryId); setPage('grammar'); }} onPracticeGrammarCards={(cardIds) => { setFlashcardStudyTarget(cardIds); setPage('flashcards'); }} wordInputs={aviWordInputs} aviSources={aviSources} aviSections={aviSections} echoDeckTarget={echoDeckTarget} onEchoDeckTargetUsed={() => setEchoDeckTarget(null)} onNotice={showToast} />}
 {page === 'avi' && (
   <AVIPage
@@ -727,6 +918,11 @@ onDeleteTask={deleteTask} />}
     inputsLoaded={aviInputsLoaded}
     settings={data.settings || {}}
     onNavigateToFlashcards={() => setPage('flashcards')}
+    searchTarget={aviSearchTarget}
+    onSearchTargetConsumed={() => setAviSearchTarget(null)}
+    def2QueueRequest={def2QueueRequest}
+    onDef2QueueRequestConsumed={() => setDef2QueueRequest(null)}
+    onDef2QueueReturn={() => setPage('today')}
   />
 )}
             {/* U6: bottom clearance on phones/tablets for every page (CSS shows
@@ -736,7 +932,6 @@ onDeleteTask={deleteTask} />}
         </main>
 
         {/* PANELS & MODALS */}
-        <ThemePanel open={themeOpen} onClose={() => setThemeOpen(false)} />
         <AddTaskModal
           open={addOpen}
           onClose={() => setAddOpen(false)}
@@ -800,7 +995,7 @@ onDeleteTask={deleteTask} />}
                     return (
                       <div key={item.id}
                         onClick={() => {
-                          if (item.id === '__appearance') { setThemeOpen(true); setMoreOpen(false); }
+                          if (item.id === '__appearance') { setSettingsTabRequest('appearance'); setPage('settings'); setMoreOpen(false); }
                           else { setPage(item.id); setMoreOpen(false); }
                         }}
                         style={{
@@ -883,7 +1078,7 @@ export default function App() {
 
   // ── Theme ───────────────────────────────────────────────────
   const [themeState, setThemeState] = useState(() => {
-    try { return localStorage.getItem(THEME_KEY) || 'ember'; } catch { return 'ember'; }
+    try { return themeIdOf(localStorage.getItem(THEME_KEY) || 'ember'); } catch { return 'ember'; }
   });
   const setTheme = useCallback((t) => {
     setThemeState(t);
@@ -915,8 +1110,35 @@ export default function App() {
   // S1: the latest rendered data, for refreshes that merge after an await.
   const dataRef = useRef(data);
   dataRef.current = data;
+  // SY-D1: the device's saved copy exactly as first shown. When the server
+  // copy arrives, whatever differs from this on screen was changed while it
+  // loaded and is kept. Cleared once the first load has been applied.
+  const openedDataRef = useRef(data);
+
+  // SY-D3: a save found these tasks deleted on another device. They are not
+  // written back; take them off the screen and say so (goneNoticeRef is
+  // filled in once showToast exists, further down).
+  const goneNoticeRef = useRef(null);
+  const dropGoneTasks = useCallback((ids) => {
+    if (!ids || !ids.length) return;
+    setData(prev => {
+      const tasks = (prev.tasks || []).filter(t => !ids.includes(t.id));
+      return tasks.length === (prev.tasks || []).length ? prev : { ...prev, tasks };
+    });
+    if (goneNoticeRef.current) goneNoticeRef.current(ids.length);
+  }, []);
 
   const [dataLoaded, setDataLoaded] = useState(false); // true once Firestore load completes
+  // OF-D3: a newer build has been deployed. Offers a reload; "Later" hides
+  // the banner until the next time the app comes back to the front.
+  const newVersion = useNewVersion();
+  const [newVersionLater, setNewVersionLater] = useState(false);
+  useEffect(() => {
+    if (!newVersion) return undefined;
+    const show = () => { if (document.visibilityState === 'visible') setNewVersionLater(false); };
+    document.addEventListener('visibilitychange', show);
+    return () => document.removeEventListener('visibilitychange', show);
+  }, [newVersion]);
   const [loadFailed, setLoadFailed] = useState(false);   // remote load exhausted all retries
   const [loadRetryNonce, setLoadRetryNonce] = useState(0); // bump to re-run the load effect
 
@@ -950,11 +1172,20 @@ export default function App() {
           settings: remote.settings || {},
           tasks: changed ? updatedTasks : (remote.tasks || []),
         };
-        setData(next);
-        // Seed lastSynced so the first debounced flush only writes local changes.
+        // SY-D1: the server copy wins, as before, but an edit made while it
+        // was loading (a task ticked in the first second or two, or anything
+        // done after "couldn't load") is put back on top of it, field by
+        // field. Data that was merely old on this device still loses: it
+        // doesn't differ from what was first shown (mergeBootEdits).
+        const opened = openedDataRef.current;
+        openedDataRef.current = null;
+        const screen = mergeBootEdits(dataRef.current, next, opened);
+        setData(prev => mergeBootEdits(prev, next, opened));
+        // Seed lastSynced with the server copy, so the first debounced flush
+        // writes only local changes (which now includes those kept edits).
         seedLastSynced(next);
-        // Keep localStorage in sync with what came from Firestore        
-        saveState(next);
+        // Keep localStorage in sync with what came from Firestore
+        saveState(screen);
         // If the engine advanced tasks on load, write back to Firestore immediately
         // so a reload always gets the correct advanced state rather than stale data.
         // N1: tasks that came back with render-only markers are written back
@@ -962,20 +1193,20 @@ export default function App() {
         const repairedIds = remote.repairedTaskIds || [];
         if (changed || repairedIds.length) {
           const writeBase = (remote.tasks || []).filter(t => !repairedIds.includes(t.id));
-          firestoreWriteTasksNow(user.uid, next.tasks, writeBase).catch(e =>
+          firestoreWriteTasksNow(user.uid, next.tasks, writeBase).then(dropGoneTasks).catch(e =>
             console.warn('AVI: post-engine Firestore write failed', e)
           );
         }
-        // Restore theme from Firestore settings if present
-        if (remote.settings?.theme) {
-          setThemeState(remote.settings.theme);
-          try { localStorage.setItem(THEME_KEY, remote.settings.theme); } catch {}
+        // Restore theme from Firestore settings if present (or the theme
+        // picked while loading, which mergeBootEdits kept).
+        if (screen.settings?.theme) {
+          const restored = themeIdOf(screen.settings.theme);
+          setThemeState(restored);
+          try { localStorage.setItem(THEME_KEY, restored); } catch {}
         }
       }
-        // Load Content Library sources/sections for AVI source selector
-      getDocs(collection(db, 'users', user.uid, 'content_sections'))
-          .then(snap => setAviSections(snap.docs.map(d => ({ id: d.id, ...d.data() }))))
-          .catch(() => {});
+        // Content Library sources and sections come from their live listeners
+        // (below); audit SY4 removed a second read of content_sections here.
         Promise.all([
           getDocs(collection(db, 'users', user.uid, 'wordInputs'))
             .then(snap => {
@@ -1014,7 +1245,7 @@ export default function App() {
   const { cards, decks, fcLoading, updateCards, updateDecks, refreshFlashcardsIfStale } = useFlashcardData(seedReady ? (user?.uid ?? null) : null, data.settings?.dayStartHour ?? 3);
 
   // Deck IDs whose whole set is paused — held out of due counts, triage, and
-  // the spike forecast (Phase D2).
+  // the deferral notices (Phase D2).
   const pausedDeckIds = useMemo(
     () => decks.filter(d => d.paused).map(d => d.id),
     [decks],
@@ -1036,7 +1267,7 @@ export default function App() {
   // ── SRS pipeline — runs once per logical day on first card load ──
   // Keyed by uid + logical date so it re-runs on a new day even without a reload.
   const [srsSnapshot, setSrsSnapshot] = useState({
-    dueAtDayStart: 0, spikes: [], triaged: 0, spikeDetected: false,
+    dueAtDayStart: 0, triaged: 0,
   });
   const pipelineRanForUid = useRef(null);
   // P2: bumped on a day flip so the pipeline re-runs without re-reading
@@ -1054,40 +1285,10 @@ export default function App() {
     pipelineRanForUid.current = pipelineKey;
     (async () => {
       try {
-        const pipelineResult = await runDailyPipeline(uid, cards, dsh, DEMO ? () => null : addTask, data.tasks ?? [], pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
+        const pipelineResult = await runDailyPipeline(uid, cards, dsh, pausedDeckIds, data.settings?.srsSpikeCap ?? DAILY_CAP);
         const { cardUpdates, ...result } = pipelineResult || {};
-        if (pipelineResult) setSrsSnapshot(DEMO_TOUR ? tourSampleSnapshot(result, logicalDate) : result);
+        if (pipelineResult) setSrsSnapshot(DEMO_TOUR ? tourSampleSnapshot(result) : result);
 
-        // Rollover reconcile: the spike task's title count was frozen days ago
-        // from an exact-date forecast. On the task's own day, rewrite it to the
-        // actual day-start total (dueAtDayStart, which includes carry-over); if
-        // that is at or under the cap, auto-complete the task instead. Marked
-        // per day so a later reload never overrides a manual uncheck or rename.
-        // Pure in-memory check; at most one task write per day.
-        if (typeof result?.dueAtDayStart === 'number') {
-          const n   = result.dueAtDayStart;
-          const cap = data.settings?.srsSpikeCap ?? DAILY_CAP;
-          setData(prev => {
-            let changed = false;
-            const tasksNext = (prev.tasks || []).map(t => {
-              if (t.source !== 'srs_forecast' || t.date !== logicalDate) return t;
-              if (t.completed || t.srsReconciledDate === logicalDate) return t;
-              const title = typeof t.title === 'string'
-                ? t.title.replace(/\(\d+ cards due\)/, `(${n} cards due)`)
-                : t.title;
-              const complete = n <= cap;
-              if (title === t.title && !complete) return t;
-              changed = true;
-              return {
-                ...t,
-                title,
-                srsReconciledDate: logicalDate,
-                ...(complete ? { completed: true, completedAt: new Date().toISOString() } : {}),
-              };
-            });
-            return changed ? { ...prev, tasks: tasksNext } : prev;
-          });
-        }
         // If triage moved overdue cards, bring card state up to date.
         // P2: triage run here hands back what it wrote, so it's applied in
         // memory. A plan read back from earlier today (this device or
@@ -1117,10 +1318,20 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, cards, dataLoaded, pipelineTick]);
 
-  // Called by FlashcardsPage after each session ends (spike-only re-run result).
-  const onPipelineResult = useCallback((result) => {
-    if (result) setSrsSnapshot(prev => ({ ...prev, ...result }));
-  }, []);
+  // ── Deferral notices (DF-D6) ─────────────────────────────────
+  // What the daily cap will defer on each of the next 7 days, worked out
+  // live from the cards in memory (so it is current straight after a grade,
+  // and the same on every device), plus the cards deferred right now. Held
+  // until today's pipeline has run, so a pile about to be trimmed isn't
+  // forecast from. Shown on Today and Flashcards.
+  const srsCap = data.settings?.srsSpikeCap ?? DAILY_CAP;
+  const deferralForecast = useMemo(() => {
+    if (!cards) return null;
+    const dsh = data.settings?.dayStartHour ?? 3;
+    if (srsSnapshot.date !== getLogicalDateStr(dsh)) return null;
+    if (DEMO_TOUR) return tourSampleForecast(srsSnapshot.date);
+    return buildDeferralForecast(filterActiveCards(cards, pausedDeckIds), { cap: srsCap, dsh });
+  }, [cards, pausedDeckIds, srsCap, data.settings?.dayStartHour, srsSnapshot.date]);
   const [grammarMasteryCounts, setGrammarMasteryCounts] = useState(readGrammarMasteryCounts);
   const [grammarEntries,       setGrammarEntries]       = useState(readGrammarEntries);
 
@@ -1297,12 +1508,14 @@ export default function App() {
   const handleSectionsChange = useCallback((s) => setAviSections(s), []);
   const [noteTarget,          setNoteTarget]          = useState(null);
   const [grammarTarget,       setGrammarTarget]       = useState(null);
+  // G3c2: a sightings review asked for from the Library; the Grammar Index takes it once.
+  const [sightingsTarget,     setSightingsTarget]     = useState(null);
   const [flashcardStudyTarget, setFlashcardStudyTarget] = useState(null); // ordered cardIds for a manual Grammar Deck session
   const [echoDeckTarget,       setEchoDeckTarget]       = useState(null); // deck id for an Echo setup opened from a deck card (X3)
   const [correctionTarget,        setCorrectionTarget]        = useState(null);
   const [correctionSessionTarget, setCorrectionSessionTarget] = useState(null);
   const [contentSourceTarget, setContentSourceTarget] = useState(null);
-  const { setSyncTarget, seedLastSynced, getSyncBase, commitRefresh } = useFirestoreSync(user?.uid ?? null, setSyncStatus);
+  const { setSyncTarget, seedLastSynced, getSyncBase, commitRefresh } = useFirestoreSync(user?.uid ?? null, setSyncStatus, dropGoneTasks);
 
   // T4: the logical day as state that changes at the day flip (useLogicalDay),
   // so the resync below and InnerApp's "today" follow the new day at once.
@@ -1349,7 +1562,6 @@ export default function App() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
-  const [themeOpen, setThemeOpen] = useState(false);
   const [addOpen,   setAddOpen]   = useState(false);
   const [addCat,    setAddCat]    = useState(null);
   const [editTask,  setEditTask]  = useState(null);
@@ -1360,6 +1572,22 @@ export default function App() {
   const recurTimer = useRef(null);
   const lastVisibilityRefresh = useRef(0);
   const sectionUpdateCallbackRef = useRef(null);
+
+  // Grammar entries for Flashcards (Dispatches, the Grammar Deck picker),
+  // Quizzes and the Grammar Index: loaded here rather than left to the copy
+  // the Grammar Index page saves, which another device might never have.
+  useEffect(() => {
+    const uid = user?.uid;
+    // Demo: not before the sample entries are written (seedReady), so the
+    // first read can't save an empty copy.
+    if (!uid || !seedReady || !GRAMMAR_ENTRY_PAGES.has(page)) return;
+    // Not cancelled on leaving the page: the rows are right whichever page
+    // is showing when they arrive.
+    loadGrammarEntries(uid).then(rows => {
+      setGrammarEntries(rows);
+      setGrammarMasteryCounts(grammarMasteryOf(rows));
+    });
+  }, [user?.uid, page, seedReady]);
 
 // Clear navigation targets when page changes
   useEffect(() => {
@@ -1522,181 +1750,193 @@ export default function App() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2400);
   }, []);
+  // SY-D3: the notice dropGoneTasks shows (defined above, before showToast).
+  useEffect(() => {
+    goneNoticeRef.current = (n) => showToast(n === 1
+      ? 'A task was deleted on another device and has been removed here.'
+      : `${n} tasks were deleted on another device and have been removed here.`);
+  }, [showToast]);
 
 const toggleTask = useCallback((id, occDate, finishEntire) => {
-    updateData(prev => {
-      const task         = prev.tasks.find(t => t.id === id);
-      const taskDatesAll = getTaskDates(task || {});
-      const multiTarget  = taskDatesAll.length > 1 && occDate;
-      const lastOfTask   = taskDatesAll[taskDatesAll.length - 1];
-      // True completion only — day-done checks on earlier dates must never
-      // flip a linked CL section.
-      const nowComplete = !task ? false
-        : multiTarget
-          ? !task.completed && (finishEntire || occDate === lastOfTask)
-          : !task.completed;
+    // Audit SY4: the Library writes that follow a completion, and the push
+    // task's immediate write, start here from the data on screen. They used
+    // to start inside the state updater below; an updater has to be free of
+    // side effects, since React may run one more than once.
+    const cur = dataRef.current;
+    const task         = (cur.tasks || []).find(t => t.id === id);
+    const taskDatesAll = getTaskDates(task || {});
+    const multiTarget  = taskDatesAll.length > 1 && occDate;
+    const lastOfTask   = taskDatesAll[taskDatesAll.length - 1];
+    // True completion only — day-done checks on earlier dates must never
+    // flip a linked CL section.
+    const nowComplete = !task ? false
+      : multiTarget
+        ? !task.completed && (finishEntire || occDate === lastOfTask)
+        : !task.completed;
 
 // If completing a task linked to a section-less CL source (Planner
-      // source-level placement), flip that source to Done.
-      if (nowComplete && task?.linkedSourceId &&
-          !(task?.recurrence && task.recurrence.type !== 'none')) {
-        const uidS = auth.currentUser?.uid;
-        if (uidS) {
-          (async () => {
-            try {
-              const srcRef = doc(db, 'users', uidS, 'content_sources', task.linkedSourceId);
-              const snap   = await getDoc(srcRef);
-              const prevSt = snap.data()?.sourceStatus ?? snap.data()?.watchStatus ?? 'Not started';
-              if (prevSt === 'Done') return;
-              const nowIso  = new Date().toISOString();
-              const updates = { sourceStatus: 'Done', previousStatus: prevSt, lastActivityAt: nowIso };
-              await updateDoc(srcRef, updates);
-              setAviSources(prev => prev.map(s => s.id === task.linkedSourceId ? { ...s, ...updates } : s));
-            } catch (e) { console.error('Source auto-complete failed:', e); }
-          })();
-        }
+    // source-level placement), flip that source to Done.
+    if (nowComplete && task?.linkedSourceId &&
+        !(task?.recurrence && task.recurrence.type !== 'none')) {
+      const uidS = auth.currentUser?.uid;
+      if (uidS) {
+        (async () => {
+          try {
+            const srcRef = doc(db, 'users', uidS, 'content_sources', task.linkedSourceId);
+            const snap   = await getDoc(srcRef);
+            const prevSt = snap.data()?.sourceStatus ?? snap.data()?.watchStatus ?? 'Not started';
+            if (prevSt === 'Done') return;
+            const nowIso  = new Date().toISOString();
+            const updates = { sourceStatus: 'Done', previousStatus: prevSt, lastActivityAt: nowIso };
+            await updateDoc(srcRef, updates);
+            setAviSources(prev => prev.map(s => s.id === task.linkedSourceId ? { ...s, ...updates } : s));
+          } catch (e) { console.error('Source auto-complete failed:', e); }
+        })();
       }
+    }
 
-      // If completing a task linked to a CL section, flip that section to Done.
-      // Skip recurring tasks (they don't represent a one-time section completion).
-      if (nowComplete && task?.linkedSectionId &&
-          !(task?.recurrence && task.recurrence.type !== 'none')) {
-        const uid = auth.currentUser?.uid;
-        if (uid) {
-          (async () => {
-            try {
-              const secRef  = doc(db, 'users', uid, 'content_sections', task.linkedSectionId);
-              const secSnap = await getDoc(secRef);
-              const secData = secSnap.data() || {};
-              if ((secData.status || 'Not started') === 'Done') return;
-              // K6: stamp the source too (and flag it for archive when this
-              // was its last open section), as the Library's own Done does.
-              const live = clLiveRef.current;
-              const { sectionUpdates: updates, sourceId, sourceUpdates } = sectionDoneWrites({
-                section:  { id: task.linkedSectionId, ...secData },
-                sections: live.sections,
-                source:   live.sources.find(s => s.id === secData.resourceId) || null,
-                nowIso:   new Date().toISOString(),
-                logicalToday: getLogicalDateStr(prev.settings?.dayStartHour ?? 3),
-              });
-              await updateDoc(secRef, updates);
-              sectionUpdateCallbackRef.current?.(task.linkedSectionId, updates);
-              if (sourceId && sourceUpdates) {
-                await updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), sourceUpdates);
-                setAviSources(p => p.map(s => s.id === sourceId ? { ...s, ...sourceUpdates } : s));
-              }
-            } catch (e) { console.error('Section auto-complete failed:', e); }
-          })();
-        }
-      }
-
-      const updatedTasks = prev.tasks.map(t => {
-        if (t.id !== id) return t;
-
-        // ── Multi-date tasks (F1): per-date completion semantics ──
-        const tDates = getTaskDates(t);
-        if (tDates.length > 1 && occDate) {
-          const last = tDates[tDates.length - 1];
-          const cd   = t.completedDates || [];
-          if (finishEntire) {
-            // Finish the entire task early from occDate: completes the task
-            // and records only the interacted date.
-            if (t.completed) return t;
-            return {
-              ...t, completed: true, completedAt: new Date().toISOString(),
-              completedDates: cd.includes(occDate) ? cd : [...cd, occDate].sort(),
-            };
-          }
-          if (occDate === last) {
-            // The last date's checkbox is true task completion.
-            if (!t.completed) {
-              return {
-                ...t, completed: true, completedAt: new Date().toISOString(),
-                completedDates: cd.includes(last) ? cd : [...cd, last].sort(),
-              };
+    // If completing a task linked to a CL section, flip that section to Done.
+    // Skip recurring tasks (they don't represent a one-time section completion).
+    if (nowComplete && task?.linkedSectionId &&
+        !(task?.recurrence && task.recurrence.type !== 'none')) {
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        (async () => {
+          try {
+            const secRef  = doc(db, 'users', uid, 'content_sections', task.linkedSectionId);
+            const secSnap = await getDoc(secRef);
+            const secData = secSnap.data() || {};
+            if ((secData.status || 'Not started') === 'Done') return;
+            // K6: stamp the source too (and flag it for archive when this
+            // was its last open section), as the Library's own Done does.
+            const live = clLiveRef.current;
+            const { sectionUpdates: updates, sourceId, sourceUpdates } = sectionDoneWrites({
+              section:  { id: task.linkedSectionId, ...secData },
+              sections: live.sections,
+              source:   live.sources.find(s => s.id === secData.resourceId) || null,
+              nowIso:   new Date().toISOString(),
+              logicalToday: getLogicalDateStr(cur.settings?.dayStartHour ?? 3),
+            });
+            await updateDoc(secRef, updates);
+            sectionUpdateCallbackRef.current?.(task.linkedSectionId, updates);
+            if (sourceId && sourceUpdates) {
+              await updateDoc(doc(db, 'users', uid, 'content_sources', sourceId), sourceUpdates);
+              setAviSources(p => p.map(s => s.id === sourceId ? { ...s, ...sourceUpdates } : s));
             }
-            // Unchecking clears done and removes the last date only; dates
-            // checked earlier keep their entries.
-            return {
-              ...t, completed: false, completedAt: null,
-              completedDates: cd.filter(ds => ds !== last),
-            };
-          }
-          // Earlier date: day-done toggle. Inert while the whole task is
-          // finished — un-finish via the last date's checkbox instead.
+          } catch (e) { console.error('Section auto-complete failed:', e); }
+        })();
+      }
+    }
+
+    const applyToggle = (tasks, settings) => tasks.map(t => {
+      if (t.id !== id) return t;
+
+      // ── Multi-date tasks (F1): per-date completion semantics ──
+      const tDates = getTaskDates(t);
+      if (tDates.length > 1 && occDate) {
+        const last = tDates[tDates.length - 1];
+        const cd   = t.completedDates || [];
+        if (finishEntire) {
+          // Finish the entire task early from occDate: completes the task
+          // and records only the interacted date.
           if (t.completed) return t;
           return {
-            ...t,
-            completedDates: cd.includes(occDate)
-              ? cd.filter(ds => ds !== occDate)
-              : [...cd, occDate].sort(),
+            ...t, completed: true, completedAt: new Date().toISOString(),
+            completedDates: cd.includes(occDate) ? cd : [...cd, occDate].sort(),
           };
         }
-
-        const completing = !t.completed;
-
-        if (t.persistent && completing) {
-          return { ...t, completed: true, completedAt: new Date().toISOString(), activeToday: false };
-        }
-
-        if (completing && t.recurrence && t.recurrence.type !== 'none' && t.date) {
-          const dsh = prev.settings?.dayStartHour ?? 3;
-          const logicalToday = getLogicalToday(dsh);
-          // T7: where the engine will actually move it (counted from the
-          // due date), not today + the interval.
-          const nextDue = nextDueAfterCompletion(t, logicalToday);
+        if (occDate === last) {
+          // The last date's checkbox is true task completion.
+          if (!t.completed) {
+            return {
+              ...t, completed: true, completedAt: new Date().toISOString(),
+              completedDates: cd.includes(last) ? cd : [...cd, last].sort(),
+            };
+          }
+          // Unchecking clears done and removes the last date only; dates
+          // checked earlier keep their entries.
           return {
-            ...t,
-            completed: true,
-            completedAt: new Date().toISOString(),
-            recurrence: { ...t.recurrence, nextDue },
+            ...t, completed: false, completedAt: null,
+            completedDates: cd.filter(ds => ds !== last),
           };
         }
-
-        // ── Unscheduled tasks (dateless, non-recurring): completing files
-        // the task under today's logical date so it leaves Unscheduled,
-        // shows in Today's done list, and survives rollover as a dated
-        // record in the month calendar. Unchecking an auto-dated task
-        // before rollover returns it to Unscheduled (field removed by
-        // omission — the task sync writes whole docs).
-        if (!t.date && completing && (!t.recurrence || t.recurrence.type === 'none')) {
-          const dshU = prev.settings?.dayStartHour ?? 3;
-          return {
-            ...t,
-            completed: true,
-            completedAt: new Date().toISOString(),
-            date: toDateStr(getLogicalToday(dshU)),
-            autoDatedOnComplete: true,
-          };
-        }
-        if (t.autoDatedOnComplete && !completing) {
-          const { autoDatedOnComplete: _adc, ...rest } = t;
-          return { ...rest, completed: false, completedAt: null, date: null };
-        }
-
+        // Earlier date: day-done toggle. Inert while the whole task is
+        // finished — un-finish via the last date's checkbox instead.
+        if (t.completed) return t;
         return {
           ...t,
-          completed: completing,
-          completedAt: completing ? new Date().toISOString() : null,
+          completedDates: cd.includes(occDate)
+            ? cd.filter(ds => ds !== occDate)
+            : [...cd, occDate].sort(),
         };
-      });
-
-      // ── Push tasks: bypass debounce, write to Firestore immediately ──
-      // Guards against lost completions when the tab closes or the network
-      // flickers before the 1500ms debounced sync has a chance to fire.
-      if (task?.push && taskDatesAll.length <= 1 && (!task.recurrence || task.recurrence.type === 'none')) {
-        const uid = auth.currentUser?.uid;
-        if (uid) {
-          const updatedTask = updatedTasks.find(t => t.id === id);
-          if (updatedTask) {
-            setDoc(doc(db, 'users', uid, 'tasks', id), updatedTask)
-              .catch(e => console.warn('AVI: push task immediate write failed', e));
-          }
-        }
       }
 
-      return { ...prev, tasks: updatedTasks };
+      const completing = !t.completed;
+
+      if (t.persistent && completing) {
+        return { ...t, completed: true, completedAt: new Date().toISOString(), activeToday: false };
+      }
+
+      if (completing && t.recurrence && t.recurrence.type !== 'none' && t.date) {
+        const dsh = settings?.dayStartHour ?? 3;
+        const logicalToday = getLogicalToday(dsh);
+        // T7: where the engine will actually move it (counted from the
+        // due date), not today + the interval.
+        const nextDue = nextDueAfterCompletion(t, logicalToday);
+        return {
+          ...t,
+          completed: true,
+          completedAt: new Date().toISOString(),
+          recurrence: { ...t.recurrence, nextDue },
+        };
+      }
+
+      // ── Unscheduled tasks (dateless, non-recurring): completing files
+      // the task under today's logical date so it leaves Unscheduled,
+      // shows in Today's done list, and survives rollover as a dated
+      // record in the month calendar. Unchecking an auto-dated task
+      // before rollover returns it to Unscheduled (the field is left out
+      // here; the task sync deletes a field that is gone from the task).
+      if (!t.date && completing && (!t.recurrence || t.recurrence.type === 'none')) {
+        const dshU = settings?.dayStartHour ?? 3;
+        return {
+          ...t,
+          completed: true,
+          completedAt: new Date().toISOString(),
+          date: toDateStr(getLogicalToday(dshU)),
+          autoDatedOnComplete: true,
+        };
+      }
+      if (t.autoDatedOnComplete && !completing) {
+        const { autoDatedOnComplete: _adc, ...rest } = t;
+        return { ...rest, completed: false, completedAt: null, date: null };
+      }
+
+      return {
+        ...t,
+        completed: completing,
+        completedAt: completing ? new Date().toISOString() : null,
+      };
     });
+
+    // ── Push tasks: bypass debounce, write to Firestore immediately ──
+    // Guards against lost completions when the tab closes or the network
+    // flickers before the 1500ms debounced sync has a chance to fire.
+    if (task?.push && taskDatesAll.length <= 1 && (!task.recurrence || task.recurrence.type === 'none')) {
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        // SY-D4: only the fields the toggle changed, not the whole task. If
+        // the task was deleted on another device nothing is written; the
+        // regular save that follows takes it off the screen.
+        const updatedTask = applyToggle(cur.tasks || [], cur.settings).find(t => t.id === id);
+        if (updatedTask) {
+          firestoreWriteTaskFields(uid, task, updatedTask)
+            .catch(e => console.warn('AVI: push task immediate write failed', e));
+        }
+      }
+    }
+
+    updateData(prev => ({ ...prev, tasks: applyToggle(prev.tasks, prev.settings) }));
   }, [updateData]);
 
   const addTask = useCallback((task) => {
@@ -1793,7 +2033,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
 
     if (!createdTasks.length && !Object.keys(taskPatches).length) return false;
 
-    // Tasks flow through the normal debounced whole-doc sync.
+    // Tasks flow through the normal debounced sync.
     updateData(prev => ({
       ...prev,
       tasks: [
@@ -1881,7 +2121,9 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         if (changed('notes'))    apptSync.results  = updatedTask.notes || '';
         if (changed('category')) apptSync.category = updatedTask.category;
         if (updatedTask.date && changed('date')) apptSync.date = updatedTask.date;
-        if (updatedTask.time != null && changed('time')) apptSync.time = updatedTask.time || '';
+        // A cleared time reaches the appointment too (it used to keep its
+        // old time); with no base, only a time that is set is sent, as before.
+        if (changed('time') && (baseTask || updatedTask.time != null)) apptSync.time = updatedTask.time || '';
         if (fuQueue !== undefined && (!baseTask || fuBase === undefined || !sameValue(fuQueue, fuBase))) {
           // Queue edited from the task modal — legacy single-date fields
           // are nulled so the promotion effect and AppointmentModal read
@@ -1943,7 +2185,7 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         e.preventDefault();
         openAddTask(data.settings?.defaultCategory || 'lang');
       }
-      if (e.key === 'Escape') { setAddOpen(false); setThemeOpen(false); setEditOpen(false); }
+      if (e.key === 'Escape') { setAddOpen(false); setEditOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -2232,9 +2474,36 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
           </button>
         </div>
       )}
+      {newVersion && !newVersionLater && !loadFailed && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9998,
+          background: '#2c2620', color: '#f0e9df', fontSize: 14, textAlign: 'center',
+          padding: 'calc(10px + env(safe-area-inset-top, 0px)) 16px 10px',
+          boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
+        }}>
+          A new version of AutoVocaIndex is ready.
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              marginLeft: 12, padding: '4px 12px', border: '1px solid #c97d3a',
+              borderRadius: 6, background: '#c97d3a', color: '#1a1613', fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            Reload
+          </button>
+          <button
+            onClick={() => setNewVersionLater(true)}
+            style={{
+              marginLeft: 8, padding: '4px 12px', border: '1px solid rgba(240,233,223,0.5)',
+              borderRadius: 6, background: 'transparent', color: '#f0e9df', cursor: 'pointer',
+            }}
+          >
+            Later
+          </button>
+        </div>
+      )}
       <InnerApp
         data={data} page={page} setPage={navigateTo}
-        themeOpen={themeOpen} setThemeOpen={setThemeOpen}
         addOpen={addOpen} setAddOpen={setAddOpen} addCat={addCat}
         editTask={editTask} editOpen={editOpen}
         openEdit={openEdit} closeEdit={closeEdit}
@@ -2251,11 +2520,12 @@ const toggleTask = useCallback((id, occDate, finishEntire) => {
         syncStatus={syncStatus}
         user={user} onSignOut={handleSignOut}
         flashcardDue={flashcardDue}
-        srsSnapshot={srsSnapshot} onPipelineResult={onPipelineResult}
+        srsSnapshot={srsSnapshot} deferralForecast={deferralForecast}
         cards={cards} decks={decks} fcLoading={fcLoading}
         updateCards={updateCards} updateDecks={updateDecks}
         noteTarget={noteTarget} setNoteTarget={setNoteTarget}
         grammarTarget={grammarTarget} setGrammarTarget={setGrammarTarget}
+        sightingsTarget={sightingsTarget} setSightingsTarget={setSightingsTarget}
         grammarMasteryCounts={grammarMasteryCounts}
         onMasteryCounts={setGrammarMasteryCounts}
         getCardNextDueDate={getCardNextDueDate}

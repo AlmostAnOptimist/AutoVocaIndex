@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "lint:gate": "eslint --config eslint.gate.config.js src netlify",
+    "test": "node tests/run-goldens.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

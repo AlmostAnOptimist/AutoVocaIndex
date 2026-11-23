@@ -122,9 +122,15 @@ export function computeReviewStats(reviewLog, dsh = 3) {
 // Applied once per grade alongside the existing reviewLog increment write.
 // `newDayCount` is the logged day's running total *after* this grade
 // (the caller already has this in memory — see FlashcardsPage.handleGrade).
+//
+// "First review of the day" is read from the records themselves (SC-D7), not
+// from the count: a device that hasn't yet heard about reviews done elsewhere
+// today counts from 1 again, and going by the count would add a second day to
+// the streak. It also lets a day whose first grade never reached the records
+// be picked up by the next one.
 export function applyReviewToStats(prevStats, dateStr, newDayCount, dsh = 3) {
   const stats = { ...EMPTY_REVIEW_STATS, ...(prevStats || {}) };
-  const isFirstReviewToday = newDayCount === 1;
+  const isFirstReviewToday = stats.lastReviewDate !== dateStr;
 
   stats.totalAllTime = (stats.totalAllTime || 0) + 1;
   stats.bestDay = maybeUpdateRecord(stats.bestDay, newDayCount, { date: dateStr });

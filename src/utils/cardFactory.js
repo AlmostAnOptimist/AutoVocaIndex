@@ -14,6 +14,27 @@ import { toDateStr, getLogicalToday } from './dateUtils.js';
 import { DEMO, DEMO_CAPS, nonSeededCount } from '../demo/demoConfig.js';
 import { compareHistorySurvivor } from './cardDedupe.js';
 import { seriesSiblingTitles } from './seriesDecks.js';
+import { queueWrite } from './queuedWrite.js';
+import { withCardStamp } from './cardStamp.js';
+
+// ── Writes are queued, not waited for (audit OF2) ─────────────
+// With Firestore's on-device cache a write is kept and sent when there is a
+// connection, but its promise only settles once the server answers. Card
+// and deck creation used to wait on each write, so without signal a new
+// word's card never appeared, and the creation "in flight" below was never
+// released: every later card for that deck waited on it for the rest of the
+// session. Now each write is started and creation carries on; the card and
+// deck are in memory at once. A write the server later refuses is logged.
+//
+// The network wait had a side effect the two guards below relied on: it
+// kept a creation "in flight" for a moment, which covered a second call
+// arriving just after the first from a page still holding its older lists.
+// HOLD_MS keeps that cover without the network: a finished creation stays
+// on record briefly and a repeat call gets the same id.
+const HOLD_MS = 2000;
+function holdThenForget(map, key, creation) {
+  setTimeout(() => { if (map.get(key) === creation) map.delete(key); }, HOLD_MS);
+}
 
 // ── Demo card budget (7C) ─────────────────────────────────────
 // React state lags behind a burst of creations (callers fire factories from
@@ -35,8 +56,9 @@ function demoCardBudgetExhausted(cards) {
 // sentence card factories without awaiting). Each would miss the deck and
 // create a duplicate. This resolver keeps one in-flight creation promise
 // per (uid, deckName): the first miss creates it, and every concurrent
-// caller awaits that same promise. Entries are removed on settle so a deck
-// deleted later in the session is never resurrected from a stale cache.
+// caller awaits that same promise. Entries are removed shortly after they
+// settle (HOLD_MS) so a deck deleted later in the session is never
+// resurrected from a stale cache.
 const deckCreatesInFlight = new Map(); // `${uid}|${deckName}` -> Promise<deckId>
 
 async function resolveDeckId({ uid, deckName, sourceTitle, decks, aviSources, updateDecks }) {
@@ -55,7 +77,7 @@ async function resolveDeckId({ uid, deckName, sourceTitle, decks, aviSources, up
       createdAt:      new Date().toISOString(),
       description:    '',
     };
-    await setDoc(deckRef, newDeckData);
+    queueWrite(() => setDoc(deckRef, newDeckData), 'cardFactory: deck create failed');
     updateDecks(prev =>
       prev.some(d => d.id === deckRef.id)
         ? prev
@@ -66,9 +88,12 @@ async function resolveDeckId({ uid, deckName, sourceTitle, decks, aviSources, up
 
   deckCreatesInFlight.set(key, creation);
   try {
-    return await creation;
-  } finally {
+    const id = await creation;
+    holdThenForget(deckCreatesInFlight, key, creation);
+    return id;
+  } catch (e) {
     deckCreatesInFlight.delete(key);
+    throw e;
   }
 }
 
@@ -78,9 +103,9 @@ async function resolveDeckId({ uid, deckName, sourceTitle, decks, aviSources, up
 // shares one closure-captured cards array, so a persisted-duplicate
 // check alone is missed by every caller in the burst. One in-flight
 // promise per dedupe key makes the first caller create and every
-// concurrent caller await that same creation. Entries are removed on
-// settle so a card deleted later in the session can be legitimately
-// re-created.
+// concurrent caller await that same creation. Entries are removed shortly
+// after they settle (HOLD_MS) so a card deleted later in the session can
+// be legitimately re-created.
 const cardCreatesInFlight = new Map(); // dedupeKey -> Promise<cardId|null>
 
 async function withCardCreateLock(key, create) {
@@ -88,9 +113,13 @@ async function withCardCreateLock(key, create) {
   const creation = create();
   cardCreatesInFlight.set(key, creation);
   try {
-    return await creation;
-  } finally {
+    const id = await creation;
+    if (id) holdThenForget(cardCreatesInFlight, key, creation);
+    else cardCreatesInFlight.delete(key);
+    return id;
+  } catch (e) {
     cardCreatesInFlight.delete(key);
+    throw e;
   }
 }
 
@@ -160,8 +189,8 @@ async function joinCardToDeck({ card, deckName, decks, uid, updateCards, updateD
     uid, deckName, sourceTitle: deckName, decks, aviSources, updateDecks,
   });
   if ((card.deckIds || []).includes(deckId)) return card.id;
-  await updateDoc(doc(db, 'users', uid, 'flashcards', card.id), { deckIds: arrayUnion(deckId) });
-  await updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) });
+  queueWrite(() => updateDoc(doc(db, 'users', uid, 'flashcards', card.id), withCardStamp({ deckIds: arrayUnion(deckId) })), 'cardFactory: adding a deck to a card failed');
+  queueWrite(() => updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) }), 'cardFactory: deck count update failed');
   updateCards(prev => (prev
     ? prev.map(c => (c.id === card.id ? { ...c, deckIds: [...new Set([...(c.deckIds || []), deckId])] } : c))
     : prev));
@@ -212,8 +241,8 @@ async function createWordCardUnchecked({
   };
 
   const cardRef = doc(collection(db, 'users', uid, 'flashcards'));
-  await setDoc(cardRef, cardData);
-  await updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) });
+  queueWrite(() => setDoc(cardRef, withCardStamp(cardData)), 'cardFactory: card create failed');
+  queueWrite(() => updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) }), 'cardFactory: deck count update failed');
 
   updateCards(prev => [...(prev || []), { id: cardRef.id, ...cardData }]);
   updateDecks(prev =>
@@ -326,8 +355,8 @@ async function createSentenceCardUnchecked({
   };
 
   const cardRef = doc(collection(db, 'users', uid, 'flashcards'));
-  await setDoc(cardRef, cardData);
-  await updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) });
+  queueWrite(() => setDoc(cardRef, withCardStamp(cardData)), 'cardFactory: card create failed');
+  queueWrite(() => updateDoc(doc(db, 'users', uid, 'decks', deckId), { totalCards: increment(1) }), 'cardFactory: deck count update failed');
   updateCards(prev => [...(prev || []), { id: cardRef.id, ...cardData }]);
   updateDecks(prev =>
     prev.map(d => d.id === deckId ? { ...d, totalCards: (d.totalCards || 0) + 1 } : d)
