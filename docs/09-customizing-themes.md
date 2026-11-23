@@ -18,7 +18,7 @@ theme id ─→ buildColors(theme) ─→ buildStyles(C) ─→ useAppTheme()
 
 **Persistence.** The active theme id is stored in two places on purpose: localStorage (`avi_theme`) so the very first paint is already in your theme, and the `theme` field of `settings/main` in Firestore so the choice follows you across devices. Boot order: paint from localStorage, then if Firestore settings carry a theme, adopt it and re-mirror to localStorage. Firestore wins. (The fallback default is `ember`; a brand-new account's seeded settings start on `hanok`.)
 
-The theme picker itself (`ThemePanel.jsx`) is fully data-driven — it just maps over the registry, so a new theme appears in it with no picker changes.
+Themes are chosen in **Settings › Appearance** (`components/settings/AppearanceKit.jsx`; General's "Change theme" jumps there, and the phone's More menu has an Appearance entry). The Theme cards switch the theme app-wide; below them, **Preview a theme** flips through every theme without switching, showing each colour token with what it colours and roughly how much of the screen it covers, and a **Readability check** shows how the previewed theme's key colour pairs hold up (body text needs 4.5 : 1; icons, bold labels and large text 3 : 1). The picker maps over the registry, so a new theme appears in it with no picker changes. The token descriptions and the contrast maths live in `theme/themeTokens.js`; the coverage figures are measured data in `theme/themeCoverage.js` (every theme shares one layout, so one measurement serves all of them).
 
 ## The themes
 
@@ -33,7 +33,9 @@ Eight ship, registered in `THEME_DEFS` (`constants.js`):
 | `feather` | Feather | Mustard gold and pearl on near-black |
 | `hanok` | Hanok Dusk | Korean roof-tile grays and ginkgo gold |
 | `bauhaus` | Bauhaus Sun | Cream and poster orange |
-| `blossom` | Blossom Mist | Spring fog, petal rose and moss |
+| `shiner` | Shiner | Bruised plum, banana-peel yellows and browns, sallow gold |
+
+Shiner replaced Blossom Mist. A retired id opens as its successor (`RETIRED_THEMES` / `themeIdOf` in `constants.js`), so a device or account still set to `blossom` shows Shiner rather than falling back to the default. Retire a theme of your own the same way rather than deleting its id outright.
 
 ## Anatomy of a theme
 
@@ -58,6 +60,7 @@ Keep the pairs honest when editing: each `*Soft` should be an `rgba` of its soli
 
 1. Add a branch to `buildColors.js`: copy the closest existing theme (dark themes copy `ember`/`feather`, light ones `clay`/`bauhaus`) and edit tokens.
 2. Register it in `THEME_DEFS` in `constants.js`: `{ id, name, desc, sw }`, where `sw` is four hex swatches shown as the picker's 2×2 preview tile.
+3. Run `node tests/theme-golden.mjs`: it checks that every registered theme builds its own palette with every token, and that the coverage data and token descriptions cover every token. Its first check pins the list of shipped themes (eight, Shiner included), so update that check when you add or retire one. A new *token* (not a new theme) needs a line in `TOKEN_GROUPS` (`themeTokens.js`) and an entry in `themeCoverage.js`, or the test fails.
 
 That's the whole procedure — the panel, persistence, and every styled surface pick it up from there. Spot-check the places that exercise the most tokens: a modal (frame + form styles), the Flashcards session (grade buttons use the status trio), and the Content Library's Gazette front page.
 

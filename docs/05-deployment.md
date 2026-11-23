@@ -24,7 +24,7 @@ Before that first commit, glance at what's being staged: `.env` and any service-
 
 At [app.netlify.com](https://app.netlify.com): **Add new site → Import an existing project → GitHub**, authorize, and pick your repository.
 
-On the configuration screen, the build command, publish directory, and functions directory are all supplied by the shipped `netlify.toml` — leave whatever the importer pre-fills, it will be overridden correctly. The one field the toml does **not** control is the **base directory: it must be empty.** This distinction is worth remembering beyond the first deploy — if you ever re-link the site to a different repository, a stale base directory from the previous link survives the relink and produces baffling build failures, because the toml can't reach it.
+On the configuration screen, the build command, publish directory, and functions directory are all supplied by the shipped `netlify.toml` — leave whatever the importer pre-fills, it will be overridden correctly. (The build command is `npm run lint:gate && npm run build`: a short lint pass that only looks for mistakes that would crash a page, such as a component used without being imported, runs first. If it finds one, the deploy stops with the file and line in the build log and the previous version stays live.) The one field the toml does **not** control is the **base directory: it must be empty.** This distinction is worth remembering beyond the first deploy — if you ever re-link the site to a different repository, a stale base directory from the previous link survives the relink and produces baffling build failures, because the toml can't reach it.
 
 Don't click Deploy yet.
 
@@ -68,7 +68,9 @@ If all three pass, the deployment is done.
 
 ## Step 6 — Phone and domain
 
-The app ships a PWA manifest and icons, so the live site installs to a phone home screen as-is: open it in the phone's browser and use "Add to Home Screen" (Safari's share menu on iOS, Chrome's menu on Android). It launches full-screen like a native app — handy for dropping a word into the index the moment you meet it, with the fuller workflows waiting on your larger screens, all in sync.
+The app ships a PWA manifest and icons, so the live site installs to a phone home screen as-is: open it in the phone's browser and use "Add to Home Screen" (Safari's share menu on iOS, Chrome's menu on Android). It launches full-screen like a native app — handy for dropping a word into the index the moment you meet it, with the fuller workflows waiting on your larger screens, all in sync. On Android the installed app's long-press menu also offers **Reading companion**, which opens the companion page directly (useful for a split-screen pair with your reader app).
+
+A service worker comes with it: after the first online visit, the app opens even without a connection, and changes made offline are saved when the connection returns.
 
 A custom domain is optional and orthogonal: Domain management → Add a domain on Netlify, then remember to add it to Firebase's authorized domains (step 4).
 
@@ -76,8 +78,9 @@ A custom domain is optional and orthogonal: Domain management → Add a domain o
 
 The rhythm from here:
 
-- **Code changes** deploy themselves: push to `main`, Netlify rebuilds. Each deploy is atomic — the site never serves a half-built state — and the Deploys tab keeps history you can instantly roll back to.
+- **Code changes** deploy themselves: push to `main`, Netlify rebuilds. Each deploy is atomic — the site never serves a half-built state — and the Deploys tab keeps history you can instantly roll back to. A device with the app open notices the new build and shows "A new version of AutoVocaIndex is ready" with a Reload button; the next online load picks it up anyway, since the page always comes from the network first. If a deploy is stopped by the lint gate, the build log names the file and line.
+- **Before pushing a change** to any engine, run `npm test` (see `tests/README.md`).
 - **Environment variable changes** need a manual **Trigger deploy** afterward — for the `VITE_*` values because of build-time inlining, and it's the safe habit for the function keys too.
 - **Rules and indexes** are *not* part of the Netlify pipeline. They deploy from your machine with the Firebase CLI, same as setup: `firebase deploy --only firestore --project YOUR-PROJECT-ID`. If you ever modify `firestore.rules`, read the data model guide's rules section first, deploy, and immediately test sign-in plus one read and one write.
 
-That's the whole operational surface: push code, occasionally trigger a rebuild, occasionally deploy rules. For customizing what you've just deployed — themes, another language, new features — the [theming (09)](09-customizing-themes.md), [language-conversion (08)](08-converting-to-another-language.md), and [building-with-AI (07)](07-building-with-ai.md) guides pick up from here.
+That's the whole operational surface: push code, occasionally trigger a rebuild, occasionally deploy rules. (Should you ever need to switch the service worker off everywhere, the comment at the top of `public/sw.js` has the replacement contents: push it and each device removes the worker on its next online load.) For customizing what you've just deployed — themes, another language, new features — the [theming (09)](09-customizing-themes.md), [language-conversion (08)](08-converting-to-another-language.md), and [building-with-AI (07)](07-building-with-ai.md) guides pick up from here.

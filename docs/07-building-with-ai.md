@@ -51,7 +51,9 @@ After each stage: `npm run build` must pass; run `netlify dev` and click through
 npx madge --circular --extensions js,jsx src/
 ```
 
-Two plain-Node test gates ship in `scripts/`, and each must pass before a commit that touches its module: `node scripts/heuristics-golden.mjs` for the lemma heuristics in `aviUtils.js` (`extractLemmaCandidates` and friends), and `node scripts/search-golden.mjs` for `lemmaSearchEngine.js`. Both run with no config, network or writes and exit non-zero on a regression. When changing a rule, have the assistant add the case to the harness first, watch it fail, then make the change.
+Golden tests for the engines ship in `tests/`; run them all with `npm test` (one line per file) before a commit that touches an engine, or one on its own with `node tests/<name>-golden.mjs`. They cover the lemma heuristics and resolver (`heuristics-golden`, `lemma-resolver-golden`), search (`search-golden`), the scheduler and deferrals (`fsrs-golden`, `deferral-outlook-golden`, `srs-pipeline-golden`), sync, card creation, the grammar recogniser and sightings, the service worker and more; `tests/README.md` lists each one and what it guards. They run with no config, network or writes (Firebase is replaced by a stand-in) and exit non-zero on a regression. When changing a rule, have the assistant add the case to the test first, watch it fail, then make the change.
+
+Two of them scan the source rather than run it, and they catch the mistakes an assistant is most likely to make here: `card-stamp-scan-golden` fails on a flashcard write without `withCardStamp`, and `lazy-pages-scan-golden` fails on an ordinary import of a page that is meant to load on demand. Netlify also runs `npm run lint:gate` before every build (crash-class rules only, such as a component used in JSX without an import); run it yourself to see the same result before pushing.
 
 For anything that writes data, verify the write in the Firestore console once — field names, `null` where you expect it, nothing missing that an `undefined` would explain.
 

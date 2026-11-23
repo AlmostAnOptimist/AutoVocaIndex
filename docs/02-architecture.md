@@ -10,7 +10,7 @@ Two companion documents go deeper where this one points: the [data model guide (
 
 AVI is a single-page React 19 application built with Vite, hosted as static files on Netlify. There is no application server: the client talks to Firestore directly through the Firebase SDK (auth via Firebase Authentication, Google sign-in), and four small Netlify serverless functions exist solely to hold API keys and talk to external services (KRDict, Anthropic, Google Cloud TTS) on the client's behalf — each one verifies the caller's Firebase sign-in and an allowlist of uids before doing anything. Everything else — scheduling math, lemma resolution, recurrence, stats — runs in the browser.
 
-A demo-mode configuration exists behind `VITE_DEMO_MODE` / `VITE_DEMO_TIER` flags for the public demo site (including `DemoCapacityScreen`, shown when the demo's free-tier daily quota runs out, and a `?tour` mode used only when recording the video tour, which shows a sample review forecast and hides the demo's links to the video). In your deployment those flags are unset and the demo branches are dead code; you can ignore them entirely.
+A demo-mode configuration exists behind `VITE_DEMO_MODE` / `VITE_DEMO_TIER` flags for the public demo site (including `DemoCapacityScreen`, shown when the demo's free-tier daily quota runs out, and a `?tour` mode used only when recording the video tour, which shows a sample review forecast and deferral notice and hides the demo's links to the video). In your deployment those flags are unset and the demo branches are dead code; you can ignore them entirely.
 
 ## Repository layout
 
@@ -21,42 +21,59 @@ src/
   constants.js       shared vocabularies: categories, recurrence types,
                      appointment types, grammar mastery levels, storage keys
   pages/             one file per screen (TodayPage, AVIPage, FlashcardsPage,
-                     QuizzesPage, ContentLibraryPage, GrammarIndexPage, ...)
-  components/        shared UI — modals, pickers, nav, DatePicker, Icons,
-                     AVILogo, Gazette components, Ornaments (the Art Deco
-                     page ornaments, drawn from theme tokens),
-                     settings/SettingsKit (the tabbed Settings page's parts)
+                     QuizzesPage, ContentLibraryPage, GrammarIndexPage,
+                     ReadingCompanionPage, ...)
+  components/        shared UI — modals, pickers, nav, DatePicker, TimePicker,
+                     Icons, AVILogo, Gazette components, Ornaments (the Art
+                     Deco page ornaments, drawn from theme tokens),
+                     DeferralNotices, GrammarRecognition, GrammarSightings,
+                     LazyPage / ChunkStatus (pages loaded on demand),
+                     avi/Def2Queue (the Lacking Def2 fill queue),
+                     settings/SettingsKit and settings/AppearanceKit (the
+                     tabbed Settings page's parts)
   hooks/             useFirestore, useAVIData, useLemmaSearch, useSearchAssist,
-                     useAppTheme, useDragSort, useLogicalDay,
+                     useAppTheme, useDragSort, useLogicalDay, useNewVersion,
+                     usePillPointer, useSentenceCardCascade,
                      keyboard/pagination helpers
-  utils/             engines and utilities — fsrs, srsEngine, aviUtils,
-                     cardFactory, cardDedupe, def2Cascade, importEngine,
-                     recurrenceEngine, reviewStatsEngine, lemmaSearchEngine,
-                     lemmaSuggest, wordStaging, wordRowUpdater, wordSkip,
-                     aviRowMerge, nuanceCleanup, echoEngine, quizStateEngine,
-                     contentUtils, ttsUtils, taskEdit, apptPromotion,
-                     seriesDecks, strayCards, settingsLayout,
-                     queuedWrite, keyUtils, scrollUtils, dateUtils, ...
-  theme/             buildColors, buildStyles, decoAssets, ThemeContext
+  utils/             engines and utilities — fsrs, srsEngine, deferralOutlook,
+                     aviUtils, analyserLemma, cardFactory, cardDedupe,
+                     cardStamp, cardsMarker, def2Cascade, importEngine,
+                     recurrenceEngine, reviewStatsEngine, reviewStatsGuard,
+                     lemmaSearchEngine, lemmaSuggest, wordStaging,
+                     sentenceStaging, wordLookup, wordRowUpdater, wordSkip,
+                     lackingDef2, aviRowMerge, nuanceCleanup, echoEngine,
+                     quizStateEngine, grammarPatterns, grammarSightings,
+                     grammarCorrections, grammarEntriesStore, koreanAnalyser,
+                     contentUtils, ttsUtils, taskEdit, timeInput,
+                     apptPromotion, seriesDecks, strayCards, settingsLayout,
+                     queuedWrite, pendingFields, chunkLoader, versionCheck,
+                     keyUtils, scrollUtils, dateUtils, ...
+  theme/             buildColors, buildStyles, themeTokens, themeCoverage,
+                     decoAssets, ThemeContext
+  vendor/garu-ko/    the Korean morphological analyser (engine, model,
+                     licences), kept in the repo as it came; not linted
   assets/            decorative art and gazette-plates/library/ — globbed,
                      optional, ships empty (see the theming guide)
 netlify/functions/   the four serverless functions
 netlify/lib/         verifyUser.cjs — the shared sign-in/allowlist check
                      (outside functions/ so it isn't deployed as one)
 public/              favicon.svg (the single-source logo), PWA icons,
-                     manifest
+                     manifest, sw.js (the service worker)
 seed/                globalLemmaMap.json + the Admin SDK import/export scripts
-scripts/             heuristics-golden.mjs, search-golden.mjs — plain-Node
-                     test gates for the lemma heuristics and the search
-                     engine (see the AI guide's Verifying a change);
-                     demo-reaper.cjs — maintenance for the hosted demo;
+tests/               golden tests for the pure engines, run with npm test
+                     (see tests/README.md and the AI guide's Verifying a
+                     change)
+scripts/             demo-reaper.cjs — maintenance for the hosted demo;
                      inert in your deployment (no-ops without its secret);
                      demo-tour/ — records a captioned video walkthrough of
                      the hosted demo (separate package.json; see its README)
 .github/workflows/   the schedule that runs it (same inertness)
 docs/                this documentation
-netlify.toml         build settings and the /api/* redirects
-vite.config.js       Vite build config
+netlify.toml         build settings (lint gate, then build) and the /api/*
+                     redirects
+eslint.gate.config.js  the deploy gate: crash-class lint rules only
+vite.config.js       Vite build config, plus the build id and
+                     asset-manifest.json the service worker reads
 firestore.rules      security rules (see the data model guide)
 ```
 
@@ -70,15 +87,17 @@ The dependency direction is strictly downward:
 pages  →  components  →  hooks  →  utils / theme  →  firebase.js
 ```
 
-**The leaf-module rule.** Leaf modules — utilities, engines, shared components — never import page files. When two pages need the same logic, that logic moves down into a utility host rather than one page importing the other. This is not a style preference: import cycles between page files crash at *runtime* under Vite's bundle initialization (a TDZ error on a blank page) while building cleanly. The rule, the crash, and a real cured instance are documented in the gotchas guide; `contentUtils.js`, `cardFactory.js`, `wordRowUpdater.js`, and `wordStaging.js` (the staging pipeline Word Input shares with the Search tab's Add to Word Input) are the standing precedents. Gate any change to the import graph with:
+**The leaf-module rule.** Leaf modules — utilities, engines, shared components — never import page files. When two pages need the same logic, that logic moves down into a utility host rather than one page importing the other. This is not a style preference: import cycles between page files crash at *runtime* under Vite's bundle initialization (a TDZ error on a blank page) while building cleanly. The rule, the crash, and a real cured instance are documented in the gotchas guide; `contentUtils.js`, `cardFactory.js`, `wordRowUpdater.js`, `wordStaging.js` (the staging pipeline Word Input shares with the Search tab's Add to Word Input and the reading companion) and `sentenceStaging.js` (Sentence Input's add pipeline, shared with the reading companion) are the standing precedents. Gate any change to the import graph with:
 
 ```
 npx madge --circular --extensions js,jsx src/
 ```
 
-**Engines come in two flavors.** Pure engines are plain functions with no React and no Firestore — `fsrs.js` (the FSRS-5 scheduler), `recurrenceEngine.js`, the row builders in `importEngine.js`, `lemmaSearchEngine.js` (resolution and ranking for every lemma search), `echoEngine.js` (Echo Quiz lists, grading and rounds), `quizStateEngine.js` (the Quizzes report) — and are the easiest code in the tree to test, reuse, or port. Pipeline engines orchestrate Firestore alongside their math — `srsEngine.js` (the daily triage/forecast pipeline), `reviewStatsEngine.js` — and sit one layer up. When adding derived logic of your own, prefer the pure flavor and let a caller own the writes.
+**Engines come in two flavors.** Pure engines are plain functions with no React and no Firestore — `fsrs.js` (the FSRS-5 scheduler, triage and deferral marks), `deferralOutlook.js` (the deferral notices), `recurrenceEngine.js`, the row builders in `importEngine.js`, `lemmaSearchEngine.js` (resolution and ranking for every lemma search), `echoEngine.js` (Echo Quiz lists, grading and rounds), `quizStateEngine.js` (the Quizzes report), `grammarPatterns.js` and `grammarSightings.js` (the analyser is passed in) — and are the easiest code in the tree to test, reuse, or port; each has a golden test in `tests/`. Pipeline engines orchestrate Firestore alongside their math — `srsEngine.js` (the daily triage pipeline), `reviewStatsEngine.js` — and sit one layer up. When adding derived logic of your own, prefer the pure flavor and let a caller own the writes.
 
-**One search engine.** Every lemma search — the Search tab, the mini search popup, Connect List, the Lemma Master filter, and the Echo setup's Add a word box — resolves and ranks through `lemmaSearchEngine.js`. The Search tab, the popup and Connect List reach it through the `useLemmaSearch` hook, which also owns the one network step (the global lemma map lookup); the Lemma Master filter and the Echo box call the engine directly. Search behavior therefore changes in one place, and `scripts/search-golden.mjs` gates it.
+**One search engine.** Every lemma search — the Search tab, the mini search popup, Connect List, the Lemma Master filter, and the Echo setup's Add a word box — resolves and ranks through `lemmaSearchEngine.js`. The Search tab, the popup and Connect List reach it through the `useLemmaSearch` hook, which also owns the one network step (the global lemma map lookup); the Lemma Master filter and the Echo box call the engine directly. Search behavior therefore changes in one place, and `tests/search-golden.mjs` gates it.
+
+**The Korean analyser.** `src/vendor/garu-ko` is a morphological analyser that runs in the browser (WebAssembly engine plus a 1.3 MB model). `koreanAnalyser.js` loads it the first time something needs it, never with the first load. Two things use it: grammar sightings (`grammarPatterns.js` reads each Grammar Index title as a sequence of morphemes and finds it in a sentence) and the lemma resolver's second opinion (`analyserLemma.js`, registered by `lemmaSecondOpinion.js`: its dictionary form is offered as one more candidate after the rules' own answer, and ignored if the analyser fails to load). Nothing calls a service.
 
 ## App.jsx is the hub
 
@@ -88,9 +107,11 @@ npx madge --circular --extensions js,jsx src/
 
 **Boot loads and the three data-access styles.** Different collections deliberately use different access patterns, and knowing which is which matters when you modify them:
 
-1. *Load, in-memory authority, debounced diff sync.* Tasks and settings (`useFirestore.js`, 1500 ms debounce) and the AVI input collections plus `lemmaMaster` (`useAVIData.js`, 800 ms) are loaded with `getDocs`, edited as in-memory arrays, and persisted by diffing previous synced state against next — only changed documents are written, with the delete-all guard described in the gotchas guide. Settings are written key by key (`setDoc` with `mergeFields`), so App's copy never writes back keys another screen owns (AVI's `avi*` keys, migration flags). Existing AVI rows are written field by field (`updateDoc` of the changed fields only), new rows whole. Pending changes flush on unmount and when the page is hidden (`visibilitychange` → hidden, `pagehide`), so closing or backgrounding the app right after an edit doesn't lose it. Remote refreshes are *merged* into what's on screen, not swapped in (three-way: on-screen vs Firestore vs what this device last saved — an unsaved local change wins, everything else takes Firestore; `mergeRemoteData` in `useFirestore.js`, `mergeAviRows` in `aviRowMerge.js`). The AVI rows are re-read when AVI opens or the tab returns after they've gone stale (a minute or more in the background, or 15 minutes since the read).
+1. *Load, in-memory authority, debounced diff sync.* Tasks and settings (`useFirestore.js`, 1500 ms debounce) and the AVI input collections plus `lemmaMaster` (`useAVIData.js`, 800 ms) are loaded with `getDocs`, edited as in-memory arrays, and persisted by diffing previous synced state against next — only changed documents are written, with the delete-all guard described in the gotchas guide. Settings are written key by key (`setDoc` with `mergeFields`), so App's copy never writes back keys another screen owns (AVI's `avi*` keys, migration flags). Existing tasks and AVI rows are written field by field (`updateDoc` of the changed fields only), new ones whole; a task deleted on another device meanwhile is dropped rather than recreated. Edits made while the startup load is still on its way are kept on top of the server copy, field by field (`mergeBootEdits`). Pending changes flush on unmount and when the page is hidden (`visibilitychange` → hidden, `pagehide`), so closing or backgrounding the app right after an edit doesn't lose it. Remote refreshes are *merged* into what's on screen, not swapped in (three-way: on-screen vs Firestore vs what this device last saved — an unsaved local change wins, everything else takes Firestore; `mergeRemoteData` in `useFirestore.js`, `mergeAviRows` in `aviRowMerge.js`). The AVI rows are re-read when AVI opens or the tab returns after they've gone stale (a minute or more in the background, or 15 minutes since the read).
 2. *Live listeners.* `content_sources`, `content_sections`, and `appointments` are `onSnapshot` subscriptions in App.jsx — these are the collections that other surfaces (pickers, links, the Gazette) need to see change in real time.
-3. *Direct writes at the interaction site.* Everything else — flashcards, decks, notes, grammar entries, quiz results, review logs — is read at mount where needed and written document-by-document as the user acts. Flashcards and decks specifically live in `useFlashcardData` (defined in App.jsx) and are shared by the Flashcards *and* Quizzes pages so neither duplicates the read. Writes on these paths that the screen would otherwise wait on — grades, quiz results, Echo sessions, note saves, grammar deletes — go through `queueWrite` (`queuedWrite.js`): memory updates first and the write is not awaited, because with the persistent cache an offline write never settles (see the gotchas guide).
+3. *Direct writes at the interaction site.* Everything else — flashcards, decks, notes, grammar entries, quiz results, review logs — is read at mount where needed and written document-by-document as the user acts. Flashcards and decks specifically live in `useFlashcardData` (defined in App.jsx) and are shared by the Flashcards *and* Quizzes pages so neither duplicates the read. Writes on these paths that the screen would otherwise wait on — grades, card and deck creation, quiz results, Echo sessions, note saves, Grammar Index edits, Library status clicks, Add Source — go through `queueWrite` (`queuedWrite.js`): memory updates first and the write is not awaited, because with the persistent cache an offline write never settles (see the gotchas guide). Quick repeated clicks on a Library status button send every click's fields, not only the last (`pendingFields.js`).
+
+**Keeping devices in step without re-reading everything.** Every flashcard write carries a server "changed at" stamp (`updatedAt`, `cardStamp.js`) and moves a marker document (`meta/cards`); other devices watch the marker and read only the cards stamped since they last looked (`cardsMarker.js`), with the once-a-day full read as the fallback. Grammar entries work the same way with a counter (`meta/grammar`, `grammarEntriesStore.js`): a page that shows entries reads the marker and re-reads the entries only when it moved. The data model guide has both shapes.
 
 All Firestore access is direct — there is no data-access layer, a known coupling and explicit non-goal discussed in the gotchas guide. Writes use `setDoc` + `{ merge: true }` or `updateDoc`; `undefined` never reaches a write.
 
@@ -98,15 +119,19 @@ All Firestore access is direct — there is no data-access layer, a known coupli
 
 **Engines and visibility.** The daily pipeline and other periodic engines run from App.jsx effects, gated on `document.visibilityState` and re-checked on `visibilitychange` so a forgotten background tab never writes or burns API quota. The logical day is App state (`useLogicalDay`, which re-checks at each day-start and on returning to the tab): when it flips with the app open, the same resync a tab return runs (refresh, daily card read, pipeline for the new day) runs once, and every page's notion of "today" follows.
 
-**Navigation.** Each page has a hash (`#today`, `#flashcards`, ...). Navigating pushes it, Back and Forward follow it (a `hashchange` listener), and a reload reopens the page it names (`pageFromHash`, built from `NAV_SECTIONS` plus Settings). Page-internal state (the AVI tab, open panels) isn't part of history.
+**Navigation.** Each page has a hash (`#today`, `#flashcards`, ...). Navigating pushes it, Back and Forward follow it (a `hashchange` listener), and a reload reopens the page it names (`pageFromHash`, built from `NAV_SECTIONS` plus Settings and the reading companion). Page-internal state (the AVI tab, open panels) isn't part of history.
 
-**Settings** has one tab per page, grouped like the sidebar (General; Agenda: Agenda and Appointments; Language: Content Library, Flashcards, Quizzes, AutoVocaIndex), plus a search box over every setting. Which setting appears on which tab, and each setting's label and description, live in `settingsLayout.js` (pure, no React); `SettingsPage.jsx` defines each setting's control once, by id, and renders it wherever the layout lists it. A setting more than one page uses (playback speed, the review cap, exchange rates, audio after imports) is listed on each of those tabs, every copy edits the same value, and an "Also on" line jumps to the others. The last tab opened is remembered per device (`avi_settings_tab`). Adding a setting means a `SETTING_META` entry, a place in `SETTINGS_TABS`, and a control in the page's `controls` map.
+**The reading companion** (`#reading`) is a page of its own, without the sidebar, top bar or tab bar, for a split-screen pane or a pop-up window beside a reader app. It is opened from a button in AVI's top bar or the web app manifest's "Reading companion" shortcut (an installed app's long-press menu). Word mode looks a word up automatically after a pause (Lemma Master first, then the dictionary; close Lemma Master matches are offered as "Did you mean", `wordLookup.js`) and stages it with `stageWordInput`; Sentence mode uses the same pills, picker and confirmation steps as Sentence Input (`sentenceStaging.js`). It keeps its own source and section, separate from AVI's, and moving to the next section asks whether to mark the one just read as Done. Its session list is mirrored to `companion/lastSession` for AVI's Recent.
 
-**The Dev Dashboard** (`#dev`, reload to open; not linked from the navigation) holds maintenance tools that run straight against Firestore, grouped with a description each and the date each last ran (`settings/devActionRuns`): AVI Vocabulary (scan, NFC repair, Def2 resync, 동의어 cleanup, cards left behind for skipped or deleted words, source and section re-tag), Flashcards and Reviews (recompute review stats, update card audio), Grammar Index (check, remove dead links) and Gazette (plate aliases). Read-only actions are tagged as such. Its Planning tab is a personal to-do list (`dev/{uid}/todos`).
+**Settings** has one tab per page, grouped like the sidebar (General: General and Appearance; Agenda: Agenda and Appointments; Language: Content Library, Flashcards, Quizzes, AutoVocaIndex), plus a search box over every setting. Which setting appears on which tab, and each setting's label and description, live in `settingsLayout.js` (pure, no React); `SettingsPage.jsx` defines each setting's control once, by id, and renders it wherever the layout lists it. A setting more than one page uses (playback speed, the review cap, exchange rates, audio after imports) is listed on each of those tabs, every copy edits the same value, and an "Also on" line jumps to the others. The last tab opened is remembered per device (`avi_settings_tab`). Adding a setting means a `SETTING_META` entry, a place in `SETTINGS_TABS`, and a control in the page's `controls` map.
+
+**The Dev Dashboard** (`#dev`, reload to open; not linked from the navigation) holds maintenance tools that run straight against Firestore, grouped with a description each and the date each last ran (`settings/devActionRuns`): AVI Vocabulary (scan, NFC repair, Def2 resync, 동의어 cleanup, cards left behind for skipped or deleted words, source and section re-tag), Flashcards and Reviews (recompute review stats, stamp due days, update card audio), Grammar Index (check, remove dead links, Pattern check, switch off common entries) and Gazette (plate aliases). Pattern check (read-only) runs the recogniser over the Grammar Index and the mined sentences and reports whether each title can be read as a pattern, whether each entry is found in its own example lines (the ones that aren't need a hint), and how often each turns up. Read-only actions are tagged as such. Its Planning tab is a personal to-do list (`dev/{uid}/todos`).
 
 **Failed boot loads.** `firestoreLoad` returns `null` for a brand-new account and the string `'error'` when the read fails, and every caller must tell the two apart. The boot load retries silently (after 2, 6, and 15 seconds); if every attempt fails, the app stays in local read-only mode with a banner ("Couldn't reach the server — showing local data. Changes are not being saved.") and a Retry button, and the task sync never starts because `dataLoaded` stays false. The hourly and return-to-tab refreshes simply skip a failed read. A render-time crash during boot is caught by `BootErrorBoundary` in `main.jsx`, which offers a one-tap local reset instead of a blank screen. The reasoning behind both is in the gotchas guide.
 
-**Paint strategy.** First paint comes from localStorage caches (`avi_*` keys), then an unconditional refetch lets Firestore win — the stale-while-revalidate pattern. localStorage is a paint optimization, never a source of truth. Because Firestore's persistent local cache (enabled in `firebase.js`) can answer that refetch itself, flashcards and decks also get one forced server read (`getDocsFromServer`) per logical day per device, at boot or on returning to the tab, stamped in `avi_fc_refresh_{uid}` only after it succeeds. The theme follows the same rule (painted from `avi_theme`, corrected from `settings/main.theme` at boot); only the sound preferences (`avi_sound`, `avi_quiz_sounds`) are localStorage-only.
+**Paint strategy.** First paint comes from localStorage caches (`avi_*` keys), then an unconditional refetch lets Firestore win — the stale-while-revalidate pattern. localStorage is a paint optimization, never a source of truth. Cards are the exception: they have no localStorage copy (at a few thousand cards it filled half the browser's storage and was rewritten on every grade); they are first shown from Firestore's own on-device copy, then refreshed from the server. Because Firestore's persistent local cache (enabled in `firebase.js`) can answer a refetch itself, flashcards and decks also get one forced server read (`getDocsFromServer`) per logical day per device, at boot or on returning to the tab, stamped in `avi_fc_refresh_{uid}` only after it succeeds; between those, the cards marker brings in other devices' changes. The theme follows the same rule (painted from `avi_theme`, corrected from `settings/main.theme` at boot); only the sound preferences (`avi_sound`, `avi_quiz_sounds`) are localStorage-only.
+
+**Offline start and new versions.** A hand-written service worker (`public/sw.js`, registered in production builds only) lets the app open without a connection: the page is fetched from the network first and the saved copy is used only when the network doesn't answer within 3 seconds; hashed files under `/assets/` (scripts, styles, fonts and the analyser's engine and model) are saved on the device after each deploy from the list the build writes (`dist/asset-manifest.json`); Firestore, sign-in, `/api/*` and audio are never touched. Each build carries an id (`__AVI_BUILD_ID__`); when the server's `asset-manifest.json` names a newer one, a banner offers a reload (`versionCheck.js`, `useNewVersion.js`). Quizzes and the Dev Dashboard aren't part of the first load: they load the first time they're opened (`lazyPage` in `LazyPage.jsx`), with a retry if the file can't be fetched. Import them only through `lazyPage`; `tests/lazy-pages-scan-golden.mjs` fails on an ordinary import.
 
 ## Serverless functions and routing
 
@@ -133,7 +158,7 @@ Run `netlify dev`, not `vite dev`. The Netlify CLI wraps the Vite server, serves
 
 ## Theming
 
-Components never hardcode colors or reusable styles. `useAppTheme()` returns `{ C, S }` — the active theme's color tokens and the style objects built from them by `buildColors.js` / `buildStyles.js` — and eight themes ship. The active theme persists in localStorage and in `settings/main` — Firestore wins at boot. The logo is deliberately outside this system: `AVILogo.jsx` renders `public/favicon.svg` with a fixed palette so the in-app mark always matches the favicon and PWA icon (rationale in the gotchas guide). Everything else — theme anatomy, adding a theme, typography, frame generators — lives in the theming guide.
+Components never hardcode colors or reusable styles. `useAppTheme()` returns `{ C, S }` — the active theme's color tokens and the style objects built from them by `buildColors.js` / `buildStyles.js` — and eight themes ship, chosen in Settings › Appearance. The active theme persists in localStorage and in `settings/main` — Firestore wins at boot. The logo is deliberately outside this system: `AVILogo.jsx` renders `public/favicon.svg` with a fixed palette so the in-app mark always matches the favicon and PWA icon (rationale in the gotchas guide). Everything else — theme anatomy, adding a theme, typography, frame generators — lives in the theming guide.
 
 Two layout conventions from the gotchas guide are worth flagging in the map: every fixed-position overlay renders through `createPortal(..., document.body)` (the containing-block trap), and `isMobile` is a module-level constant evaluated once at load, by decision.
 
@@ -143,11 +168,11 @@ The app ships a PWA manifest and icons, so a deployment is installable to a phon
 
 The whole architecture in a single trace. You're reading a novel you've cataloged in the Content Library, and it's set as your current source. You meet 훌륭한 and drop it into Word Input.
 
-1. **Resolve.** `resolveLemmaWithDictionary` (`aviUtils.js`) probes the global lemma map with per-key `getDoc` reads — raw key, normalized key, `+요` variant — through the trust gate. On a trusted hit it returns the mapped lemma; otherwise the de-conjugation heuristics generate candidates, validated against your own `lemmaMaster` headwords first, then against the map, with seed corroboration as a last resort. Import and the Sentence Input picker call the same cascade as `resolveLemmaDetailed`, which also returns the other readings that validate as dictionary words; they appear under the term as one-tap "Or:" chips (훌륭한 has none, but 낮은 offers both 낮 and 낮다). If the lemma matches an existing Lemma Master entry in another spelling (`입사하다` for `입사(하다)`), the row takes that entry's text so it links and inherits its `def2` (`canonicalLemma` in `lemmaSuggest.js`).
+1. **Resolve.** `resolveLemmaWithDictionary` (`aviUtils.js`) probes the global lemma map with per-key `getDoc` reads — raw key, normalized key, `+요` variant — through the trust gate. On a trusted hit it returns the mapped lemma; otherwise the de-conjugation heuristics generate candidates, validated against your own `lemmaMaster` headwords first, then against the map, with seed corroboration as a last resort. Import and the Sentence Input picker call the same cascade as `resolveLemmaDetailed`, which also returns the other readings that validate as dictionary words; they appear under the term as one-tap "Or:" chips (훌륭한 has none, but 낮은 offers both 낮 and 낮다). When the rules' answer isn't confirmed by the map, the Korean analyser's reading of the word (in its sentence, when there is one) is tried as one more candidate. If the lemma matches an existing Lemma Master entry in another spelling (`입사하다` for `입사(하다)`), the row takes that entry's text so it links and inherits its `def2` (`canonicalLemma` in `lemmaSuggest.js`).
 2. **Stage.** A row lands in `wordInputs` — surface form, resolved lemma, and provenance as your current source title and section — via the debounced diff sync.
 3. **Define.** The reference definition arrives through `/api/get-krdict-api` (throttled client-side by the `aviApiRateLimit` setting) into `def1`; you distill your targeted definition into `def2`.
 4. **Correct, maybe.** If the resolution was wrong and you fix the lemma on the row, both loops fire: `writeGlobalLemma` teaches the map (the map loop — next encounter resolves correctly everywhere), and the cascade helpers repair the linked lemma entry and any cards (the master loop). Fixing later in Lemma Master fires only the master loop — the asymmetry is documented in the gotchas guide.
 5. **Card.** Completing `def2` triggers `autoCreateWordCard` (`cardFactory.js`): the lemma is ensured in `lemmaMaster`, the deck is found or created by source title (race-safe), the duplicate guard checks the cards already in memory (one card per word per deck; `cardDedupe.js` holds the shared survivor rule), the flashcard document is written with its `linkedAVILemmaId` back-reference, and TTS generation fires without awaiting through `/api/generate-tts` — the card is usable immediately and `audioUrl` arrives moments later (and lands on the in-memory card too). If the word is later renamed, its cards fetch the new word's audio.
-6. **Study.** The card enters the FSRS lifecycle: the daily pipeline (`srsEngine.js`, cached per logical day in `dailyplan`) counts it when due, each grade rewrites its FSRS fields (due dates count from the logical day, so a 1:30 AM review with a 1-day interval is due the next logical day), and each review increments `reviewLog` and the `reviewStats` aggregate that feed the heatmap and streaks.
+6. **Study.** The card enters the FSRS lifecycle: the daily pipeline (`srsEngine.js`, cached per logical day in `dailyplan`) counts it when due and, on a day with more due than the Daily Review Cap, may defer it if it's among the best known; each grade rewrites its FSRS fields and its due day (due dates count from the logical day, so a 1:30 AM review with a 1-day interval is due the next logical day), stamps it changed for other devices, and increments `reviewLog` and the `reviewStats` aggregate that feed the heatmap and streaks. On the card's front, its context sentences (the mined sentences that use the word) wait behind a Context button and show once the back is revealed.
 
 Every module the trace touched respects the layer diagram: the page called a hook, the hook called utilities, the utilities called Firestore and the functions — and nothing imported upward.

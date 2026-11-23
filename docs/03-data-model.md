@@ -18,17 +18,17 @@ All Firestore access is client-side through the Firebase SDK. The four Netlify f
 |---|---|
 | App-generated `uid()` (`Date.now().toString(36)` + random suffix, from `dateUtils.js`) | `tasks`, `appointments`, `wordInputs`, `sentenceInputs`, `lemmaMaster` |
 | Firestore auto-IDs (`addDoc` / `doc(collection(...))`) | `content_sources`, `content_sections`, `decks`, `flashcards`, `quiz_results`, `echo_sessions`, `notes` |
-| Deterministic / fixed IDs | `settings/main`, `settings/reviewStats`, `grammar_entries/grammar_{n}`, `reviewLog/{YYYY-MM-DD}`, `dailyplan/{YYYY-MM-DD}`, `decks/deck_grammar`, `grammar_corpus/index`, `globalLemmaMap/{derived key}` |
+| Deterministic / fixed IDs | `settings/main`, `settings/reviewStats`, `grammar_entries/grammar_{n}`, `reviewLog/{YYYY-MM-DD}`, `dailyplan/{YYYY-MM-DD}`, `decks/deck_grammar`, `grammar_corpus/index`, `meta/cards`, `meta/grammar`, `companion/lastSession`, `globalLemmaMap/{derived key}` |
 
 For the app-generated group, the ID value is also stored as a field on the document (`uid` on AVI input rows, `lemmaID` on lemma entries, `id` on appointments) and the sync layer keys diffs on that field.
 
-**Timestamps and dates.** Full timestamps are ISO 8601 strings (`new Date().toISOString()`); calendar dates are `'YYYY-MM-DD'` strings. There are no Firestore `Timestamp` objects anywhere in the model — this matters most for `globalLemmaMap.updatedAt`, which the trust gate compares *as a string* (see that section).
+**Timestamps and dates.** Full timestamps are ISO 8601 strings (`new Date().toISOString()`); calendar dates are `'YYYY-MM-DD'` strings. Two fields are the exception and hold Firestore server `Timestamp`s on purpose: a flashcard's `updatedAt` (the "changed at" stamp) and `meta/cards.changedAt`, because other devices compare them against each other and a device clock can't be trusted for that (see `flashcards` and `meta` below). Everywhere else there are no `Timestamp` objects — this matters most for `globalLemmaMap.updatedAt`, which the trust gate compares *as a string* (see that section).
 
 **The logical day.** Every "what day is it for the user" question goes through `getLogicalToday(dsh)` / `getLogicalDateStr(dsh)`, where `dsh` is `settings.dayStartHour` (default 3). Before the day-start hour, it is still "yesterday." `reviewLog` and `dailyplan` document IDs are logical-day dates, so a 1 a.m. review session lands on the previous day's log. The same rule applies to everything derived from a timestamp: FSRS due dates count from the logical day, and AVI's Added Today, heatmap and streaks, the Gazette activity map, quiz charts and ranges, and Echo dates all bucket a stored ISO timestamp by the logical day it falls on (`logicalDateOf(iso, dsh)` in `dateUtils.js`), never by its UTC date (`iso.slice(0, 10)` is a day off for anything stored before 9 a.m. in Korea).
 
 **Batches.** Batched writes flush at 450–490 operations depending on the site (Firestore's hard cap is 500). If you add bulk-write code, stay under 490 and reuse the existing flush pattern.
 
-**Two persistence styles.** Tasks and the AVI input collections use a *debounced diff sync*: the page edits an in-memory array, and a hook (`useFirestore.js` at 1500 ms, `useAVIData.js` at 800 ms) diffs the previous synced state against the next and writes only changed documents — tasks whole, existing AVI rows field by field (`updateDoc` of the changed fields; a removed field is `deleteField()`), `settings/main` key by key. Waiting changes are also written when the page is hidden. A refresh from Firestore is merged into what's on screen rather than replacing it (an edit not yet saved wins; other devices' changes, additions and deletions come in), and a row deleted on another device stays deleted even if it was edited here. Everything else uses direct per-document writes at the interaction site. The diff sync includes a delete-all guard: a pass that would delete every document in a collection of more than five is refused and logged, because a sudden many-to-zero jump is almost always a stale-empty-state bug, not an intentional bulk delete (`useAVIData.syncCollection`).
+**Two persistence styles.** Tasks and the AVI input collections use a *debounced diff sync*: the page edits an in-memory array, and a hook (`useFirestore.js` at 1500 ms, `useAVIData.js` at 800 ms) diffs the previous synced state against the next and writes only changed documents — existing tasks and AVI rows field by field (`updateDoc` of the changed fields; a removed field is `deleteField()`), new ones whole, `settings/main` key by key. Waiting changes are also written when the page is hidden. A refresh from Firestore is merged into what's on screen rather than replacing it (an edit not yet saved wins; other devices' changes, additions and deletions come in), and a row or task deleted on another device stays deleted even if it was edited here. At startup, a task edited on screen before the server copy arrived keeps those edits, field by field, on top of the server copy (`mergeBootEdits`). Everything else uses direct per-document writes at the interaction site. The diff sync includes a delete-all guard: a pass that would delete every document in a collection of more than five is refused and logged, because a sudden many-to-zero jump is almost always a stale-empty-state bug, not an intentional bulk delete (`useAVIData.syncCollection`).
 
 ---
 
@@ -44,7 +44,8 @@ users/{uid}/
   echo_sessions/{auto}
   grammar_entries/{grammar_n}      grammar_corpus/index
   notes/{auto}                     reviewLog/{YYYY-MM-DD}
-  dailyplan/{YYYY-MM-DD}           meta/grammar_cleanup
+  dailyplan/{YYYY-MM-DD}           meta/{cards | grammar | grammar_cleanup}
+  companion/lastSession
   settings/{main | reviewStats | gazetteAdAliases}
 globalLemmaMap/{derived key}
 dev/{uid}/todos/{...}
@@ -62,7 +63,7 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 | `category` | string | `'lang'` is the only category shipped (see `CATEGORIES` in `constants.js`) |
 | `priority` | string | `'high'` \| `'med'` \| `'low'` |
 | `date` | string \| null | `'YYYY-MM-DD'` due date; `null` = unscheduled |
-| `time` | string \| null | `'HH:MM'` |
+| `time` | string \| null | `'HH:MM'`, 24-hour. Typed into a 12-hour field with an AM/PM switch and a picker (`TimePicker.jsx`, parsing in `timeInput.js`): `10:30` reads as AM unless the switch is on PM, a trailing "pm" or a 24-hour hour sets PM, and text that isn't a time holds Save |
 | `recurrence` | object | See below. `{ type: 'none' }` when non-recurring |
 | `dates` | string[] | Only present on multi-date tasks (2+ dates). Mutually exclusive with recurrence |
 | `completedDates` | string[] | Only on multi-date tasks; the subset of `dates` checked off |
@@ -74,8 +75,7 @@ The habit layer's to-do items. Written by the debounced diff sync in `useFiresto
 | `push` | boolean | Push-forward behavior for non-recurring tasks; forced `false` on multi-date tasks |
 | `activeToday`, `activatedOn` | boolean, string \| null | Unscheduled-task activation |
 | `autoDatedOnComplete` | boolean | Set when a dateless, non-recurring task is completed: `date` is filled with that logical day so the task leaves Unscheduled and stays on the month calendar as a done record (struck through on desktop, a faded dot on mobile). Unchecking it clears `date` and returns it to Unscheduled |
-| `source` | string | `'srs_forecast'` on spike-warning tasks created by the daily pipeline. One left unchecked after its day (or left with no date by the 14-day overdue rule) is deleted by the recurrence engine instead of moving to Overdue; a checked-off one stays like any task (`isMissedSpikeTask`) |
-| `srsReconciledDate` | string | Spike tasks only. On the task's own day the pipeline rewrites the card count in its title to the actual day-start total, or completes the task if that total is at or under `srsSpikeCap`; this stamp limits that to once per day so a manual uncheck or rename is never overridden |
+| `source` | string | `'srs_forecast'` on the spike-warning tasks older versions created. None are created any more (the deferral notices replaced them); the recurrence engine deletes any left unchecked, whatever their date, and keeps checked-off ones like any task (`isMissedSpikeTask`). `srsReconciledDate` may still be on old ones; nothing reads it |
 | `created` | string | ISO timestamp |
 | `linkedSectionId` | string | Present on tasks created from a Content Library section |
 | `isAppointmentTask`, `appointmentId`, `apptProvider`, `linkedApptId` | mixed | Present on appointment-linked tasks (reminder tasks and follow-ups) |
@@ -129,6 +129,7 @@ One document per study material (a novel, a drama, a textbook). Firestore auto-I
 | `sectionOrder` | string[] | Optional; section IDs in drag-reorder order. Absent = natural sort |
 | `costs` | array | Same row shape as appointment costs |
 | `linkedNoteIds` | string[] | Notes linked at source level |
+| `sightingsReviewedAt` | string \| null | For a section-less source: when its grammar sightings were last reviewed (ISO). See `content_sections` |
 | `isSourceless` | boolean | Present (`true`) only on the special catch-all "Sourceless" source, created on demand by the source-delete cascade |
 | `pendingArchive`, `pendingArchiveDate` | boolean, string | Set when the source's last open section is finished (every section Done or Skip), wherever it was finished |
 
@@ -152,10 +153,11 @@ Chapters/episodes/units of a source. Firestore auto-ID.
 | `createdAt` | string | |
 | `glossaryTermIds` | string[] | Grammar Index entries noticed in this section (the grammar↔section link lives here, on the section) |
 | `linkedNoteIds` | string[] | Notes linked to this section |
+| `sightingsReviewedAt` | string \| null | When the grammar sightings of this section's mined sentences were last reviewed (ISO; "Save and finish" or "Not now" in the review). A Done section whose sentences were mined after this stamp, or that has none, waits for a review (`grammarSightings.js`) |
 
 ## users/{uid}/wordInputs/{row.uid}
 
-The staging table for word entries — the heart of the Gather step. Synced by the diff layer in `useAVIData.js`, keyed on the row's `uid` field. Rows are constructed identically at every intake site: Word Input and the Search tab's Add to Word Input (both through `stageWordInput` in `wordStaging.js`, which also runs the duplicate guard, the def1 fetch, the Lemma Master entry and the auto card), the Sentence Input word picker in `AVISentenceInputPage.handlePopupDone`, and Import's `buildCommitRows` in `importEngine.js`.
+The staging table for word entries — the heart of the Gather step. Synced by the diff layer in `useAVIData.js`, keyed on the row's `uid` field. Rows are constructed identically at every intake site: Word Input, the Search tab's Add to Word Input and the reading companion's Word mode (all through `stageWordInput` in `wordStaging.js`, which also runs the duplicate guard, the def1 fetch, the Lemma Master entry and the auto card), the sentence word picker in Sentence Input and the reading companion (both through `sentenceStaging.js`), and Import's `buildCommitRows` in `importEngine.js`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -166,7 +168,7 @@ The staging table for word entries — the heart of the Gather step. Synced by t
 | `section` | string | Section **content** string |
 | `lemma` | string | The resolved lemma (editable; correcting it fires the map loop) |
 | `def1` | string | Reference definition (KRDict or AI fetch) |
-| `def2` | string | The user's targeted definition — the one that goes on cards |
+| `def2` | string | The user's targeted definition — the one that goes on cards. A word with no `def2` on any of its rows (skipped rows aside) counts toward "lacking Def2" on Today and AVI, once per word (`lackingDef2.js`) |
 | `uploaded` | boolean | `true` once a flashcard has been created from this row |
 | `skipUpload` | boolean | User opted this row out of card creation. Skip is per word per source: new rows of a word skipped in that source start skipped, skipping a word also skips its sentence rows there, and turning Skip on for a word that already has a card asks whether to remove it |
 | `lastUncheckReason`, `lastUncheckDate` | string | Why/when a row was unchecked from upload; `''` when unused |
@@ -217,7 +219,7 @@ Flashcards link back here via `linkedAVILemmaId` (= `lemmaID`). The cascade help
 | `createdAt` | string | |
 | `totalCards` | number | Maintained with `increment(1)` on card creation |
 | `lastStudied` | string | Written at session end |
-| `paused` | boolean | Paused decks are held out of triage, due counts, and the spike forecast; a card only counts as paused if *every* deck it belongs to is paused |
+| `paused` | boolean | Paused decks are held out of triage, due counts, and the deferral notices; a card only counts as paused if *every* deck it belongs to is paused |
 
 The Grammar deck uses the fixed ID `deck_grammar`. The Flashcards page also presents virtual collections (`all`, `all_words`, `all_sentences`) — these are UI-only deck IDs and are never stored.
 
@@ -245,7 +247,9 @@ Firestore auto-ID. Three card types share one collection, discriminated by `type
 | `linkedAVILemmaId` | string \| null | → `lemmaMaster.lemmaID` |
 | `linkedGrammarEntryId` | string \| null | → grammar entry ID (grammar cards only) |
 | `gapEvents` | array | Grading history events |
-| `triageBucket`, `lastTriageDate` | string \| null | Written by the daily pipeline's overdue triage. A deferral moves only the due date (logical today + about 70% of stability); stability and difficulty are left alone |
+| `triageBucket`, `lastTriageDate` | string \| null | Written by the daily pipeline when it defers the card (`'defer'`, and the logical day it did). Only a day with more reviews due than the Daily Review Cap defers anything, and only enough cards to bring it down to the cap, the ones most likely to be remembered first; each lands on the lightest nearby day. A deferral moves only the due date (`due`, `dueDay`); stability and difficulty are left alone (`planTriage` in `fsrs.js`) |
+| `deferredFor`, `deferredFrom` | string | The deferral mark: `deferredFor` is the `due` the deferral gave the card, `deferredFrom` the day it was due before its first deferral. A card is "deferred" while `deferredFor` equals its `due`, it hasn't been reviewed since, and it isn't due yet (`isDeferred`); those cards make up the backlog the 연기된 카드 round offers. Any later grade replaces `due`, so the mark lapses on its own |
+| `updatedAt` | Timestamp | The "changed at" stamp: a Firestore server timestamp written with every card write (`withCardStamp` in `cardStamp.js`; `tests/card-stamp-scan-golden.mjs` scans the source for a card write without it). Other devices read only the cards stamped after the last change they saw (see `meta/cards`) |
 | `createdAt` | string | |
 | `easeFactor`, `interval`, `repetitions`, `nextDueDate`, `lastGrade`, `lastReviewed` | mixed | **SM-2-shaped creation fields.** Every card is created with these placeholder values (`2.5 / 1 / 0 / today / null / null`); the first grade writes the FSRS fields, which supersede them |
 
@@ -257,8 +261,9 @@ Firestore auto-ID. Three card types share one collection, discriminated by `type
 | `stability` | number | 4-decimal float |
 | `difficulty` | number | 4-decimal float |
 | `due` | string | ISO timestamp; an Again grade writes a due 1 second in the past so the card re-surfaces immediately |
+| `dueDay`, `dueDayFor` | string | The due day as a plain `'YYYY-MM-DD'`, and the exact `due` it was written with. Readers use `dueDay` first, so a card is due on the same day in any time zone; when `dueDayFor` no longer equals `due` (a write from code that doesn't know the field) it is ignored and `due` is read instead. The interval is spread a little toward lighter days within its fuzz range. Cards reviewed before due days existed get theirs from the Dev Dashboard's one-time Stamp due days |
 | `lastReview` | string | ISO timestamp (distinct from the legacy `lastReviewed`) |
-| `reps`, `lapses` | number | |
+| `reps`, `lapses` | number | Every Again press is a lapse, in any state. A known card being relearned loses half its stability with each further Again (never below the floor) rather than starting over |
 
 **Dual-format readers.** Because a card carries only the creation-shape fields until its first grade — and an ungraded card keeps them indefinitely — the due/new helpers accept both formats: `getDueDateStr` reads `due` (FSRS) or `nextDueDate` (legacy), and `isNewCard` treats a card with no `state` field as new only if it also has no `lastGrade`, `lastReviewed`, or `reps`. Presence of `stability` is the "is this an FSRS card" test throughout.
 
@@ -288,11 +293,19 @@ Grammar Index entries. Document ID is `grammar_N`: a new entry takes the first N
 |---|---|---|
 | `glossaryTerm` | string | The pattern name |
 | `compareTo` | string | Similar patterns as a **pipe-separated** string (`A | B | C`) — pipes because commas legitimately occur inside Korean grammar titles |
-| `explanation`, `examples` | string | Free text |
+| `explanation` | string | Free text |
 | `masteryLevel` | string | `introduced` \| `practicing` \| `confident` \| `mastered` |
 | `masteryLevelChangedAt` | string | Stamped only when the level actually changes |
+| `examples` | string | One example per line; at most 6 lines can come from sightings (`MAX_EXAMPLES`) |
+| `exampleSources` | array | `[{ text, source, section }]`: where each example kept from a grammar sighting was mined. Records for lines no longer in `examples` are dropped. Absent until the first sighting is kept |
+| `patternHint` | string | Optional. The pattern written as in a title (`~다가 / ~았/었다가`), used for recognition in place of `glossaryTerm` (Recognition part of the entry panel) |
+| `sightingsOff` | boolean | Three states: absent (sightings collected; nobody has chosen), `true` (switched off, by hand or by the Dev Dashboard's Switch off common entries), `false` (switched on by hand, which that action never overrides) |
 | `entryNumber` | number | |
 | `createdAt` | string | |
+
+**Every write to an entry also moves the entries marker** (`meta/grammar`, below), after the entry write, through `grammarEntriesStore.js` (`bumpGrammarEntriesMarker`, or `addGrammarMarkerBump` inside a batch). A write that skips it goes unseen by other devices until their copy is cleared.
+
+**Grammar sightings.** When a Content Library section (or a section-less source) is marked Done, its mined sentences are run through the pattern recogniser (`grammarPatterns.js`, on the bundled Korean analyser), and each entry of two or more parts that turns up is offered as a sighting: up to 3 candidates per entry at a time, added as an example or replacing one, held until "Save and finish". An entry's own panel also offers every mined sentence that shows it. Entries of one part (a single particle or ending) are off unless switched on; entries seen in more than 3% of the mined sentences can be switched off in one go from the Dev Dashboard.
 
 Creating an entry also creates its linked grammar flashcard in `deck_grammar` (front = `glossaryTerm`, back = `compareTo`). The entry→section link is stored on the *section* (`glossaryTermIds`), and entry→note links are stored on the *note* (`linkedGrammarIds`) — the entry document itself carries no link arrays. Deleting an entry removes its id from every section, source and note that links it (found with `array-contains`, so links made on another device count); the Dev Dashboard's Grammar Index check lists dead links left from before.
 
@@ -306,7 +319,7 @@ Notes, questions, and corrections share this collection, discriminated by shape.
 
 **Regular notes** (questions are notes whose `tags` include `'question'`): `title`, `bodyHtml` (rich text), `tags` (string[]), `answered` (boolean, for questions), `linkedGrammarIds` (string[]), `linkedSourceId` / `linkedSectionId` / `linkedApptId` (string \| null), `createdAt`, `updatedAt`.
 
-**Correction sets** (`type: 'correction'`): `title`, `rows` (array of `{ topic, original, corrected }`), `sourceId` / `sectionId` / `linkedApptId` (string \| null), `locked` (boolean), `createdAt`, `updatedAt`. The grammar quizzes create these directly via `createCorrectionNote.js` with an additional `sourceLabel` field — Translation from its assessment, Selection with one row per incorrect sentence the learner selected.
+**Correction sets** (`type: 'correction'`): `title`, `rows` (array of `{ topic, original, corrected }`), `sourceId` / `sectionId` / `linkedApptId` (string \| null), `locked` (boolean), `linkedGrammarIds` (string[], the Grammar Index entries the set is about: picked by hand or from suggestions, which are entries whose pattern shows in a corrected row and not in its original; `grammarCorrections.js`), `createdAt`, `updatedAt`. The grammar quizzes create these directly via `createCorrectionNote.js` with an additional `sourceLabel` field — Translation from its assessment, Selection with one row per incorrect sentence the learner selected.
 
 ## users/{uid}/reviewLog/{YYYY-MM-DD}
 
@@ -318,7 +331,9 @@ An incrementally maintained aggregate over `reviewLog` so the Flashcards page ne
 
 ## users/{uid}/dailyplan/{YYYY-MM-DD}
 
-The once-per-logical-day SRS pipeline cache (`srsEngine.js`): `{ logicalDate, pipelineOutput: { date, triaged, dueAtDayStart, dueCardIds, spikes, spikeDetected, tomorrowCount, generatedAt }, generatedAt }`. `dueAtDayStart` freezes the day's due total for the Today page, and `dueCardIds` lists those cards so Reviews Left counts only cards from that set that are still due (new-card reviews and paused decks can't skew it). `tomorrowCount` drives the "Tomorrow: N cards due if reviews incomplete" warning. The post-session spike re-run patches only `pipelineOutput.spikes` / `pipelineOutput.spikeDetected` / `pipelineOutput.tomorrowCount` via dot-notation `updateDoc`.
+The once-per-logical-day SRS pipeline cache (`srsEngine.js`): `{ logicalDate, pipelineOutput: { date, triaged, dueAtDayStart, dueCardIds, generatedAt }, generatedAt }`. `triaged` is how many cards the day's run deferred. `dueAtDayStart` freezes the day's due total (after deferrals) for the Today page, and `dueCardIds` lists those cards so Reviews Left counts only cards from that set that are still due (new-card reviews and paused decks can't skew it). Plans saved by older versions may also carry `spikes`, `spikeDetected` and `tomorrowCount`; nothing reads them. Offline on a new day, the plan is worked out from the cards in memory.
+
+**The deferral notices are not stored.** What the cap will defer on each of the next 7 days, cards that will stay over it, and what tomorrow looks like if today's reviews aren't finished are worked out live from the cards in memory (`deferralOutlook.js`), so they are current straight after a grade and the same on every device.
 
 ## users/{uid}/settings/main
 
@@ -330,7 +345,7 @@ The single shared settings document. Two writers merge into it independently: th
 | `dayStartHour` | 3 | The `dsh` behind the logical-day convention |
 | `defaultCategory` | | |
 | `fsrs` | `{}` | `{ desiredRetention (0.9), maximumInterval (1095), graduatingInterval (1), easyInterval (3) }`; each key falls back to `FSRS_DEFAULTS` |
-| `srsSpikeCap` | 80 | The Daily Review Cap (Settings; minimum 10). Forecast days above it are flagged as spikes; also used by the "tomorrow" warning and the spike-task rollover reconcile. Absent means `DAILY_CAP` (80) from `srsEngine.js` |
+| `srsSpikeCap` | 80 | The Daily Review Cap (Settings; minimum 10): the most reviews due in one day. Anything over is deferred, best-known cards first, and the deferral notices warn ahead of time. Absent means `DAILY_CAP` (80) from `srsEngine.js`. (The key keeps its old name so existing settings carry over) |
 | `ttsEnabled`, `ttsSpeed`, `autoTtsOnImport` | | TTS toggles |
 | `anthropicApiKey` | | Legacy and unused. Older versions stored a key here from a Settings field that only unlocked the grammar-quiz button; the field is gone and nothing reads this value. Accounts that set it may still have it |
 | `customApptTypes` | | Extra appointment types; readers accept array or keyed-object-of-arrays |
@@ -348,6 +363,18 @@ The single shared settings document. Two writers merge into it independently: th
 | `aviImportKnownSentences` | `false` | The Import intake toggle for sentence rows of already-known words |
 
 **May not exist on a fresh account** — every reader falls back to defaults, and the AVI extractor returns a full default object when the document is absent.
+
+## users/{uid}/meta/cards and meta/grammar
+
+Two marker documents that let other devices tell, with one small read, whether they need to re-read anything.
+
+`meta/cards` is `{ changedAt (server Timestamp), by }`. A device that changes cards updates it, at most every 30 seconds while changes continue; every device watches it, and when another device moves it, reads only the cards whose `updatedAt` is newer than the newest it has, at most once a minute and never during a review (`cardsMarker.js`). The once-a-day full read of the cards stays as the fallback, since a "changed since" read can't see a deleted card.
+
+`meta/grammar` is `{ n }`, a count of entry changes moved with `increment(1)` after every `grammar_entries` write. Each device keeps its copy of the entries in localStorage (`avi_grammar_entries`) with the `n` it reflects (`avi_grammar_entries_n`), reads the marker, and reads every entry only when the server's `n` is ahead (`grammarEntriesStore.js`). Increments never overwrite each other, so a change made on another device, even offline at the same moment, still moves it. A change made on the Grammar Index page is already in this device's copy and costs it no re-read.
+
+## users/{uid}/companion/lastSession
+
+The reading companion's most recent session list, `{ sessionId, startedAt, updatedAt, entries }`, saved whole on each change so AVI's Recent can show it as "Last session" on any device; a new session's first entry replaces it (`companionSession.js`). Which source and section the companion last used is kept per device in localStorage (`avi_companion_v1`), separate from AVI's own current source.
 
 ## users/{uid}/settings/gazetteAdAliases, settings/devActionRuns and meta/grammar_cleanup
 

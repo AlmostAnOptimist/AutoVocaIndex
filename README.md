@@ -1,6 +1,6 @@
 # AutoVocaIndex
 
-A self-hosted Korean study environment: sentence mining and vocabulary intake with automatic lemma resolution, a lemma search that understands inflected forms, FSRS-scheduled flashcards, vocabulary, cloze, Echo (fold-over) and grammar quizzes, a grammar index, a content library, and language-study task and appointment planning — all wrapped in a newsprint Gazette interface. Built for Korean, and [convertible to another language](docs/08-converting-to-another-language.md).
+A self-hosted Korean study environment: sentence mining and vocabulary intake with automatic lemma resolution (plus a reading companion that sits beside your e-reader in split screen), a lemma search that understands inflected forms, FSRS-scheduled flashcards with a daily review cap, vocabulary, cloze, Echo (fold-over) and grammar quizzes, a grammar index that collects examples from the sentences you mine, a content library, and language-study task and appointment planning — all wrapped in a newsprint Gazette interface, and usable offline once opened. Built for Korean, and [convertible to another language](docs/08-converting-to-another-language.md).
 
 *Version 1.3 — October 2026 (first published July 2026).*
 
@@ -53,4 +53,4 @@ If AutoVocaIndex is useful to you, you can support it on Ko-fi:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The bundled Korean morphological analyser in [`src/vendor/garu-ko`](src/vendor/garu-ko/) is third-party and keeps its own licences (Apache-2.0 for the engine; CC BY-SA 2.0 KR and Apache-2.0 for the dictionary data in its model), included alongside it.

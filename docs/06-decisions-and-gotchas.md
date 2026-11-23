@@ -40,14 +40,15 @@ Where: `useFirestore.firestoreLoad`; the boot load, the hourly run, and the visi
 **A refresh merges; it never replaces.**
 Symptom (prevented): an edit made a second before switching apps comes back undone, on screen and then in Firestore; a definition filled on the phone is reverted by an edit on the laptop; a setting saved by one screen is put back by another.
 Cause: the hourly and return-to-tab refreshes used to swap Firestore's copy in wholesale, dropping edits still waiting in the debounce; the sync baseline wasn't moved after a refresh, so the next diff wrote the old version back; and every save wrote this device's whole document (a stale AVI row, the whole settings doc).
-Rule: three-way merge against the baseline (what this device last saved): a field or task changed here and not yet saved wins, everything else takes Firestore's version, including additions and deletions made elsewhere; then the refresh becomes the new baseline (a save already in flight can't put an older baseline back). Write only what changed: AVI rows field by field, `settings/main` key by key. A row deleted on another device stays deleted even if it was edited here. Waiting edits are flushed when the page is hidden.
+Rule: three-way merge against the baseline (what this device last saved): a field or task changed here and not yet saved wins, everything else takes Firestore's version, including additions and deletions made elsewhere; then the refresh becomes the new baseline (a save already in flight can't put an older baseline back). Write only what changed: tasks and AVI rows field by field, `settings/main` key by key. A row or task deleted on another device stays deleted even if it was edited here. Waiting edits are flushed when the page is hidden. At startup the same applies the other way round: the server copy wins, and only what was changed on screen since the app opened is put back on top of it, field by field (`mergeBootEdits`).
 Where: `mergeRemoteData` / `planRemoteRefresh` / `commitRefresh` in `useFirestore.js`; `mergeAviRows` (`aviRowMerge.js`) and `applyRemote` / `refreshRemote` in `useAVIData.js`; `refreshFromRemote` in `App.jsx`.
 
 **With the persistent cache, an awaited write can hang forever offline.**
 Symptom (prevented): on the subway, grading a card does nothing and the card can't be graded again; a quiz never reaches its results; deleting a grammar entry freezes the panel.
 Cause: Firestore applies the write to the local cache at once and keeps it, but the promise only settles when the server confirms, so code that `await`s it waits until the connection returns.
 Rule: update memory first and queue the write without awaiting it (`queueWrite` in `queuedWrite.js`), reporting a refusal (and handling `not-found` for a doc deleted elsewhere). Make document ids up front with `doc(collection(...))` instead of `addDoc`. Await only where the next step genuinely needs the server (a Grammar Index create, which must confirm its id is free).
-Where: grading in `FlashcardsPage.jsx`, quiz results and Echo sessions in `QuizzesPage.jsx`, `createCorrectionNote.js`, note saves in `NotesPage.jsx`, Grammar Index deletes.
+Where: grading in `FlashcardsPage.jsx`, card and deck creation in `cardFactory.js`, quiz results and Echo sessions in `QuizzesPage.jsx`, `createCorrectionNote.js`, note saves in `NotesPage.jsx`, Grammar Index edits and deletes, Library status clicks and Add Source in `ContentLibraryPage.jsx`.
+Two knock-on rules. A duplicate guard that relied on the network wait to keep a creation "in flight" now holds it for 2 seconds after it finishes instead (`HOLD_MS` in `cardFactory.js`). And quick clicks on one status button are written as one update holding every click's fields, not just the last click's (`pendingFields.js`).
 
 **Absent, `null`, and `[]` are equivalent — and stripping is preferred.**
 Cause: optional array fields (`dates`, `completedDates`, link arrays) accumulated two "no value" representations over time.
@@ -58,13 +59,19 @@ Where: readers throughout; `recurrenceEngine.js` and `EditTaskModal.jsx` demonst
 Symptom (prevented): blank screens while Firestore loads.
 Cause: first paint would otherwise wait on network.
 Rule: paint immediately from a localStorage cache, then unconditionally refetch; Firestore wins. The cache is a paint optimization, never a source of truth.
-Where: task/settings state (`avi_v1` via `storage.js`), quiz results (`avi_quiz_results_{uid}`), Echo sessions (`avi_echo_sessions_{uid}`), theme (`avi_theme`).
+Where: task/settings state (`avi_v1` via `storage.js`), quiz results (`avi_quiz_results_{uid}`), Echo sessions (`avi_echo_sessions_{uid}`), grammar entries (`avi_grammar_entries`), theme (`avi_theme`). Not cards: their localStorage copy was removed (at a few thousand cards it took half the browser's 5 MB and was rewritten on every grade); Firestore's own on-device copy paints them instead.
 
 **An "unconditional refetch" can still be answered from cache.**
 Symptom: a card edited on one device (a new back, a corrected definition) keeps showing its old content on another device all day.
 Cause: the app runs Firestore's persistent local cache (`firebase.js`), so a boot `getDocs` can be served from that cache instead of the server, and a phone resumed from the background never re-runs the boot load at all.
 Rule: once per logical day per device, flashcards and decks are read with `getDocsFromServer`, at boot and again on returning to the tab. The day is stamped (`avi_fc_refresh_{uid}`) only after a successful server read, so an offline attempt retries on the next trigger. Rows merge by content, so unchanged cards keep their object identity and only changed rows re-render.
 Where: `useFlashcardData` and `refreshFlashcardsIfStale` in `App.jsx`. As a repair, the Flashcards Clean up button also resyncs card backs from Lemma Master.
+
+**Every card write carries the changed-at stamp; every grammar entry write moves the marker.**
+Symptom (if violated): a change made on one device doesn't reach another until the next day's full read (cards) or never (grammar entries, until the device's copy is cleared).
+Cause: other devices don't re-read whole collections. They watch a marker document and read only what changed since: cards stamped with a newer `updatedAt` (`cardsMarker.js`), or all entries once `meta/grammar.n` is ahead of their copy (`grammarEntriesStore.js`).
+Rule: wrap every flashcard `setDoc` / `updateDoc` / batch write in `withCardStamp(...)`, and follow every `grammar_entries` write with `bumpGrammarEntriesMarker` (or `addGrammarMarkerBump` in the same batch), issued after the entry write. The stamp is a server timestamp because device clocks can't be compared. `tests/card-stamp-scan-golden.mjs` fails on a card write without the stamp.
+Where: `cardStamp.js`, `cardsMarker.js`, `grammarEntriesStore.js`; the `entryWrite` helper in `GrammarIndexPage.jsx`.
 
 **Local-echo and loading races.** Seven verified instances of the same disease — async work racing in-memory state — each with its shipped cure:
 - *Duplicate source on add:* an `addDoc` plus an optimistic state append can double up. Cure: guard the append — `prev.some(s => s.id === ref.id) ? prev : [...prev, ...]` (`ContentLibraryPage.handleAddSource`).
@@ -110,9 +117,15 @@ Where: `def2Cascade.js`; callers in `AVILemmaMasterPage.jsx`, `AVISentenceInputP
 
 ## Dates and scheduling
 
-**Spike warnings only mean something on their own day** *(decision)*.
-Symptom (prevented): yesterday's "review spike" reminders pile up in Overdue, then drift into Unscheduled after 14 days.
-Rule: a task with `source: 'srs_forecast'` that wasn't checked off by the end of its day, or that the 14-day rule left with no date, is deleted by `runRecurrenceEngine` (`isMissedSpikeTask`). Checked-off ones stay like any finished task, and Always On tasks are never touched.
+**The review cap defers; it doesn't warn after the fact** *(decision)*.
+Rule: the daily pipeline moves cards only on a day with more due than the Daily Review Cap, and only enough of them to bring the day down to it, the ones most likely to be remembered first, each to the lightest day nearby (`planTriage` in `fsrs.js`). Cards too new to defer stay. The notices on Today and Flashcards are worked out live from the cards in memory (`deferralOutlook.js`) rather than saved by the pipeline, so they are right straight after a grade and match the run on the day itself; `tests/deferral-outlook-golden.mjs` checks that match. Deferred cards carry a mark (`deferredFor` / `deferredFrom`) so the optional 연기된 카드 round can offer them before the day's new cards.
+No reminder tasks are created any more. Spike-warning tasks from older versions (`source: 'srs_forecast'`) that weren't checked off are deleted by `runRecurrenceEngine` whatever their date (`isMissedSpikeTask`); checked-off ones stay like any finished task.
+
+**Due dates are days, not instants.**
+Symptom (prevented): after flying a few time zones, cards due "tomorrow" are due today, or a day late.
+Cause: `due` is an ISO timestamp, which reads as a different calendar day in another zone.
+Rule: every grade and deferral also writes `dueDay` (`'YYYY-MM-DD'`) and `dueDayFor` (the `due` it belongs to); readers use `dueDay` while `dueDayFor` still equals `due`. Cards reviewed before this existed get their day from the Dev Dashboard's one-time Stamp due days, which reads their old timestamps in the device's own zone, so run it on a device set to the zone you usually study in.
+Where: `getDueDateStr` and `gradeCard` in `fsrs.js`; `stampDueDays.js`.
 
 **Every "what day is it" goes through the logical day.**
 Symptom: reviews done at 1 a.m. land on the wrong day; streaks break at midnight.
@@ -204,7 +217,21 @@ Some pages are genuinely unwieldy on small screens — an accepted tradeoff, not
 Symptom: a blank page with a TDZ error (`Cannot access 'X' before initialization`) after an apparently clean build.
 Cause: Vite/Rollup's bundle initialization order breaks on import cycles between page files.
 Rule: the leaf-module rule — leaf modules (utilities, engines, shared components) never import page files; shared logic gets extracted to a utility host instead. Gate any import-graph change with `npx madge --circular --extensions js,jsx src/`.
-Where: `contentUtils.js`'s header comment documents a real instance (ContentLibraryPage ↔ Gazette ↔ overview data) and the extraction that cured it; `cardFactory.js` and `wordRowUpdater.js` are further precedents.
+Where: `contentUtils.js`'s header comment documents a real instance (ContentLibraryPage ↔ Gazette ↔ overview data) and the extraction that cured it; `cardFactory.js`, `wordRowUpdater.js` and `sentenceStaging.js` are further precedents.
+
+**Pages loaded on demand must never be imported normally.**
+Symptom (if violated): nothing breaks, but the first load grows by the whole page again.
+Cause: Quizzes and the Dev Dashboard load the first time they're opened (`lazyPage` in `LazyPage.jsx`, `import()` under the hood). A single ordinary `import` of the same file anywhere pulls it back into the main bundle.
+Rule: reach those pages only through their `lazyPage` wrapper in `App.jsx`. `tests/lazy-pages-scan-golden.mjs` fails on an ordinary import.
+
+**Lint can't see a missing JSX import, so the deploy gate looks for one.**
+Symptom (prevented): a page that builds and deploys green crashes the moment it opens, because a component used in JSX was never imported.
+Cause: core `no-undef` doesn't check JSX element names, so neither the build nor the everyday lint notices.
+Rule: Netlify runs `npm run lint:gate` before the build (`eslint.gate.config.js`): crash-class rules only, including a small local rule for JSX names and `react-hooks/rules-of-hooks`. Style findings stay in `npm run lint` and never block a deploy. `src/vendor` is ignored by both configs.
+
+**The service worker can't strand a device on an old version** *(decision)*.
+Rule: the page is always fetched from the network first; the saved copy is used only when the network doesn't answer within 3 seconds or fails. Only hashed `/assets/` files are served from the device, since their names change with their content. Firestore, sign-in, `/api/*` and audio are never touched. Production builds only; in development it would fight live reloading. To remove it everywhere, the header of `public/sw.js` has the replacement to push.
+Where: `public/sw.js` (tested by `tests/service-worker-golden.mjs`), the `assetManifest` plugin in `vite.config.js`.
 
 **The ad-blocker path trap.**
 Symptom: a blank page in dev with a single `ERR_BLOCKED_BY_CLIENT` in the console — while production is fine.
@@ -265,6 +292,15 @@ Cause: Korean grammar pattern titles legitimately contain commas, so comma-delim
 Rule: `grammar_entries.compareTo` stores its list **pipe-separated** (`A | B | C`). Conversely, `lemmaMaster`'s `relatedForm` / `relatedMeaning` / `hiddenRelated` *are* comma-split by their readers — values in those fields must not contain commas. Any new multi-value string field holding Korean text should use the pipe.
 Where: the separator comment atop the compare picker in `GrammarIndexPage.jsx`; the `split(',')` readers in `aviUtils.js`.
 
+**The Korean analyser is vendored and loaded late.**
+Cause: the morphological analyser behind grammar sightings and the lemma resolver's second opinion is a WebAssembly engine plus a 1.3 MB model (`src/vendor/garu-ko`).
+Rule: it's copied into the repo, unchanged, rather than installed from npm, so it can't change underneath the app and the lock file isn't touched; its licence files and notices must stay with it (Apache-2.0 for the engine; the dictionary data in the model keeps CC BY-SA 2.0 KR and Apache-2.0 terms, listed in `MODEL-NOTICE.md`). It loads the first time something needs it, never with the first load, and the service worker saves it with the build so it works offline. If it fails to load, the lemma resolver carries on with its rules alone. Replace it only on purpose, then run `npm test` and the Dev Dashboard's Pattern check and compare.
+Where: `koreanAnalyser.js`, `analyserLemma.js`, `lemmaSecondOpinion.js`, `src/vendor/garu-ko/README.md`.
+
+**Grammar sightings are capped and reviewed, never automatic** *(decision)*.
+Rule: an entry is offered at most 3 candidates at a time, and a kept sighting is an example on the entry, of which 6 at most come from sightings; nothing is written until "Save and finish". Entries of one part (a single particle or ending) collect nothing unless switched on, since they would turn up in nearly every sentence. A section's review waits until the section is marked Done, and the Grammar Index says how many finished sections are waiting.
+Where: `grammarSightings.js`, `GrammarSightings.jsx`.
+
 **Resolution heuristics carry deliberate quirks worth knowing before you touch them.**
 - Candidates are generated from the **raw** surface: inputs typed in the parenthetical lemma convention (`마무리(하다)`) must pass through untouched, and tidying happens inside extraction.
 - Bare contracted forms (더워, 몰라) often exist in the seed only in polite shape, so lookup probes a `+요` variant for corroboration.
@@ -273,6 +309,9 @@ Where: the separator comment atop the compare picker in `GrammarIndexPage.jsx`; 
 - Stacked particles (봄에는, 친구들에게는) are peeled into candidates, never applied blind: nouns ending in a particle-shaped syllable (도로, 사과, 아들) must survive, and the primary heuristic, which is checked first, keeps them whole. Each particle only peels where Korean allows it (이/을/은/과/으로 after a consonant, 가/를/는/와/로 after a vowel).
 - Some shapes are deterministic and rewrite the primary directly: 는 after a consonant-final stem is a verb (넘는 → 넘다), and a ㄹ-final stem before an 으-ending is ㄷ-irregular (걸으러 → 걷다). The copula-이 rules (이나, 이라서, 이라면…) skip vowel-final stems, and when both X and X이 validate (고양 / 고양이 for 고양이나) the resolver prefers X이.
 - Genuinely ambiguous forms (낮은: 낮 or 낮다; 들었어요: 들다 or 듣다) resolve to the likelier reading and offer the other as a one-tap alternate; don't try to settle them with more rules.
+- A surface that is itself a dictionary word keeps itself and offers the verb readings as alternates: 판다 (the animal; 파다 and 팔다 offered), 안다, 멍하니 (the adverb; 멍하다 offered). The plain statement of a verb (해석한다, 먹는다) still resolves to the verb, since no such word exists.
+- A verb ending in 이다 beats the noun inside it, while a noun + the copula gives the noun (비명이다, 출신이었어 → 비명, 출신). Quote marks and closing punctuation are tidied off before any rule, not left to break them.
+- An ending peeler covers the less common connective and sentence endings (느라, 더라, 군, (으)려다(가), 수록 and others) after the table rules; adverbs that happen to end the same way are listed so they survive. When the rules' answer isn't confirmed by the map, the analyser's reading is tried as one more candidate, never as the first.
 - Lemmas in the `(주먹을) 날리다` shape (a leading Hangul parenthetical) are distinct entries from `날리다`, and search keeps them apart: no matching rule ever drops a leading parenthetical, while optional endings (`입사(하다)`) and slash forms (`보장하다 / 보장되다`) count as headword variants of their entry. In quizzes, typing the collocation without parentheses (`주먹을 날리다`) earns full credit.
 - Auto-added synonym/nuance rows use the reserved source title `동의어` (`NUANCE_SOURCE_TITLE` in `aviUtils.js`; the older title `동의어/유의어`, `LEGACY_NUANCE_SOURCE_TITLE`, is still recognized, and rows are added under whichever title the list already uses). Don't create a real source with either name. A word stays in that source only while it has a synonym that still exists; when it loses its last one, its row and its card in that deck go.
 - Import treats a leading bare number ("3 ") as a list marker only when two lines open with consecutive numbers; "3 년 전에…" keeps its number. "1.", "1)", "(1)" and circled digits are always stripped.
